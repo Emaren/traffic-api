@@ -91,6 +91,22 @@ SUSPICIOUS_PATH_SNIPPETS = [
     ".directadmin",
     ".cpanel",
     ".plesk",
+    "/wp-content/plugins/",
+    "wp_filemanager.php",
+    "/vendor/phpunit/",
+    "/server-status",
+    "/hnap1",
+]
+
+SUSPICIOUS_PATH_REGEXES = [
+    re.compile(r"/wp-content/plugins/.+\.php(?:$|\?)", re.IGNORECASE),
+    re.compile(r"/wp-admin(?:/|$)", re.IGNORECASE),
+    re.compile(r"/wp-login\.php(?:$|\?)", re.IGNORECASE),
+    re.compile(r"/xmlrpc\.php(?:$|\?)", re.IGNORECASE),
+    re.compile(r"/phpmyadmin(?:/|$)", re.IGNORECASE),
+    re.compile(r"/boaform/", re.IGNORECASE),
+    re.compile(r"/cgi-bin/", re.IGNORECASE),
+    re.compile(r"/vendor/phpunit/", re.IGNORECASE),
 ]
 
 ASSET_EXTENSIONS = (
@@ -132,8 +148,6 @@ API_ROUTE_PREFIXES = (
 
 UNKNOWN_HOST = "(unknown host)"
 UNKNOWN_REFERRER = "(direct)"
-REQUEST_CATEGORIES = ("human", "bot", "suspicious", "unknown")
-ROUTE_KINDS = ("page", "api", "probe", "asset", "unknown")
 
 PROJECTS = [
     {
@@ -207,6 +221,7 @@ DEV_GEO_OVERRIDES = {
 
 _GEOIP_READER: Any | None = None
 _GEOIP_READER_PATH: Path | None = None
+_GEO_LOOKUP_CACHE: dict[str, dict[str, str]] = {}
 
 
 def safe_int(value: Any, default: int = 0) -> int:
@@ -281,7 +296,7 @@ def normalize_referrer(referrer: str | None) -> str:
         parsed = urlparse(referrer)
         return normalize_host(parsed.netloc or referrer)
     except Exception:
-        return referrer
+        return normalize_host(referrer)
 
 
 def should_ignore_entry(entry: dict[str, Any]) -> bool:
@@ -380,7 +395,9 @@ def parse_log_line(line: str) -> dict[str, Any] | None:
 
 def is_suspicious_path(path: str | None) -> bool:
     lowered = (path or "").lower()
-    return any(snippet in lowered for snippet in SUSPICIOUS_PATH_SNIPPETS)
+    if any(snippet in lowered for snippet in SUSPICIOUS_PATH_SNIPPETS):
+        return True
+    return any(pattern.search(lowered) for pattern in SUSPICIOUS_PATH_REGEXES)
 
 
 def detect_route_kind(path: str | None) -> str:
@@ -478,24 +495,6 @@ def ordered_unique(values: list[str]) -> list[str]:
     return output
 
 
-def humanize_duration(seconds: int) -> str:
-    seconds = max(safe_int(seconds), 0)
-
-    if seconds < 60:
-        return f"{seconds}s"
-
-    minutes, rem = divmod(seconds, 60)
-    if minutes < 60:
-        return f"{minutes}m {rem}s"
-
-    hours, rem_minutes = divmod(minutes, 60)
-    return f"{hours}h {rem_minutes}m"
-
-
-def counter_rows(counter: Counter, limit: int = TOP_LIMIT) -> list[dict[str, Any]]:
-    return [{"label": label, "count": count} for label, count in counter.most_common(limit)]
-
-
 def get_geo_reader() -> Any | None:
     global _GEOIP_READER, _GEOIP_READER_PATH
 
@@ -525,7 +524,11 @@ def get_geo_reader() -> Any | None:
 
 
 def get_geo_details(ip: str) -> dict[str, str]:
+    if ip in _GEO_LOOKUP_CACHE:
+        return _GEO_LOOKUP_CACHE[ip]
+
     if ip in DEV_GEO_OVERRIDES:
+        _GEO_LOOKUP_CACHE[ip] = DEV_GEO_OVERRIDES[ip]
         return DEV_GEO_OVERRIDES[ip]
 
     reader = get_geo_reader()
@@ -551,11 +554,13 @@ def get_geo_details(ip: str) -> dict[str, str]:
 
             city = response.city.name or ""
 
-            return {
+            result = {
                 "country": country,
                 "area": area,
                 "city": city,
             }
+            _GEO_LOOKUP_CACHE[ip] = result
+            return result
         except AddressNotFoundError:
             pass
         except ValueError:
@@ -563,7 +568,9 @@ def get_geo_details(ip: str) -> dict[str, str]:
         except Exception:
             pass
 
-    return {"country": "??", "area": "", "city": ""}
+    result = {"country": "??", "area": "", "city": ""}
+    _GEO_LOOKUP_CACHE[ip] = result
+    return result
 
 
 def project_for_host(host: str) -> dict[str, Any]:
@@ -576,6 +583,19 @@ def project_for_host(host: str) -> dict[str, Any]:
                 return project
 
     return {"slug": "unknown", "name": "Unknown", "category": "unknown", "hosts": []}
+
+
+def is_internal_referrer(host: str, referrer_host: str) -> bool:
+    if referrer_host in {UNKNOWN_REFERRER, "", UNKNOWN_HOST}:
+        return False
+
+    normalized_host = normalize_host(host)
+    normalized_referrer = normalize_host(referrer_host)
+
+    if normalized_host == normalized_referrer:
+        return True
+
+    return project_for_host(normalized_host)["slug"] == project_for_host(normalized_referrer)["slug"]
 
 
 def detect_source_medium_campaign(entry: dict[str, Any]) -> tuple[str, str, str]:
@@ -593,18 +613,93 @@ def detect_source_medium_campaign(entry: dict[str, Any]) -> tuple[str, str, str]
         campaign = query.get("utm_campaign", [""])[0]
         return source, medium, campaign
 
+    host = entry.get("host") or UNKNOWN_HOST
     referrer = entry.get("referrer_host") or UNKNOWN_REFERRER
 
     if referrer in {UNKNOWN_REFERRER, "", UNKNOWN_HOST}:
         return "direct", "unknown", ""
+
+    if is_internal_referrer(host, referrer):
+        return "internal", "navigation", ""
+
     if "google." in referrer:
         return "google", "organic", ""
+    if "bing." in referrer:
+        return "bing", "organic", ""
     if "x.com" in referrer or "twitter.com" in referrer:
         return "x", "social", ""
+    if "facebook." in referrer:
+        return "facebook", "social", ""
     if "mail" in referrer:
         return "email", "campaign", ""
 
     return referrer, "referral", ""
+
+
+def compute_quality_score(
+    *,
+    primary_category: str,
+    route_kind: str,
+    page_count: int,
+    event_count: int,
+    total_seconds: int,
+    engaged_seconds: int,
+    suspicious_score: int,
+    source: str,
+    medium: str,
+) -> int:
+    score = 0
+
+    if primary_category == "human":
+        score += 35
+    elif primary_category == "unknown":
+        score += 8
+    elif primary_category == "bot":
+        score -= 18
+    else:
+        score -= 35
+
+    if route_kind == "page":
+        score += 28
+    elif route_kind == "api":
+        score += 6
+    elif route_kind == "probe":
+        score -= 40
+    elif route_kind == "asset":
+        score -= 25
+
+    score += min(page_count * 4, 20)
+    score += min(event_count * 2, 18)
+    score += min(engaged_seconds // 30, 18)
+    score += min(total_seconds // 60, 12)
+
+    if source in {"google", "bing", "x", "facebook"}:
+        score += 6
+    elif medium in {"organic", "referral", "campaign", "email", "social"} and source not in {"direct", "internal"}:
+        score += 4
+
+    if source == "internal":
+        score -= 8
+
+    if page_count <= 1 and event_count <= 1 and engaged_seconds == 0:
+        score -= 50
+
+    if suspicious_score >= 40:
+        score -= 35
+    elif suspicious_score > 0:
+        score -= 10
+
+    return max(0, min(100, score))
+
+
+def quality_label_for_score(score: int) -> str:
+    if score >= 80:
+        return "strong"
+    if score >= 55:
+        return "good"
+    if score >= 30:
+        return "thin"
+    return "weak"
 
 
 def build_single_session(events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -645,6 +740,18 @@ def build_single_session(events: list[dict[str, Any]]) -> dict[str, Any]:
     primary_category = category_counter.most_common(1)[0][0] if category_counter else "unknown"
     route_kind = route_counter.most_common(1)[0][0] if route_counter else detect_route_kind(first["normalized_path"])
 
+    quality_score = compute_quality_score(
+        primary_category=primary_category,
+        route_kind=route_kind,
+        page_count=len(ordered_paths),
+        event_count=len(events),
+        total_seconds=total_seconds,
+        engaged_seconds=engaged_seconds,
+        suspicious_score=suspicious_score,
+        source=source,
+        medium=medium,
+    )
+
     return {
         "session_id": f"{first['host']}|{first['ip']}|{first['timestamp_iso']}",
         "project_slug": project["slug"],
@@ -671,6 +778,8 @@ def build_single_session(events: list[dict[str, Any]]) -> dict[str, Any]:
         "suspicious_score": suspicious_score,
         "primary_category": primary_category,
         "route_kind": route_kind,
+        "quality_score": quality_score,
+        "quality_label": quality_label_for_score(quality_score),
     }
 
 
@@ -775,27 +884,36 @@ def build_path_stats(recent_entries: list[dict[str, Any]]) -> list[dict[str, Any
     return output
 
 
-def session_sort_key(session: dict[str, Any]) -> tuple[int, int, float]:
-    category_rank = {
-        "human": 0,
-        "unknown": 1,
-        "bot": 2,
-        "suspicious": 3,
-    }
-    route_rank = {
-        "page": 0,
-        "api": 1,
-        "probe": 2,
-        "asset": 3,
-        "unknown": 4,
-    }
+def session_bucket(session: dict[str, Any]) -> int:
+    primary_category = session.get("primary_category", "unknown")
+    route_kind = session.get("route_kind", "unknown")
+    quality_score = safe_int(session.get("quality_score"), 0)
 
+    if primary_category == "human" and route_kind == "page" and quality_score >= 55:
+        return 0
+    if primary_category == "human" and route_kind == "page":
+        return 1
+    if primary_category == "human" and route_kind == "api":
+        return 2
+    if primary_category == "unknown" and route_kind == "page":
+        return 3
+    if route_kind == "probe":
+        return 6
+    if primary_category == "bot":
+        return 5
+    return 4
+
+
+def session_sort_key(session: dict[str, Any]) -> tuple[int, int, float]:
     parsed = parse_iso_timestamp(session.get("ended_at"))
     ts = parsed.timestamp() if parsed else 0.0
+    quality_score = safe_int(session.get("quality_score"), 0)
+    suspicious_score = safe_int(session.get("suspicious_score"), 0)
 
     return (
-        category_rank.get(session.get("primary_category", "unknown"), 9),
-        route_rank.get(session.get("route_kind", "unknown"), 9),
+        session_bucket(session),
+        -quality_score,
+        suspicious_score,
         -ts,
     )
 
@@ -1049,6 +1167,7 @@ def build_overview() -> dict[str, Any]:
         notes.append(f"GeoIP DB missing: {GEOIP_DB_PATH}")
 
     notes.append("Route classification is live: page, api, probe, asset.")
+    notes.append("Quality mode is live: exploit probes, internal referrers, session quality scoring.")
 
     return {
         "ok": True,
