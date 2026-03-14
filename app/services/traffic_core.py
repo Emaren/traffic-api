@@ -196,6 +196,43 @@ PROJECTS = [
 
 PROJECT_INDEX = {host: project for project in PROJECTS for host in project["hosts"]}
 
+DEFAULT_ALLOWED_HOSTS = (
+    "traffic.tokentap.ca",
+    "tokentap.ca",
+    "www.tokentap.ca",
+    "aoe2hdbets.com",
+    "www.aoe2hdbets.com",
+    "wheatandstone.ca",
+    "www.wheatandstone.ca",
+    "vps-sentry.tokentap.ca",
+    "pulse.tokentap.ca",
+    "tmail.tokentap.ca",
+)
+
+
+def parse_csv_env(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+
+    values = []
+    for item in raw.split(","):
+        value = normalize_host(item.strip())
+        if value and value != UNKNOWN_HOST:
+            values.append(value)
+
+    return tuple(values) if values else default
+
+
+ALLOWED_HOSTS = set(parse_csv_env("TRAFFIC_ALLOWED_HOSTS", DEFAULT_ALLOWED_HOSTS))
+
+
+def is_allowed_host(host: str | None) -> bool:
+    normalized = normalize_host(host)
+    if normalized == UNKNOWN_HOST:
+        return False
+    return normalized in ALLOWED_HOSTS
+
 CANONICAL_HOST_MAP = {
     "www.aoe2hdbets.com": "aoe2hdbets.com",
     "www.tokentap.ca": "tokentap.ca",
@@ -574,12 +611,14 @@ def get_geo_details(ip: str) -> dict[str, str]:
 
 
 def project_for_host(host: str) -> dict[str, Any]:
-    if host in PROJECT_INDEX:
-        return PROJECT_INDEX[host]
+    normalized = normalize_host(host)
+
+    if normalized in PROJECT_INDEX:
+        return PROJECT_INDEX[normalized]
 
     for project in PROJECTS:
         for known_host in project["hosts"]:
-            if host == known_host or host.endswith("." + known_host):
+            if normalized == known_host or normalized.endswith("." + known_host):
                 return project
 
     return {"slug": "unknown", "name": "Unknown", "category": "unknown", "hosts": []}
@@ -959,10 +998,10 @@ def build_overview() -> dict[str, Any]:
         if not parsed:
             continue
 
-        if parsed["timestamp"] < day_ago:
+        if not is_allowed_host(parsed["host"]):
             continue
 
-        if should_ignore_entry(parsed):
+        if parsed["timestamp"] < day_ago:
             continue
 
         category = classify_request(parsed["ua"], parsed["normalized_path"])
@@ -1159,6 +1198,7 @@ def build_overview() -> dict[str, Any]:
         "Phase 2 donor parser is live.",
         "This view is now built from log lines, not seeded demo data.",
         f"Current source log: {LOG_PATH}",
+        f"Host allowlist live: {len(ALLOWED_HOSTS)} approved hosts.",
     ]
 
     if GEOIP_DB_PATH.exists():
