@@ -35,6 +35,7 @@ BOT_TERMS = [
     "duckduckbot",
     "facebookexternalhit",
     "slurp",
+    "twitterbot",
 ]
 
 SUSPICIOUS_UA_TERMS = [
@@ -135,6 +136,18 @@ PROJECTS = [
 
 PROJECT_INDEX = {host: project for project in PROJECTS for host in project["hosts"]}
 
+CANONICAL_HOST_MAP = {
+    "www.aoe2hdbets.com": "aoe2hdbets.com",
+    "www.tokentap.ca": "tokentap.ca",
+    "www.wheatandstone.ca": "wheatandstone.ca",
+}
+
+INTERNAL_IGNORE_PATHS = {
+    "/api/status",
+    "/api/readyz",
+    "/healthz",
+}
+
 DEV_GEO_OVERRIDES = {
     "216.127.43.12": {"country": "Canada", "area": "Alberta", "city": "Grande Prairie"},
     "216.127.43.99": {"country": "Canada", "area": "Alberta", "city": "Grande Prairie"},
@@ -196,6 +209,7 @@ def normalize_host(value: str | None) -> str:
     elif host.endswith(":443"):
         host = host[:-4]
 
+    host = CANONICAL_HOST_MAP.get(host, host)
     return host or UNKNOWN_HOST
 
 
@@ -219,6 +233,23 @@ def normalize_referrer(referrer: str | None) -> str:
         return normalize_host(parsed.netloc or referrer)
     except Exception:
         return referrer
+
+
+def should_ignore_entry(entry: dict[str, Any]) -> bool:
+    host = entry["host"]
+    path = entry["normalized_path"]
+    ip = entry["ip"]
+    ua = (entry["ua"] or "").lower()
+
+    if path in INTERNAL_IGNORE_PATHS:
+        if host == "vps-sentry.tokentap.ca":
+            return True
+        if ip in {"127.0.0.1", "::1", "157.180.114.124"}:
+            return True
+        if "node" in ua:
+            return True
+
+    return False
 
 
 def read_recent_log_lines(path: Path, tail_lines: int) -> list[str]:
@@ -332,14 +363,14 @@ def detect_device_type(ua: str | None) -> str:
 def detect_os(ua: str | None) -> str:
     lowered = (ua or "").lower()
 
-    if "windows" in lowered:
-        return "Windows"
-    if "mac os x" in lowered or "macintosh" in lowered:
-        return "macOS"
     if "iphone" in lowered or "ipad" in lowered or "ios" in lowered:
         return "iOS"
     if "android" in lowered:
         return "Android"
+    if "windows" in lowered:
+        return "Windows"
+    if "mac os x" in lowered or "macintosh" in lowered:
+        return "macOS"
     if "linux" in lowered:
         return "Linux"
     return "Unknown"
@@ -362,6 +393,8 @@ def detect_browser(ua: str | None) -> str:
         return "wget"
     if "googlebot" in lowered:
         return "Googlebot"
+    if "twitterbot" in lowered:
+        return "Twitterbot"
     return "Unknown"
 
 
@@ -635,8 +668,7 @@ def build_path_stats(sessions: list[dict[str, Any]], recent_entries: list[dict[s
 
 
 def build_overview() -> dict[str, Any]:
-    now = datetime.now(timezone.utc)
-    day_ago = now - timedelta(hours=24)
+    day_ago = datetime.now(timezone.utc) - timedelta(hours=24)
     lines = read_recent_log_lines(LOG_PATH, TAIL_LINES)
 
     recent_entries = []
@@ -657,8 +689,8 @@ def build_overview() -> dict[str, Any]:
     city_sessions = Counter()
     suspicious_path_counter = Counter()
     top_ip_counter = Counter()
-    top_ip_category = {}
-    top_ip_last_seen = {}
+    top_ip_category: dict[str, str] = {}
+    top_ip_last_seen: dict[str, str] = {}
 
     total_requests = 0
 
@@ -677,6 +709,9 @@ def build_overview() -> dict[str, Any]:
             continue
 
         if parsed["timestamp"] < day_ago:
+            continue
+
+        if should_ignore_entry(parsed):
             continue
 
         category = classify_request(parsed["ua"], parsed["normalized_path"])
@@ -757,8 +792,16 @@ def build_overview() -> dict[str, Any]:
     hosts = []
 
     for host, request_count in host_request_counter.most_common(TOP_LIMIT):
-        entry_candidates = [(path, count) for (known_host, path), count in host_top_entry.items() if known_host == host]
-        exit_candidates = [(path, count) for (known_host, path), count in host_top_exit.items() if known_host == host]
+        entry_candidates = [
+            (path, count)
+            for (known_host, path), count in host_top_entry.items()
+            if known_host == host
+        ]
+        exit_candidates = [
+            (path, count)
+            for (known_host, path), count in host_top_exit.items()
+            if known_host == host
+        ]
 
         top_entry_page = max(entry_candidates, key=lambda item: item[1])[0] if entry_candidates else "/"
         top_exit_page = max(exit_candidates, key=lambda item: item[1])[0] if exit_candidates else "/"
