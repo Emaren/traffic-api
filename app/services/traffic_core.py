@@ -9,7 +9,15 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse, urlsplit
 
+try:
+    from geoip2.database import Reader as GeoIPReader
+    from geoip2.errors import AddressNotFoundError
+except Exception:  # pragma: no cover
+    GeoIPReader = None  # type: ignore[assignment]
+    AddressNotFoundError = Exception  # type: ignore[assignment]
+
 LOG_PATH = Path(os.getenv("TRAFFIC_LOG_PATH", "runtime/dev_access.log"))
+GEOIP_DB_PATH = Path(os.getenv("TRAFFIC_GEOIP_DB_PATH", "runtime/geoip/GeoLite2-City.mmdb"))
 TAIL_LINES = int(os.getenv("TRAFFIC_TAIL_LINES", "5000"))
 SESSION_GAP_MINUTES = int(os.getenv("TRAFFIC_SESSION_GAP_MINUTES", "30"))
 ACTIVE_GAP_CAP_SECONDS = int(os.getenv("TRAFFIC_SESSION_ACTIVE_GAP_CAP_SECONDS", "300"))
@@ -85,9 +93,47 @@ SUSPICIOUS_PATH_SNIPPETS = [
     ".plesk",
 ]
 
+ASSET_EXTENSIONS = (
+    ".css",
+    ".js",
+    ".mjs",
+    ".map",
+    ".ico",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".svg",
+    ".webp",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".eot",
+    ".txt",
+    ".xml",
+    ".json",
+    ".pdf",
+    ".zip",
+    ".gz",
+    ".tar",
+    ".mp4",
+    ".webm",
+    ".mp3",
+    ".wav",
+)
+
+API_ROUTE_PREFIXES = (
+    "/api/",
+    "/graphql",
+    "/rpc",
+    "/rest",
+    "/_next/data/",
+)
+
 UNKNOWN_HOST = "(unknown host)"
 UNKNOWN_REFERRER = "(direct)"
 REQUEST_CATEGORIES = ("human", "bot", "suspicious", "unknown")
+ROUTE_KINDS = ("page", "api", "probe", "asset", "unknown")
 
 PROJECTS = [
     {
@@ -158,6 +204,9 @@ DEV_GEO_OVERRIDES = {
     "45.146.130.12": {"country": "Netherlands", "area": "North Holland", "city": "Amsterdam"},
     "103.77.204.9": {"country": "Singapore", "area": "Singapore", "city": "Singapore"},
 }
+
+_GEOIP_READER: Any | None = None
+_GEOIP_READER_PATH: Path | None = None
 
 
 def safe_int(value: Any, default: int = 0) -> int:
@@ -334,6 +383,24 @@ def is_suspicious_path(path: str | None) -> bool:
     return any(snippet in lowered for snippet in SUSPICIOUS_PATH_SNIPPETS)
 
 
+def detect_route_kind(path: str | None) -> str:
+    lowered = (path or "").lower()
+
+    if lowered in {"", "(unknown)"}:
+        return "unknown"
+    if is_suspicious_path(lowered):
+        return "probe"
+    if any(lowered.startswith(prefix) for prefix in API_ROUTE_PREFIXES):
+        return "api"
+    if any(lowered.endswith(ext) for ext in ASSET_EXTENSIONS):
+        return "asset"
+    return "page"
+
+
+def is_trackable_path(path: str | None) -> bool:
+    return detect_route_kind(path) in {"page", "api", "probe"}
+
+
 def classify_request(ua: str | None, path: str | None) -> str:
     lowered_ua = (ua or "").lower()
 
@@ -398,45 +465,6 @@ def detect_browser(ua: str | None) -> str:
     return "Unknown"
 
 
-def is_page_like_path(path: str | None) -> bool:
-    lowered = (path or "").lower()
-
-    if lowered in {"", "(unknown)"}:
-        return False
-
-    return not any(
-        lowered.endswith(ext)
-        for ext in (
-            ".css",
-            ".js",
-            ".mjs",
-            ".map",
-            ".ico",
-            ".png",
-            ".jpg",
-            ".jpeg",
-            ".gif",
-            ".svg",
-            ".webp",
-            ".woff",
-            ".woff2",
-            ".ttf",
-            ".eot",
-            ".txt",
-            ".xml",
-            ".json",
-            ".pdf",
-            ".zip",
-            ".gz",
-            ".tar",
-            ".mp4",
-            ".webm",
-            ".mp3",
-            ".wav",
-        )
-    )
-
-
 def ordered_unique(values: list[str]) -> list[str]:
     seen = set()
     output = []
@@ -468,8 +496,74 @@ def counter_rows(counter: Counter, limit: int = TOP_LIMIT) -> list[dict[str, Any
     return [{"label": label, "count": count} for label, count in counter.most_common(limit)]
 
 
+def get_geo_reader() -> Any | None:
+    global _GEOIP_READER, _GEOIP_READER_PATH
+
+    if GeoIPReader is None:
+        return None
+
+    if _GEOIP_READER is not None and _GEOIP_READER_PATH == GEOIP_DB_PATH:
+        return _GEOIP_READER
+
+    if not GEOIP_DB_PATH.exists():
+        return None
+
+    try:
+        if _GEOIP_READER is not None:
+            try:
+                _GEOIP_READER.close()
+            except Exception:
+                pass
+
+        _GEOIP_READER = GeoIPReader(str(GEOIP_DB_PATH))
+        _GEOIP_READER_PATH = GEOIP_DB_PATH
+        return _GEOIP_READER
+    except Exception:
+        _GEOIP_READER = None
+        _GEOIP_READER_PATH = None
+        return None
+
+
 def get_geo_details(ip: str) -> dict[str, str]:
-    return DEV_GEO_OVERRIDES.get(ip, {"country": "??", "area": "", "city": ""})
+    if ip in DEV_GEO_OVERRIDES:
+        return DEV_GEO_OVERRIDES[ip]
+
+    reader = get_geo_reader()
+    if reader is not None:
+        try:
+            response = reader.city(ip)
+
+            country = (
+                response.country.name
+                or response.registered_country.name
+                or response.country.iso_code
+                or response.registered_country.iso_code
+                or "??"
+            )
+
+            area = ""
+            if response.subdivisions and response.subdivisions.most_specific:
+                area = (
+                    response.subdivisions.most_specific.name
+                    or response.subdivisions.most_specific.iso_code
+                    or ""
+                )
+
+            city = response.city.name or ""
+
+            return {
+                "country": country,
+                "area": area,
+                "city": city,
+            }
+        except AddressNotFoundError:
+            pass
+        except ValueError:
+            pass
+        except Exception:
+            pass
+
+    return {"country": "??", "area": "", "city": ""}
 
 
 def project_for_host(host: str) -> dict[str, Any]:
@@ -517,14 +611,16 @@ def build_single_session(events: list[dict[str, Any]]) -> dict[str, Any]:
     first = events[0]
     last = events[-1]
 
-    page_events = [event for event in events if is_page_like_path(event["normalized_path"])]
-    ordered_pages = ordered_unique([event["normalized_path"] for event in page_events])[:20]
+    trackable_events = [event for event in events if is_trackable_path(event["normalized_path"])]
+    ordered_paths = ordered_unique([event["normalized_path"] for event in trackable_events])[:20]
 
-    entry_page = ordered_pages[0] if ordered_pages else first["normalized_path"]
-    next_page = ordered_pages[1] if len(ordered_pages) > 1 else ""
-    exit_page = ordered_pages[-1] if ordered_pages else last["normalized_path"]
+    entry_page = ordered_paths[0] if ordered_paths else first["normalized_path"]
+    next_page = ordered_paths[1] if len(ordered_paths) > 1 else ""
+    exit_page = ordered_paths[-1] if ordered_paths else last["normalized_path"]
 
     category_counter = Counter(event["category"] for event in events)
+    route_counter = Counter(detect_route_kind(event["normalized_path"]) for event in trackable_events)
+
     suspicious_score = min(
         100,
         category_counter.get("suspicious", 0) * 35 + category_counter.get("bot", 0) * 8,
@@ -546,6 +642,9 @@ def build_single_session(events: list[dict[str, Any]]) -> dict[str, Any]:
     source, medium, campaign = detect_source_medium_campaign(first)
     project = project_for_host(first["host"])
 
+    primary_category = category_counter.most_common(1)[0][0] if category_counter else "unknown"
+    route_kind = route_counter.most_common(1)[0][0] if route_counter else detect_route_kind(first["normalized_path"])
+
     return {
         "session_id": f"{first['host']}|{first['ip']}|{first['timestamp_iso']}",
         "project_slug": project["slug"],
@@ -565,11 +664,13 @@ def build_single_session(events: list[dict[str, Any]]) -> dict[str, Any]:
         "entry_page": entry_page,
         "next_page": next_page,
         "exit_page": exit_page,
-        "page_count": len(ordered_pages),
+        "page_count": len(ordered_paths),
         "event_count": len(events),
         "total_seconds": total_seconds,
         "engaged_seconds": engaged_seconds,
         "suspicious_score": suspicious_score,
+        "primary_category": primary_category,
+        "route_kind": route_kind,
     }
 
 
@@ -610,13 +711,14 @@ def build_sessions(recent_entries: list[dict[str, Any]]) -> list[dict[str, Any]]
     return sessions[:VISITOR_SESSION_LIMIT]
 
 
-def build_path_stats(sessions: list[dict[str, Any]], recent_entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def build_path_stats(recent_entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     views = Counter()
     entries = Counter()
     exits = Counter()
     next_paths: dict[str, Counter] = defaultdict(Counter)
     duration_totals = Counter()
     duration_counts = Counter()
+    route_kind_by_path: dict[str, str] = {}
 
     by_session_key: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
 
@@ -626,24 +728,29 @@ def build_path_stats(sessions: list[dict[str, Any]], recent_entries: list[dict[s
 
     for session_entries in by_session_key.values():
         ordered_events = sorted(session_entries, key=lambda item: item["timestamp"])
-        page_events = [event for event in ordered_events if is_page_like_path(event["normalized_path"])]
+        trackable_events = [event for event in ordered_events if is_trackable_path(event["normalized_path"])]
 
-        if not page_events:
+        if not trackable_events:
             continue
 
-        entries[page_events[0]["normalized_path"]] += 1
-        exits[page_events[-1]["normalized_path"]] += 1
+        entries[trackable_events[0]["normalized_path"]] += 1
+        exits[trackable_events[-1]["normalized_path"]] += 1
 
-        for event in page_events:
-            views[event["normalized_path"]] += 1
+        for event in trackable_events:
+            path = event["normalized_path"]
+            views[path] += 1
+            route_kind_by_path[path] = detect_route_kind(path)
 
-        for previous, current in zip(page_events, page_events[1:]):
+        for previous, current in zip(trackable_events, trackable_events[1:]):
             gap = int((current["timestamp"] - previous["timestamp"]).total_seconds())
-            if gap > 0:
-                duration_totals[previous["normalized_path"]] += min(gap, ACTIVE_GAP_CAP_SECONDS)
-                duration_counts[previous["normalized_path"]] += 1
+            prev_path = previous["normalized_path"]
+            next_path = current["normalized_path"]
 
-            next_paths[previous["normalized_path"]][current["normalized_path"]] += 1
+            if gap > 0:
+                duration_totals[prev_path] += min(gap, ACTIVE_GAP_CAP_SECONDS)
+                duration_counts[prev_path] += 1
+
+            next_paths[prev_path][next_path] += 1
 
     output = []
 
@@ -653,6 +760,7 @@ def build_path_stats(sessions: list[dict[str, Any]], recent_entries: list[dict[s
         output.append(
             {
                 "path": path,
+                "route_kind": route_kind_by_path.get(path, detect_route_kind(path)),
                 "entries": entries[path],
                 "views": view_count,
                 "exits": exits[path],
@@ -665,6 +773,31 @@ def build_path_stats(sessions: list[dict[str, Any]], recent_entries: list[dict[s
         )
 
     return output
+
+
+def session_sort_key(session: dict[str, Any]) -> tuple[int, int, float]:
+    category_rank = {
+        "human": 0,
+        "unknown": 1,
+        "bot": 2,
+        "suspicious": 3,
+    }
+    route_rank = {
+        "page": 0,
+        "api": 1,
+        "probe": 2,
+        "asset": 3,
+        "unknown": 4,
+    }
+
+    parsed = parse_iso_timestamp(session.get("ended_at"))
+    ts = parsed.timestamp() if parsed else 0.0
+
+    return (
+        category_rank.get(session.get("primary_category", "unknown"), 9),
+        route_rank.get(session.get("route_kind", "unknown"), 9),
+        -ts,
+    )
 
 
 def build_overview() -> dict[str, Any]:
@@ -715,7 +848,10 @@ def build_overview() -> dict[str, Any]:
             continue
 
         category = classify_request(parsed["ua"], parsed["normalized_path"])
+        route_kind = detect_route_kind(parsed["normalized_path"])
+
         parsed["category"] = category
+        parsed["route_kind"] = route_kind
         recent_entries.append(parsed)
 
         total_requests += 1
@@ -823,7 +959,8 @@ def build_overview() -> dict[str, Any]:
             }
         )
 
-    top_pages = build_path_stats(sessions, recent_entries)
+    top_pages = build_path_stats(recent_entries)
+    prioritized_sessions = sorted(sessions, key=session_sort_key)[:10]
 
     country_rows = [
         {
@@ -900,6 +1037,19 @@ def build_overview() -> dict[str, Any]:
         int(sum(page["avg_seconds"] for page in top_pages) / len(top_pages)) if top_pages else 0
     )
 
+    notes = [
+        "Phase 2 donor parser is live.",
+        "This view is now built from log lines, not seeded demo data.",
+        f"Current source log: {LOG_PATH}",
+    ]
+
+    if GEOIP_DB_PATH.exists():
+        notes.append(f"GeoIP DB loaded: {GEOIP_DB_PATH}")
+    else:
+        notes.append(f"GeoIP DB missing: {GEOIP_DB_PATH}")
+
+    notes.append("Route classification is live: page, api, probe, asset.")
+
     return {
         "ok": True,
         "generated_at": iso_now(),
@@ -925,7 +1075,7 @@ def build_overview() -> dict[str, Any]:
             ],
             "top_ips": suspicious_top_ips,
         },
-        "recent_sessions": sessions[:10],
+        "recent_sessions": prioritized_sessions,
         "top_pages": top_pages,
         "geo": {
             "countries": country_rows,
@@ -933,9 +1083,5 @@ def build_overview() -> dict[str, Any]:
             "cities": city_rows,
         },
         "alerts": alerts[:3],
-        "notes": [
-            "Phase 2 donor parser is live.",
-            "This view is now built from log lines, not seeded demo data.",
-            f"Current source log: {LOG_PATH}",
-        ],
+        "notes": notes,
     }
