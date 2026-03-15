@@ -1,4 +1,4 @@
-from app.services.traffic import (
+from app.services.traffic.overview import (
     build_live_visitors,
     build_overview,
     build_project_human_series,
