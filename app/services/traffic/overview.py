@@ -536,3 +536,227 @@ def build_project_human_series(
         "series_kind": "new_human_visitors",
         "projects": projects_output,
     }
+
+
+def build_project_detail(
+    *,
+    project_slug: str,
+    window_hours: int = 24,
+    bucket_minutes: int = SERIES_BUCKET_MINUTES,
+) -> dict[str, Any]:
+    project = next((item for item in PROJECTS if item["slug"] == project_slug), None)
+    if not project:
+        return {
+            "ok": False,
+            "generated_at": iso_now(),
+            "window_hours": window_hours,
+            "project_slug": project_slug,
+        }
+
+    recent_entries = [
+        entry
+        for entry in collect_recent_entries(window_hours=window_hours)
+        if project_for_host(entry["host"])["slug"] == project_slug
+    ]
+    sessions = build_sessions(recent_entries)
+
+    likely_human_states = {"human_confirmed", "likely_human"}
+    automated_states = {"bot", "suspicious"}
+
+    unique_people = {session["person_key"] for session in sessions}
+    real_humans = {
+        session["person_key"]
+        for session in sessions
+        if session["classification_state"] in likely_human_states
+    }
+    suspected_bots = {
+        session["person_key"]
+        for session in sessions
+        if session["classification_state"] in automated_states
+    }
+    live_now = {
+        session["person_key"]
+        for session in sessions
+        if session["active_now"] and session["classification_state"] not in automated_states
+    }
+    returning_visitors = {
+        session["person_key"]
+        for session in sessions
+        if session["returning_visitor"] and session["classification_state"] not in automated_states
+    }
+
+    host_request_counter = Counter()
+    host_visitors = defaultdict(set)
+    host_top_entry = Counter()
+    host_top_exit = Counter()
+    host_session_seconds = Counter()
+    host_session_counts = Counter()
+    suspicious_path_counter = Counter()
+    top_ip_counter = Counter()
+    top_ip_category: dict[str, str] = {}
+    top_ip_last_seen: dict[str, str] = {}
+
+    for entry in recent_entries:
+        host_request_counter[entry["host"]] += 1
+        host_visitors[entry["host"]].add(entry["ip"])
+
+        if entry["category"] == "suspicious":
+            suspicious_path_counter[entry["normalized_path"]] += 1
+
+        top_ip_counter[entry["ip"]] += 1
+        top_ip_category[entry["ip"]] = entry["category"]
+        top_ip_last_seen[entry["ip"]] = entry["timestamp_iso"]
+
+    country_sessions = Counter()
+    area_sessions = Counter()
+    city_sessions = Counter()
+
+    for session in sessions:
+        country_sessions[session["country"]] += 1
+        if session["area"]:
+            area_sessions[(session["country"], session["area"])] += 1
+        if session["city"]:
+            city_sessions[(session["country"], session["area"], session["city"])] += 1
+
+        host_top_entry[(session["host"], session["entry_page"])] += 1
+        host_top_exit[(session["host"], session["exit_page"])] += 1
+        host_session_seconds[session["host"]] += session["total_seconds"]
+        host_session_counts[session["host"]] += 1
+
+    hosts: list[dict[str, Any]] = []
+    for host, request_count in host_request_counter.most_common(TOP_LIMIT):
+        entry_candidates = [
+            (path, count)
+            for (known_host, path), count in host_top_entry.items()
+            if known_host == host
+        ]
+        exit_candidates = [
+            (path, count)
+            for (known_host, path), count in host_top_exit.items()
+            if known_host == host
+        ]
+
+        avg_session_seconds = int(host_session_seconds[host] / host_session_counts[host]) if host_session_counts[host] else 0
+
+        hosts.append(
+            {
+                "host": host,
+                "project_slug": project_slug,
+                "requests": request_count,
+                "unique_visitors": len(host_visitors[host]),
+                "sessions": host_session_counts[host],
+                "top_entry_page": max(entry_candidates, key=lambda item: item[1])[0] if entry_candidates else "/",
+                "top_exit_page": max(exit_candidates, key=lambda item: item[1])[0] if exit_candidates else "/",
+                "avg_session_seconds": avg_session_seconds,
+            }
+        )
+
+    top_pages = build_path_stats(recent_entries)
+    live_feed = sorted(
+        [session for session in sessions if session["classification_state"] not in automated_states],
+        key=live_session_sort_key,
+    )[:10]
+    recent_sessions = sorted(sessions, key=session_sort_key)[:10]
+
+    now = datetime.now(timezone.utc)
+    window_start = now - timedelta(hours=window_hours)
+    first_bucket = _align_bucket(window_start, bucket_minutes)
+    last_bucket = _align_bucket(now, bucket_minutes)
+    bucket_list: list[datetime] = []
+    cursor = first_bucket
+    while cursor <= last_bucket:
+        bucket_list.append(cursor)
+        cursor += timedelta(minutes=bucket_minutes)
+
+    series_counter = Counter()
+    for session in sessions:
+        if session["classification_state"] != "human_confirmed":
+            continue
+
+        started_at = datetime.fromisoformat(session["started_at"])
+        bucket = _align_bucket(started_at, bucket_minutes)
+        if first_bucket <= bucket <= last_bucket:
+            series_counter[bucket.isoformat()] += 1
+
+    country_rows = [
+        {
+            "country": country,
+            "sessions": count,
+            "requests": sum(1 for entry in recent_entries if get_geo_details(entry["ip"])["country"] == country),
+        }
+        for country, count in country_sessions.most_common(TOP_LIMIT)
+    ]
+    area_rows = [
+        {"country": country, "area": area, "sessions": count}
+        for (country, area), count in area_sessions.most_common(TOP_LIMIT)
+    ]
+    city_rows = [
+        {"country": country, "area": area, "city": city, "sessions": count}
+        for (country, area, city), count in city_sessions.most_common(TOP_LIMIT)
+    ]
+
+    suspicious_top_ips: list[dict[str, Any]] = []
+    for ip, count in top_ip_counter.most_common(TOP_LIMIT):
+        category = top_ip_category.get(ip, "unknown")
+        if category not in {"suspicious", "bot"}:
+            continue
+
+        suspicious_top_ips.append(
+            {
+                "ip": ip,
+                "country": get_geo_details(ip)["country"],
+                "count": count,
+                "category": category,
+                "last_seen": top_ip_last_seen.get(ip),
+            }
+        )
+
+    avg_session_seconds = int(sum(session["total_seconds"] for session in sessions) / len(sessions)) if sessions else 0
+
+    return {
+        "ok": True,
+        "generated_at": iso_now(),
+        "window_hours": window_hours,
+        "bucket_minutes": bucket_minutes,
+        "project": {
+            "slug": project["slug"],
+            "name": project["name"],
+            "category": project["category"],
+            "requests": len(recent_entries),
+            "sessions": len(sessions),
+            "real_humans": len(real_humans),
+            "suspected_bots": len(suspected_bots),
+            "live_now": len(live_now),
+            "returning_visitors": len(returning_visitors),
+            "engaged_sessions": sum(1 for session in sessions if session["engaged_seconds"] > 0),
+            "avg_session_seconds": avg_session_seconds,
+            "unique_visitors": len(unique_people),
+        },
+        "graph": {
+            "label": "New likely-human visitors",
+            "points": [
+                {
+                    "bucket_start": bucket.isoformat(),
+                    "label": bucket.astimezone(ALBERTA_ZONE).strftime("%I:%M %p"),
+                    "visitors": series_counter.get(bucket.isoformat(), 0),
+                }
+                for bucket in bucket_list
+            ],
+        },
+        "live_feed": live_feed,
+        "recent_sessions": recent_sessions,
+        "hosts": hosts,
+        "top_pages": top_pages,
+        "geo": {
+            "countries": country_rows,
+            "areas": area_rows,
+            "cities": city_rows,
+        },
+        "suspicious": {
+            "top_paths": [
+                {"path": path, "count": count}
+                for path, count in suspicious_path_counter.most_common(TOP_LIMIT)
+            ],
+            "top_ips": suspicious_top_ips,
+        },
+    }

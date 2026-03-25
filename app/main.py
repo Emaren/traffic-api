@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.services.traffic.config import PROJECTS
 from app.services.traffic.parse import iso_now
 from app.services.traffic_core import (
     build_live_visitors,
     build_overview,
+    build_project_detail,
     build_project_human_series,
     build_visits_history,
 )
@@ -48,6 +50,22 @@ def api_summary() -> dict:
 @app.get("/api/projects")
 def api_projects() -> list[dict]:
     return build_overview()["projects"]
+
+
+@app.get("/api/projects/{project_slug}")
+def api_project_detail(
+    project_slug: str,
+    window_hours: int = Query(24, ge=1, le=168),
+    bucket_minutes: int = Query(30, ge=1, le=120),
+) -> dict:
+    if not any(project["slug"] == project_slug for project in PROJECTS):
+        raise HTTPException(status_code=404, detail="Unknown project")
+
+    return build_project_detail(
+        project_slug=project_slug,
+        window_hours=window_hours,
+        bucket_minutes=bucket_minutes,
+    )
 
 
 @app.get("/api/hosts")

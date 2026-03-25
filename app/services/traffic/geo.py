@@ -78,6 +78,11 @@ def get_geo_details(ip: str) -> dict[str, str]:
 
             result = {
                 "country": country,
+                "country_code": (
+                    response.country.iso_code
+                    or response.registered_country.iso_code
+                    or ""
+                ),
                 "area": area,
                 "city": city,
             }
@@ -90,6 +95,6 @@ def get_geo_details(ip: str) -> dict[str, str]:
         except Exception:
             pass
 
-    result = {"country": "??", "area": "", "city": ""}
+    result = {"country": "??", "country_code": "", "area": "", "city": ""}
     _GEO_LOOKUP_CACHE[ip] = result
     return result

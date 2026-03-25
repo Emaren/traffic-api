@@ -216,12 +216,12 @@ INTERNAL_IGNORE_PATHS = {
 }
 
 DEV_GEO_OVERRIDES = {
-    "216.127.43.12": {"country": "Canada", "area": "Alberta", "city": "Grande Prairie"},
-    "216.127.43.99": {"country": "Canada", "area": "Alberta", "city": "Grande Prairie"},
-    "142.114.91.44": {"country": "Canada", "area": "Alberta", "city": "Edmonton"},
-    "72.21.81.200": {"country": "United States", "area": "Washington", "city": "Seattle"},
-    "45.61.188.33": {"country": "United States", "area": "Texas", "city": "Dallas"},
-    "185.12.44.91": {"country": "Germany", "area": "Hesse", "city": "Frankfurt"},
-    "45.146.130.12": {"country": "Netherlands", "area": "North Holland", "city": "Amsterdam"},
-    "103.77.204.9": {"country": "Singapore", "area": "Singapore", "city": "Singapore"},
+    "216.127.43.12": {"country": "Canada", "country_code": "CA", "area": "Alberta", "city": "Grande Prairie"},
+    "216.127.43.99": {"country": "Canada", "country_code": "CA", "area": "Alberta", "city": "Grande Prairie"},
+    "142.114.91.44": {"country": "Canada", "country_code": "CA", "area": "Alberta", "city": "Edmonton"},
+    "72.21.81.200": {"country": "United States", "country_code": "US", "area": "Washington", "city": "Seattle"},
+    "45.61.188.33": {"country": "United States", "country_code": "US", "area": "Texas", "city": "Dallas"},
+    "185.12.44.91": {"country": "Germany", "country_code": "DE", "area": "Hesse", "city": "Frankfurt"},
+    "45.146.130.12": {"country": "Netherlands", "country_code": "NL", "area": "North Holland", "city": "Amsterdam"},
+    "103.77.204.9": {"country": "Singapore", "country_code": "SG", "area": "Singapore", "city": "Singapore"},
 }

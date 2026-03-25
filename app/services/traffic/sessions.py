@@ -164,8 +164,17 @@ def visitor_alias(person_key: str, country: str, area: str, city: str) -> str:
     anchor = city or area or country or "Unknown"
     cleaned = re.sub(r"[^A-Za-z0-9]+", " ", anchor).strip()
     prefix = "".join(part.capitalize() for part in cleaned.split()) or "Unknown"
-    number = int(hashlib.sha1(person_key.encode("utf-8")).hexdigest()[:6], 16) % 900 + 100
-    return f"{prefix}Person{number}"
+    ip = person_key.split("|", 1)[0]
+    if "." in ip:
+        parts = ip.split(".")
+        suffix = "-".join(parts[-2:]) if len(parts) >= 2 else ip.replace(".", "-")
+    elif ":" in ip:
+        segments = [segment for segment in ip.split(":") if segment]
+        suffix = "-".join(segments[-2:]) if segments else "ipv6"
+    else:
+        suffix = hashlib.sha1(person_key.encode("utf-8")).hexdigest()[:6]
+
+    return f"{prefix}-{suffix}"
 
 
 def detect_source_medium_campaign(entry: dict[str, Any]) -> tuple[str, str, str]:
@@ -319,6 +328,7 @@ def build_single_session(events: list[dict[str, Any]], now: datetime | None = No
         "first_seen_alberta": to_alberta_display(first["timestamp"]),
         "last_seen_alberta": to_alberta_display(last["timestamp"]),
         "country": geo["country"],
+        "country_code": geo.get("country_code", ""),
         "area": geo["area"],
         "city": geo["city"],
         "device": detect_device_type(first["ua"]),
