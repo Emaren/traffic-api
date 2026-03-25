@@ -19,7 +19,7 @@ from app.services.traffic.config import (
 from app.services.traffic.geo import get_geo_details
 from app.services.traffic.normalize import ALLOWED_HOSTS, is_allowed_host, project_for_host
 from app.services.traffic.parse import iso_now, parse_log_line, read_recent_log_lines
-from app.services.traffic.sessions import build_path_stats, build_sessions, live_session_sort_key, session_sort_key
+from app.services.traffic.sessions import build_path_stats, build_sessions, live_session_sort_key
 
 from zoneinfo import ZoneInfo
 
@@ -246,7 +246,7 @@ def build_overview(window_hours: int = 24) -> dict[str, Any]:
         )
 
     top_pages = build_path_stats(recent_entries)
-    prioritized_sessions = sorted(sessions, key=session_sort_key)[:10]
+    prioritized_sessions = _chronological_sessions_desc(sessions, limit=10)
 
     country_rows = [
         {
@@ -432,6 +432,29 @@ def build_live_visitors(
         "top_25": tower,
         "history_preview": history_items,
     }
+
+
+def _chronological_sessions_desc(
+    sessions: list[dict[str, Any]],
+    *,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    items = sorted(sessions, key=lambda item: item["ended_at"], reverse=True)
+    if limit is None:
+        return items
+    return items[:limit]
+
+
+def _project_live_feed_sessions(
+    sessions: list[dict[str, Any]],
+    *,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    automated_states = {"bot", "suspicious"}
+    visible_sessions = [
+        session for session in sessions if session["classification_state"] not in automated_states
+    ]
+    return _chronological_sessions_desc(visible_sessions, limit=limit)
 
 
 def build_visits_history(
@@ -655,11 +678,8 @@ def build_project_detail(
         )
 
     top_pages = build_path_stats(recent_entries)
-    live_feed = sorted(
-        [session for session in sessions if session["classification_state"] not in automated_states],
-        key=live_session_sort_key,
-    )[:10]
-    recent_sessions = sorted(sessions, key=session_sort_key)[:10]
+    live_feed = _project_live_feed_sessions(sessions, limit=10)
+    recent_sessions = _chronological_sessions_desc(sessions, limit=10)
 
     now = datetime.now(timezone.utc)
     window_start = now - timedelta(hours=window_hours)
@@ -762,4 +782,41 @@ def build_project_detail(
             ],
             "top_ips": suspicious_top_ips,
         },
+    }
+
+
+def build_project_live_feed(
+    *,
+    project_slug: str,
+    window_hours: int = 24,
+    limit: int = 10,
+) -> dict[str, Any]:
+    project = next((item for item in PROJECTS if item["slug"] == project_slug), None)
+    if not project:
+        return {
+            "ok": False,
+            "generated_at": iso_now(),
+            "window_hours": window_hours,
+            "project_slug": project_slug,
+        }
+
+    recent_entries = [
+        entry
+        for entry in collect_recent_entries(window_hours=window_hours)
+        if project_for_host(entry["host"])["slug"] == project_slug
+    ]
+    sessions = build_sessions(recent_entries)
+
+    live_feed = _project_live_feed_sessions(sessions, limit=limit)
+
+    return {
+        "ok": True,
+        "generated_at": iso_now(),
+        "window_hours": window_hours,
+        "project": {
+            "slug": project["slug"],
+            "name": project["name"],
+        },
+        "visible_count": len(live_feed),
+        "live_feed": live_feed,
     }

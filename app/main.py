@@ -9,6 +9,7 @@ from app.services.traffic_core import (
     build_live_visitors,
     build_overview,
     build_project_detail,
+    build_project_live_feed,
     build_project_human_series,
     build_visits_history,
 )
@@ -65,6 +66,22 @@ def api_project_detail(
         project_slug=project_slug,
         window_hours=window_hours,
         bucket_minutes=bucket_minutes,
+    )
+
+
+@app.get("/api/projects/{project_slug}/live-feed")
+def api_project_live_feed(
+    project_slug: str,
+    window_hours: int = Query(24, ge=1, le=168),
+    limit: int = Query(10, ge=1, le=100),
+) -> dict:
+    if not any(project["slug"] == project_slug for project in PROJECTS):
+        raise HTTPException(status_code=404, detail="Unknown project")
+
+    return build_project_live_feed(
+        project_slug=project_slug,
+        window_hours=window_hours,
+        limit=limit,
     )
 
 
