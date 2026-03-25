@@ -373,6 +373,7 @@ def enrich_sessions(sessions: list[dict[str, Any]]) -> None:
     for session in sessions:
         person_key = session["person_key"]
         visits_in_window = person_counts[person_key]
+        total_project_visits = project_counts[(person_key, session["project_slug"])]
         returning = visits_in_window > 1
         attention_label, attention_summary = attention_profile(
             active_now=session["active_now"],
@@ -390,7 +391,9 @@ def enrich_sessions(sessions: list[dict[str, Any]]) -> None:
             city=session["city"],
         )
         session["visits_in_window"] = visits_in_window
-        session["project_visits_in_window"] = project_counts[(person_key, session["project_slug"])]
+        session["project_visits_in_window"] = total_project_visits
+        session["total_project_visits"] = total_project_visits
+        session["times_returned_in_project"] = max(total_project_visits - 1, 0)
         session["projects_visited_in_window"] = len(person_projects[person_key])
         session["returning_visitor"] = returning
         session["verdict_label"] = label_classification_state(session["classification_state"])
