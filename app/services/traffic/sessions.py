@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+import hashlib
+import re
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
@@ -33,6 +35,29 @@ from app.services.traffic.parse import parse_iso_timestamp, safe_int
 
 ALBERTA_ZONE = ZoneInfo(ALBERTA_TZ_NAME)
 
+REASON_LABELS = {
+    "browser_ua": "Browser fingerprint looks like a real person",
+    "unknown_ua": "User agent is unfamiliar, so confidence is limited",
+    "bot_signal": "User agent matches a known bot or monitoring pattern",
+    "suspicious_signal": "Request pattern looks hostile or scripted",
+    "page_route": "Visited real pages, not just background endpoints",
+    "api_route": "Mostly touched API endpoints in this session",
+    "probe_route": "Hit probing or exploit-style paths",
+    "asset_only": "Mostly requested static assets",
+    "multi_page": "Moved through multiple pages",
+    "single_page": "Only touched one page",
+    "repeat_activity": "Showed repeated activity during the session",
+    "engaged": "Stayed active long enough to look intentional",
+    "brief_engagement": "Showed short but real engagement",
+    "internal_referrer": "Arrived from one of your own properties",
+    "external_source": "Arrived from an outside source",
+    "direct": "Arrived directly or from a bookmark",
+    "high_suspicion": "Triggered strong suspicious-traffic signals",
+    "low_suspicion": "Triggered mild suspicious-traffic signals",
+    "api_only": "Did not show a clear page-view trail",
+    "bounce": "One quick hit with no follow-up",
+}
+
 
 def ordered_unique(values: list[str]) -> list[str]:
     seen = set()
@@ -57,6 +82,90 @@ def compress_consecutive(values: list[str]) -> list[str]:
 
 def to_alberta_display(value: datetime) -> str:
     return value.astimezone(ALBERTA_ZONE).strftime("%Y-%m-%d %I:%M:%S %p")
+
+
+def person_key_for_session(ip: str, ua: str | None) -> str:
+    return f"{ip}|{(ua or '').lower()}"
+
+
+def humanize_reason(reason: str) -> str:
+    return REASON_LABELS.get(reason, reason.replace("_", " "))
+
+
+def label_classification_state(state: str) -> str:
+    labels = {
+        "human_confirmed": "Likely Human",
+        "likely_human": "Probably Human",
+        "candidate": "Unclear",
+        "bot": "Known Bot",
+        "suspicious": "Suspicious",
+        "archived": "Archived",
+    }
+    return labels.get(state, state.replace("_", " ").title())
+
+
+def summarize_classification(state: str, human_confidence: int, suspicious_score: int) -> str:
+    if state == "human_confirmed":
+        return f"Strong human signals with {human_confidence}% confidence from browser behavior, page flow, and dwell time."
+    if state == "likely_human":
+        return f"Probably a real person with {human_confidence}% confidence, but the session trail is a little thinner."
+    if state == "candidate":
+        return "Some human signals are present, but the evidence is mixed and needs more activity."
+    if state == "bot":
+        return "Looks automated because the session matches known bot patterns and shows little real engagement."
+    if state == "suspicious":
+        return f"Needs attention because the session carries {suspicious_score} suspicion points from hostile or scripted behavior."
+    return "This session needs more context before Traffic can explain it cleanly."
+
+
+def data_confidence_profile(quality_score: int) -> tuple[str, str]:
+    if quality_score >= 80:
+        return "High", "Browser, route, and timing data are strong enough to trust."
+    if quality_score >= 55:
+        return "Good", "There is enough session detail here to analyze it confidently."
+    if quality_score >= 30:
+        return "Limited", "Some useful signals exist, but the trail is still thin."
+    return "Low", "Traffic has very little reliable detail for this session."
+
+
+def attention_profile(
+    *,
+    active_now: bool,
+    engaged_seconds: int,
+    page_count: int,
+    returning_visitor: bool,
+    suspicious_score: int,
+) -> tuple[str, str]:
+    if suspicious_score >= 40:
+        return "Investigate", "Aggressive or exploit-like behavior makes this session worth a closer look."
+
+    reasons: list[str] = []
+    if active_now:
+        reasons.append("it is active right now")
+    if returning_visitor:
+        reasons.append("this looks like a returning visitor in the current window")
+    if engaged_seconds >= 180:
+        reasons.append("dwell time is strong")
+    elif engaged_seconds >= 45:
+        reasons.append("engagement is building")
+    if page_count >= 5:
+        reasons.append("the journey is deep")
+    elif page_count >= 3:
+        reasons.append("the journey spans multiple pages")
+
+    if active_now and (engaged_seconds >= 180 or page_count >= 5 or returning_visitor):
+        return "High", "Worth watching because " + ", ".join(reasons[:2]) + "."
+    if active_now or engaged_seconds >= 60 or page_count >= 3 or returning_visitor:
+        return "Medium", "Worth keeping in view because " + ", ".join(reasons[:2]) + "."
+    return "Low", "Useful for context, but this session is not drawing strong attention yet."
+
+
+def visitor_alias(person_key: str, country: str, area: str, city: str) -> str:
+    anchor = city or area or country or "Unknown"
+    cleaned = re.sub(r"[^A-Za-z0-9]+", " ", anchor).strip()
+    prefix = "".join(part.capitalize() for part in cleaned.split()) or "Unknown"
+    number = int(hashlib.sha1(person_key.encode("utf-8")).hexdigest()[:6], 16) % 900 + 100
+    return f"{prefix}Person{number}"
 
 
 def detect_source_medium_campaign(entry: dict[str, Any]) -> tuple[str, str, str]:
@@ -141,7 +250,10 @@ def build_single_session(events: list[dict[str, Any]], now: datetime | None = No
     project = project_for_host(first["host"])
 
     primary_category = category_counter.most_common(1)[0][0] if category_counter else "unknown"
-    route_kind = route_counter.most_common(1)[0][0] if route_counter else detect_route_kind(first["normalized_path"])
+    if page_events:
+        route_kind = "page"
+    else:
+        route_kind = route_counter.most_common(1)[0][0] if route_counter else detect_route_kind(first["normalized_path"])
 
     quality_score = compute_quality_score(
         primary_category=primary_category,
@@ -188,9 +300,12 @@ def build_single_session(events: list[dict[str, Any]], now: datetime | None = No
 
     ua_lower = (first["ua"] or "").lower()
 
+    person_key = person_key_for_session(first["ip"], first["ua"])
+
     return {
         "session_id": f"{first['host']}|{first['ip']}|{first['timestamp_iso']}",
         "visitor_key": f"{first['host']}|{first['ip']}|{ua_lower}",
+        "person_key": person_key,
         "project_slug": project["slug"],
         "project_name": project["name"],
         "project_category": project["category"],
@@ -237,6 +352,52 @@ def build_single_session(events: list[dict[str, Any]], now: datetime | None = No
     }
 
 
+def enrich_sessions(sessions: list[dict[str, Any]]) -> None:
+    person_counts = Counter(session["person_key"] for session in sessions)
+    project_counts = Counter((session["person_key"], session["project_slug"]) for session in sessions)
+    person_projects: dict[str, set[str]] = defaultdict(set)
+
+    for session in sessions:
+        person_projects[session["person_key"]].add(session["project_slug"])
+
+    for session in sessions:
+        person_key = session["person_key"]
+        visits_in_window = person_counts[person_key]
+        returning = visits_in_window > 1
+        attention_label, attention_summary = attention_profile(
+            active_now=session["active_now"],
+            engaged_seconds=session["engaged_seconds"],
+            page_count=session["page_count"],
+            returning_visitor=returning,
+            suspicious_score=session["suspicious_score"],
+        )
+        data_label, data_summary = data_confidence_profile(session["quality_score"])
+
+        session["visitor_alias"] = visitor_alias(
+            person_key=person_key,
+            country=session["country"],
+            area=session["area"],
+            city=session["city"],
+        )
+        session["visits_in_window"] = visits_in_window
+        session["project_visits_in_window"] = project_counts[(person_key, session["project_slug"])]
+        session["projects_visited_in_window"] = len(person_projects[person_key])
+        session["returning_visitor"] = returning
+        session["verdict_label"] = label_classification_state(session["classification_state"])
+        session["classification_reason_labels"] = [
+            humanize_reason(reason) for reason in session["classification_reasons"]
+        ]
+        session["classification_summary"] = summarize_classification(
+            session["classification_state"],
+            session["human_confidence"],
+            session["suspicious_score"],
+        )
+        session["data_confidence_label"] = data_label
+        session["data_confidence_summary"] = data_summary
+        session["attention_label"] = attention_label
+        session["attention_summary"] = attention_summary
+
+
 def build_sessions(recent_entries: list[dict[str, Any]], limit: int | None = None) -> list[dict[str, Any]]:
     grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
 
@@ -271,6 +432,7 @@ def build_sessions(recent_entries: list[dict[str, Any]], limit: int | None = Non
         if current_session:
             sessions.append(build_single_session(current_session, now=now))
 
+    enrich_sessions(sessions)
     sessions.sort(key=lambda item: item["ended_at"], reverse=True)
 
     if limit is None:

@@ -133,6 +133,35 @@ def build_overview(window_hours: int = 24) -> dict[str, Any]:
             unknown_requests += 1
 
     sessions = build_sessions(recent_entries)
+    likely_human_states = {"human_confirmed", "likely_human"}
+    automated_states = {"bot", "suspicious"}
+
+    unique_people = {session["person_key"] for session in sessions}
+    real_people = {
+        session["person_key"]
+        for session in sessions
+        if session["classification_state"] in likely_human_states
+    }
+    automated_people = {
+        session["person_key"]
+        for session in sessions
+        if session["classification_state"] in automated_states
+    }
+    live_people = {
+        session["person_key"]
+        for session in sessions
+        if session["active_now"] and session["classification_state"] not in automated_states
+    }
+    returning_people = {
+        session["person_key"]
+        for session in sessions
+        if session["returning_visitor"] and session["classification_state"] not in automated_states
+    }
+    active_projects = {
+        session["project_slug"]
+        for session in sessions
+        if session["active_now"] and session["classification_state"] not in automated_states
+    }
 
     for session in sessions:
         project_session_counter[session["project_slug"]] += 1
@@ -318,6 +347,12 @@ def build_overview(window_hours: int = 24) -> dict[str, Any]:
             "suspicious": suspicious_requests,
             "unknown": unknown_requests,
             "unique_visitors": len(unique_visitors),
+            "total_visitors": len(unique_people),
+            "real_humans": len(real_people),
+            "suspected_bots": len(automated_people),
+            "live_now": len(live_people),
+            "returning_visitors": len(returning_people),
+            "projects_active": len(active_projects),
             "sessions": len(sessions),
             "engaged_sessions": sum(1 for session in sessions if session["engaged_seconds"] > 0),
             "avg_session_seconds": avg_session_seconds,
