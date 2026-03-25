@@ -398,6 +398,7 @@ def build_live_visitors(
 
     history_candidates = sorted(tower_candidates, key=lambda item: item["ended_at"], reverse=True)
     history_items = history_candidates[limit : limit + history_limit]
+    stream_items = list(reversed(history_candidates[: limit + history_limit]))
 
     project_counts: list[dict[str, Any]] = []
     for project in PROJECTS:
@@ -425,6 +426,8 @@ def build_live_visitors(
         "window_hours": window_hours,
         "tower_limit": limit,
         "history_count": max(0, len(history_candidates) - limit),
+        "stream_total": len(history_candidates),
+        "stream_items": stream_items,
         "project_counts": project_counts,
         "top_25": tower,
         "history_preview": history_items,
