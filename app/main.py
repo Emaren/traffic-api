@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 import json
 from time import monotonic
 
@@ -36,6 +37,45 @@ app.add_middleware(
 
 def sse_payload(data: dict) -> str:
     return f"data: {json.dumps(data, separators=(',', ':'))}\n\n"
+
+
+def stream_json_response(
+    *,
+    request: Request,
+    builder: Callable[[], dict],
+    poll_seconds: float,
+    heartbeat_seconds: int,
+) -> StreamingResponse:
+    async def event_stream():
+        last_signature = ""
+        last_heartbeat = monotonic()
+
+        while True:
+            if await request.is_disconnected():
+                break
+
+            payload = builder()
+            signature = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+            if signature != last_signature:
+                last_signature = signature
+                last_heartbeat = monotonic()
+                yield sse_payload(payload)
+            elif monotonic() - last_heartbeat >= heartbeat_seconds:
+                last_heartbeat = monotonic()
+                yield ": keep-alive\n\n"
+
+            await asyncio.sleep(poll_seconds)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/healthz")
@@ -95,6 +135,30 @@ def api_project_live_feed(
     )
 
 
+@app.get("/api/projects/{project_slug}/live-feed/stream")
+def api_project_live_feed_stream(
+    request: Request,
+    project_slug: str,
+    window_hours: int = Query(24, ge=1, le=168),
+    limit: int = Query(10, ge=1, le=100),
+    poll_seconds: float = Query(1.5, ge=0.5, le=10.0),
+    heartbeat_seconds: int = Query(20, ge=5, le=60),
+) -> StreamingResponse:
+    if not any(project["slug"] == project_slug for project in PROJECTS):
+        raise HTTPException(status_code=404, detail="Unknown project")
+
+    return stream_json_response(
+        request=request,
+        builder=lambda: build_project_live_feed(
+            project_slug=project_slug,
+            window_hours=window_hours,
+            limit=limit,
+        ),
+        poll_seconds=poll_seconds,
+        heartbeat_seconds=heartbeat_seconds,
+    )
+
+
 @app.get("/api/hosts")
 def api_hosts() -> list[dict]:
     return build_overview()["hosts"]
@@ -133,6 +197,27 @@ def api_live_visitors(
     )
 
 
+@app.get("/api/live-visitors/stream")
+def api_live_visitors_stream(
+    request: Request,
+    limit: int = Query(25, ge=1, le=100),
+    history_limit: int = Query(250, ge=0, le=5000),
+    window_hours: int = Query(24, ge=1, le=168),
+    poll_seconds: float = Query(1.5, ge=0.5, le=10.0),
+    heartbeat_seconds: int = Query(20, ge=5, le=60),
+) -> StreamingResponse:
+    return stream_json_response(
+        request=request,
+        builder=lambda: build_live_visitors(
+            limit=limit,
+            history_limit=history_limit,
+            window_hours=window_hours,
+        ),
+        poll_seconds=poll_seconds,
+        heartbeat_seconds=heartbeat_seconds,
+    )
+
+
 @app.get("/api/visitors/{visitor_id}")
 def api_visitor_profile(
     visitor_id: str,
@@ -159,38 +244,14 @@ async def api_visitor_profile_stream(
     if not initial_profile.get("ok"):
         raise HTTPException(status_code=404, detail="Unknown visitor")
 
-    async def event_stream():
-        last_signature = ""
-        last_heartbeat = monotonic()
-
-        while True:
-            if await request.is_disconnected():
-                break
-
-            payload = build_visitor_profile(
-                visitor_id=visitor_id,
-                window_hours=window_hours,
-            )
-            signature = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-
-            if signature != last_signature:
-                last_signature = signature
-                last_heartbeat = monotonic()
-                yield sse_payload(payload)
-            elif monotonic() - last_heartbeat >= heartbeat_seconds:
-                last_heartbeat = monotonic()
-                yield ": keep-alive\n\n"
-
-            await asyncio.sleep(poll_seconds)
-
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+    return stream_json_response(
+        request=request,
+        builder=lambda: build_visitor_profile(
+            visitor_id=visitor_id,
+            window_hours=window_hours,
+        ),
+        poll_seconds=poll_seconds,
+        heartbeat_seconds=heartbeat_seconds,
     )
 
 
