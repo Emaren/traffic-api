@@ -96,6 +96,7 @@ LIVE_VISITORS_CACHE_TTL_SECONDS = 5.0
 VISITS_HISTORY_CACHE_TTL_SECONDS = 10.0
 _response_cache_lock = threading.Lock()
 _response_cache: dict[tuple[str, tuple[tuple[str, Any], ...]], tuple[float, Any]] = {}
+_response_cache_refreshing: set[tuple[str, tuple[tuple[str, Any], ...]]] = set()
 
 app.add_middleware(
     CORSMiddleware,
@@ -153,6 +154,21 @@ def cached_response(
     with _response_cache_lock:
         cached = _response_cache.get(cache_key)
         if cached and now - cached[0] < ttl_seconds:
+            return cached[1]
+        if cached:
+            if cache_key not in _response_cache_refreshing:
+                _response_cache_refreshing.add(cache_key)
+
+                def refresh_in_background() -> None:
+                    try:
+                        payload = builder()
+                        with _response_cache_lock:
+                            _response_cache[cache_key] = (monotonic(), payload)
+                    finally:
+                        with _response_cache_lock:
+                            _response_cache_refreshing.discard(cache_key)
+
+                threading.Thread(target=refresh_in_background, daemon=True).start()
             return cached[1]
 
     payload = builder()
