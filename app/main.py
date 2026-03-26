@@ -7,6 +7,7 @@ import json
 import signal
 from time import monotonic
 import threading
+from typing import Any
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -89,6 +90,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Traffic API", version="0.3.0", lifespan=lifespan)
 
+OVERVIEW_CACHE_TTL_SECONDS = 20.0
+SERIES_CACHE_TTL_SECONDS = 20.0
+LIVE_VISITORS_CACHE_TTL_SECONDS = 5.0
+VISITS_HISTORY_CACHE_TTL_SECONDS = 10.0
+_response_cache_lock = threading.Lock()
+_response_cache: dict[tuple[str, tuple[tuple[str, Any], ...]], tuple[float, Any]] = {}
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -130,6 +138,29 @@ def get_notification_loop_state(app: FastAPI) -> dict[str, object]:
     }
     app.state.notification_loop_state = fallback
     return fallback
+
+
+def cached_response(
+    cache_name: str,
+    *,
+    ttl_seconds: float,
+    builder: Callable[[], Any],
+    **params: Any,
+) -> Any:
+    cache_key = (cache_name, tuple(sorted(params.items())))
+    now = monotonic()
+
+    with _response_cache_lock:
+        cached = _response_cache.get(cache_key)
+        if cached and now - cached[0] < ttl_seconds:
+            return cached[1]
+
+    payload = builder()
+
+    with _response_cache_lock:
+        _response_cache[cache_key] = (monotonic(), payload)
+
+    return payload
 
 
 async def notification_worker(app: FastAPI) -> None:
@@ -340,21 +371,36 @@ def api_admin_web_push_subscription_delete(
 def api_overview(
     range_key: str = Query("24h", pattern="^(24h|7d|30d|all)$"),
 ) -> dict:
-    return build_overview(range_key=range_key)
+    return cached_response(
+        "overview",
+        ttl_seconds=OVERVIEW_CACHE_TTL_SECONDS,
+        builder=lambda: build_overview(range_key=range_key),
+        range_key=range_key,
+    )
 
 
 @app.get("/api/summary")
 def api_summary(
     range_key: str = Query("24h", pattern="^(24h|7d|30d|all)$"),
 ) -> dict:
-    return build_overview(range_key=range_key)
+    return cached_response(
+        "overview",
+        ttl_seconds=OVERVIEW_CACHE_TTL_SECONDS,
+        builder=lambda: build_overview(range_key=range_key),
+        range_key=range_key,
+    )
 
 
 @app.get("/api/projects")
 def api_projects(
     range_key: str = Query("24h", pattern="^(24h|7d|30d|all)$"),
 ) -> list[dict]:
-    return build_overview(range_key=range_key)["projects"]
+    return cached_response(
+        "overview",
+        ttl_seconds=OVERVIEW_CACHE_TTL_SECONDS,
+        builder=lambda: build_overview(range_key=range_key),
+        range_key=range_key,
+    )["projects"]
 
 
 @app.get("/api/projects/{project_slug}")
@@ -429,27 +475,52 @@ def api_project_live_feed_stream(
 
 @app.get("/api/hosts")
 def api_hosts() -> list[dict]:
-    return build_overview()["hosts"]
+    return cached_response(
+        "overview",
+        ttl_seconds=OVERVIEW_CACHE_TTL_SECONDS,
+        builder=build_overview,
+        range_key="24h",
+    )["hosts"]
 
 
 @app.get("/api/sessions")
 def api_sessions() -> list[dict]:
-    return build_overview()["recent_sessions"]
+    return cached_response(
+        "overview",
+        ttl_seconds=OVERVIEW_CACHE_TTL_SECONDS,
+        builder=build_overview,
+        range_key="24h",
+    )["recent_sessions"]
 
 
 @app.get("/api/paths")
 def api_paths() -> list[dict]:
-    return build_overview()["top_pages"]
+    return cached_response(
+        "overview",
+        ttl_seconds=OVERVIEW_CACHE_TTL_SECONDS,
+        builder=build_overview,
+        range_key="24h",
+    )["top_pages"]
 
 
 @app.get("/api/geo")
 def api_geo() -> dict:
-    return build_overview()["geo"]
+    return cached_response(
+        "overview",
+        ttl_seconds=OVERVIEW_CACHE_TTL_SECONDS,
+        builder=build_overview,
+        range_key="24h",
+    )["geo"]
 
 
 @app.get("/api/threats")
 def api_threats() -> dict:
-    return build_overview()["suspicious"]
+    return cached_response(
+        "overview",
+        ttl_seconds=OVERVIEW_CACHE_TTL_SECONDS,
+        builder=build_overview,
+        range_key="24h",
+    )["suspicious"]
 
 
 @app.get("/api/live-visitors")
@@ -458,7 +529,14 @@ def api_live_visitors(
     history_limit: int = Query(250, ge=0, le=5000),
     window_hours: int = Query(24, ge=1, le=168),
 ) -> dict:
-    return build_live_visitors(
+    return cached_response(
+        "live_visitors",
+        ttl_seconds=LIVE_VISITORS_CACHE_TTL_SECONDS,
+        builder=lambda: build_live_visitors(
+            limit=limit,
+            history_limit=history_limit,
+            window_hours=window_hours,
+        ),
         limit=limit,
         history_limit=history_limit,
         window_hours=window_hours,
@@ -528,9 +606,15 @@ def api_project_human_series(
     range_key: str = Query("24h", pattern="^(24h|7d|30d|all)$"),
     bucket_minutes: int | None = Query(None, ge=1, le=1440),
 ) -> dict:
-    return build_project_human_series(
+    return cached_response(
+        "project_human_series",
+        ttl_seconds=SERIES_CACHE_TTL_SECONDS,
+        builder=lambda: build_project_human_series(
+            range_key=range_key,
+            bucket_minutes_override=bucket_minutes,
+        ),
         range_key=range_key,
-        bucket_minutes_override=bucket_minutes,
+        bucket_minutes=bucket_minutes,
     )
 
 
@@ -542,7 +626,16 @@ def api_visits_history(
     classification: str | None = Query(None),
     project: str | None = Query(None),
 ) -> dict:
-    return build_visits_history(
+    return cached_response(
+        "visits_history",
+        ttl_seconds=VISITS_HISTORY_CACHE_TTL_SECONDS,
+        builder=lambda: build_visits_history(
+            limit=limit,
+            offset=offset,
+            range_key=range_key,
+            classification=classification,
+            project=project,
+        ),
         limit=limit,
         offset=offset,
         range_key=range_key,
