@@ -135,12 +135,15 @@ def get_notification_loop_state(app: FastAPI) -> dict[str, object]:
 async def notification_worker(app: FastAPI) -> None:
     shutdown_event = get_shutdown_event(app)
     while not shutdown_event.is_set():
+        wait_seconds = NOTIFICATION_LOOP_SECONDS
         try:
             result = await asyncio.to_thread(
                 process_notification_batch,
                 NOTIFICATION_BATCH_LIMIT,
             )
             app.state.notification_loop_state = result
+            if result.get("mode") in {"disabled", "provider_not_configured", "persistence_disabled"}:
+                wait_seconds = max(NOTIFICATION_LOOP_SECONDS, 15.0)
         except Exception as exc:
             app.state.notification_loop_state = {
                 "mode": "error",
@@ -151,9 +154,10 @@ async def notification_worker(app: FastAPI) -> None:
                 "last_run_at": iso_now(),
                 "message": str(exc),
             }
+            wait_seconds = max(NOTIFICATION_LOOP_SECONDS, 15.0)
 
         try:
-            await asyncio.wait_for(shutdown_event.wait(), timeout=NOTIFICATION_LOOP_SECONDS)
+            await asyncio.wait_for(shutdown_event.wait(), timeout=wait_seconds)
             break
         except asyncio.TimeoutError:
             continue
