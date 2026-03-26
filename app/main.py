@@ -151,18 +151,24 @@ def healthz() -> dict[str, str | bool | int]:
 
 
 @app.get("/api/overview")
-def api_overview() -> dict:
-    return build_overview()
+def api_overview(
+    range_key: str = Query("24h", pattern="^(24h|7d|30d|all)$"),
+) -> dict:
+    return build_overview(range_key=range_key)
 
 
 @app.get("/api/summary")
-def api_summary() -> dict:
-    return build_overview()
+def api_summary(
+    range_key: str = Query("24h", pattern="^(24h|7d|30d|all)$"),
+) -> dict:
+    return build_overview(range_key=range_key)
 
 
 @app.get("/api/projects")
-def api_projects() -> list[dict]:
-    return build_overview()["projects"]
+def api_projects(
+    range_key: str = Query("24h", pattern="^(24h|7d|30d|all)$"),
+) -> list[dict]:
+    return build_overview(range_key=range_key)["projects"]
 
 
 @app.get("/api/projects/{project_slug}")

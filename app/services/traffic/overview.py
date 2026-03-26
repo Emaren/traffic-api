@@ -109,8 +109,15 @@ def collect_recent_entries_with_source(
     return recent_entries, source_mode
 
 
-def build_overview(window_hours: int = 24) -> dict[str, Any]:
-    recent_entries = collect_recent_entries(window_hours=window_hours)
+def build_overview(range_key: str = "24h") -> dict[str, Any]:
+    range_config = _range_config(range_key)
+    window_hours = _window_hours_for_range(range_key)
+    recent_entries, source_mode = collect_recent_entries_with_source(window_hours=window_hours)
+    earliest_entry_at = min((entry["timestamp"] for entry in recent_entries), default=None)
+    now = datetime.now(timezone.utc)
+    requested_start = (
+        now - timedelta(hours=window_hours) if window_hours is not None else None
+    )
 
     host_request_counter = Counter()
     project_request_counter = Counter()
@@ -379,10 +386,37 @@ def build_overview(window_hours: int = 24) -> dict[str, Any]:
     notes.append("Route classification is live: page, api, probe, asset.")
     notes.append("Live visitor tower and human series endpoints are now available.")
 
+    note: str | None = None
+    if source_mode != "durable_store":
+        note = "Durable storage is unavailable, so this overview is currently reading the live log tail."
+    elif range_key == "all":
+        if earliest_entry_at:
+            note = (
+                "All-time currently means everything Traffic has stored for the observatory since "
+                f"{_format_alberta_timestamp(earliest_entry_at)}."
+            )
+        else:
+            note = "All-time view is ready, but Traffic has not stored any observable traffic yet."
+    elif earliest_entry_at and requested_start and earliest_entry_at > requested_start:
+        note = (
+            f"Durable storage for the observatory currently begins at "
+            f"{_format_alberta_timestamp(earliest_entry_at)}, so this {range_config['label'].lower()} "
+            "view starts there."
+        )
+
     return {
         "ok": True,
         "generated_at": iso_now(),
-        "window": f"{window_hours}h",
+        "range_key": range_key,
+        "range_label": range_config["label"],
+        "window_hours": window_hours,
+        "window": range_config["label"],
+        "coverage_mode": source_mode,
+        "coverage_started_at": earliest_entry_at.isoformat() if earliest_entry_at else None,
+        "coverage_started_alberta": (
+            _format_alberta_timestamp(earliest_entry_at) if earliest_entry_at else None
+        ),
+        "note": note,
         "totals": {
             "requests": total_requests,
             "humans": human_requests,
