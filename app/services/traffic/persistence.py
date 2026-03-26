@@ -65,6 +65,68 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             offset INTEGER NOT NULL,
             updated_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS traffic_notification_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            payload_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS traffic_notification_mutes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_type TEXT NOT NULL,
+            match_value TEXT NOT NULL,
+            label TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_traffic_notification_mutes_active
+            ON traffic_notification_mutes(active, rule_type);
+
+        CREATE TABLE IF NOT EXISTS traffic_notification_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            traffic_event_id TEXT NOT NULL UNIQUE,
+            session_id TEXT NOT NULL,
+            event_timestamp TEXT NOT NULL,
+            project_slug TEXT NOT NULL,
+            project_name TEXT NOT NULL,
+            host TEXT NOT NULL,
+            path TEXT NOT NULL,
+            route_kind TEXT NOT NULL,
+            person_key TEXT NOT NULL,
+            visitor_profile_id TEXT NOT NULL,
+            visitor_alias TEXT NOT NULL,
+            ip TEXT NOT NULL,
+            country_code TEXT NOT NULL,
+            country TEXT NOT NULL,
+            classification_state TEXT NOT NULL,
+            verdict_label TEXT NOT NULL,
+            returning_visitor INTEGER NOT NULL DEFAULT 0,
+            total_project_visits INTEGER NOT NULL DEFAULT 0,
+            projects_visited_in_window INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            suppression_reason TEXT NOT NULL DEFAULT '',
+            provider TEXT NOT NULL DEFAULT '',
+            provider_message_id TEXT NOT NULL DEFAULT '',
+            delivery_error TEXT NOT NULL DEFAULT '',
+            notification_title TEXT NOT NULL DEFAULT '',
+            notification_body TEXT NOT NULL DEFAULT '',
+            destination_url TEXT NOT NULL DEFAULT '',
+            details_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            delivered_at TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_traffic_notification_events_status_time
+            ON traffic_notification_events(status, event_timestamp DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_traffic_notification_events_person_time
+            ON traffic_notification_events(person_key, event_timestamp DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_traffic_notification_events_session_time
+            ON traffic_notification_events(session_id, event_timestamp DESC);
         """
     )
 

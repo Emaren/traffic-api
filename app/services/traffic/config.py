@@ -27,6 +27,10 @@ LIVE_TILE_LIMIT = int(os.getenv("TRAFFIC_LIVE_TILE_LIMIT", "25"))
 VISITS_HISTORY_LIMIT = int(os.getenv("TRAFFIC_VISITS_HISTORY_LIMIT", "250"))
 SERIES_BUCKET_MINUTES = int(os.getenv("TRAFFIC_SERIES_BUCKET_MINUTES", "30"))
 ALBERTA_TZ_NAME = os.getenv("TRAFFIC_ALBERTA_TZ", "America/Edmonton")
+NOTIFICATION_LOOP_SECONDS = float(os.getenv("TRAFFIC_NOTIFICATION_LOOP_SECONDS", "2.0"))
+NOTIFICATION_BATCH_LIMIT = int(os.getenv("TRAFFIC_NOTIFICATION_BATCH_LIMIT", "25"))
+SITE_BASE_URL = os.getenv("TRAFFIC_SITE_BASE_URL", "https://traffic.tokentap.ca").rstrip("/")
+ADMIN_API_KEY = os.getenv("TRAFFIC_ADMIN_API_KEY", "").strip()
 
 LEGACY_LOG_LINE_RE = re.compile(
     r'(?P<ip>[0-9a-fA-F:.]+)\s+\S+\s+\S+\s+\[(?P<ts>[^\]]+)\]\s+"(?P<request>[^"]*)"\s+'

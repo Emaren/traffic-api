@@ -8,11 +8,25 @@ import signal
 from time import monotonic
 import threading
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from app.services.traffic.config import PROJECTS
+from app.services.traffic.config import (
+    ADMIN_API_KEY,
+    NOTIFICATION_BATCH_LIMIT,
+    NOTIFICATION_LOOP_SECONDS,
+    PROJECTS,
+)
+from app.services.traffic.notifications import (
+    admin_api_configured,
+    build_notification_dashboard,
+    create_notification_mute,
+    delete_notification_mute,
+    process_notification_batch,
+    send_test_notification,
+    update_notification_settings,
+)
 from app.services.traffic.parse import iso_now
 from app.services.traffic_core import (
     build_live_visitors,
@@ -31,9 +45,18 @@ async def lifespan(app: FastAPI):
     shutdown_event = asyncio.Event()
     app.state.shutdown_event = shutdown_event
     app.state.active_streams = 0
+    app.state.notification_loop_state = {
+        "mode": "booting",
+        "checked": 0,
+        "delivered": 0,
+        "suppressed": 0,
+        "errors": 0,
+        "last_run_at": None,
+    }
 
     previous_handlers: dict[signal.Signals, object] = {}
     loop = asyncio.get_running_loop()
+    notification_task: asyncio.Task | None = None
 
     def request_shutdown(signum: int, _frame) -> None:
         loop.call_soon_threadsafe(shutdown_event.set)
@@ -46,10 +69,17 @@ async def lifespan(app: FastAPI):
             previous_handlers[signum] = signal.getsignal(signum)
             signal.signal(signum, request_shutdown)
 
+    notification_task = asyncio.create_task(notification_worker(app))
+
     try:
         yield
     finally:
         shutdown_event.set()
+        if notification_task is not None:
+            try:
+                await asyncio.wait_for(notification_task, timeout=NOTIFICATION_LOOP_SECONDS + 5)
+            except asyncio.TimeoutError:
+                notification_task.cancel()
         if threading.current_thread() is threading.main_thread():
             for signum, previous in previous_handlers.items():
                 signal.signal(signum, previous)
@@ -82,6 +112,64 @@ def get_shutdown_event(app: FastAPI) -> asyncio.Event:
 def get_active_streams(app: FastAPI) -> int:
     active_streams = getattr(app.state, "active_streams", 0)
     return active_streams if isinstance(active_streams, int) else 0
+
+
+def get_notification_loop_state(app: FastAPI) -> dict[str, object]:
+    loop_state = getattr(app.state, "notification_loop_state", None)
+    if isinstance(loop_state, dict):
+        return loop_state
+    fallback = {
+        "mode": "booting",
+        "checked": 0,
+        "delivered": 0,
+        "suppressed": 0,
+        "errors": 0,
+        "last_run_at": None,
+    }
+    app.state.notification_loop_state = fallback
+    return fallback
+
+
+async def notification_worker(app: FastAPI) -> None:
+    shutdown_event = get_shutdown_event(app)
+    while not shutdown_event.is_set():
+        try:
+            result = await asyncio.to_thread(
+                process_notification_batch,
+                NOTIFICATION_BATCH_LIMIT,
+            )
+            app.state.notification_loop_state = result
+        except Exception as exc:
+            app.state.notification_loop_state = {
+                "mode": "error",
+                "checked": 0,
+                "delivered": 0,
+                "suppressed": 0,
+                "errors": 1,
+                "last_run_at": iso_now(),
+                "message": str(exc),
+            }
+
+        try:
+            await asyncio.wait_for(shutdown_event.wait(), timeout=NOTIFICATION_LOOP_SECONDS)
+            break
+        except asyncio.TimeoutError:
+            continue
+
+
+def require_admin_api_key(
+    x_admin_key: str | None = Header(default=None, alias="X-Admin-Key"),
+) -> None:
+    if not admin_api_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Traffic admin API key is not configured",
+        )
+    if x_admin_key != ADMIN_API_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid admin key",
+        )
 
 
 def sse_payload(data: dict) -> str:
@@ -147,6 +235,70 @@ def healthz() -> dict[str, str | bool | int]:
         "shutdown_requested": get_shutdown_event(app).is_set(),
         "active_streams": get_active_streams(app),
         "generated_at": iso_now(),
+    }
+
+
+@app.get("/api/admin/notifications/dashboard")
+def api_admin_notifications_dashboard(
+    request: Request,
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    return build_notification_dashboard(loop_state=get_notification_loop_state(request.app))
+
+
+@app.put("/api/admin/notifications/settings")
+def api_admin_notification_settings(
+    payload: dict = Body(...),
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    settings = update_notification_settings(payload)
+    return {
+        "ok": True,
+        "generated_at": iso_now(),
+        "settings": settings,
+    }
+
+
+@app.post("/api/admin/notifications/mutes")
+def api_admin_notification_mutes(
+    payload: dict = Body(...),
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    try:
+        mute = create_notification_mute(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "generated_at": iso_now(),
+        "mute": mute,
+    }
+
+
+@app.delete("/api/admin/notifications/mutes/{mute_id}")
+def api_admin_notification_mute_delete(
+    mute_id: int,
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    delete_notification_mute(mute_id)
+    return {
+        "ok": True,
+        "generated_at": iso_now(),
+    }
+
+
+@app.post("/api/admin/notifications/test")
+def api_admin_notification_test(
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    try:
+        result = send_test_notification()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "generated_at": iso_now(),
+        "result": result,
     }
 
 
