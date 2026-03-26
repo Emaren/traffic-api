@@ -285,14 +285,14 @@ def api_project_human_series(
 def api_visits_history(
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    window_hours: int = Query(24, ge=1, le=168),
+    range_key: str = Query("all", pattern="^(24h|7d|30d|all)$"),
     classification: str | None = Query(None),
     project: str | None = Query(None),
 ) -> dict:
     return build_visits_history(
         limit=limit,
         offset=offset,
-        window_hours=window_hours,
+        range_key=range_key,
         classification=classification,
         project=project,
     )

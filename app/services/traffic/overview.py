@@ -504,11 +504,14 @@ def build_visits_history(
     *,
     limit: int = 100,
     offset: int = 0,
-    window_hours: int = 24,
+    range_key: str = "all",
     classification: str | None = None,
     project: str | None = None,
 ) -> dict[str, Any]:
-    sessions = build_sessions(collect_recent_entries(window_hours=window_hours))
+    range_config = _range_config(range_key)
+    window_hours = _window_hours_for_range(range_key)
+    entries, source_mode = collect_recent_entries_with_source(window_hours=window_hours)
+    sessions = build_sessions(entries)
 
     filtered = sessions
     if classification:
@@ -519,11 +522,43 @@ def build_visits_history(
     filtered = sorted(filtered, key=lambda item: item["ended_at"], reverse=True)
     total = len(filtered)
     items = filtered[offset : offset + limit]
+    oldest_filtered = filtered[-1] if filtered else None
+    requested_start = (
+        datetime.now(timezone.utc) - timedelta(hours=window_hours)
+        if window_hours is not None
+        else None
+    )
+
+    note: str | None = None
+    if source_mode != "durable_store":
+        note = "Durable storage is unavailable, so this archive is currently reading the live log tail."
+    elif oldest_filtered:
+        if range_key == "all":
+            note = (
+                "All-time currently means everything Traffic has stored for these matching sessions since "
+                f"{oldest_filtered['first_seen_alberta']}."
+            )
+        elif requested_start:
+            oldest_started_at = datetime.fromisoformat(oldest_filtered["first_seen_at"])
+            if oldest_started_at > requested_start:
+                note = (
+                    f"Durable storage for these matching sessions currently begins at "
+                    f"{oldest_filtered['first_seen_alberta']}, so this {range_config['label'].lower()} "
+                    "view starts there."
+                )
+    elif range_key == "all":
+        note = "All-time archive is ready, but no sessions match the current filters yet."
 
     return {
         "ok": True,
         "generated_at": iso_now(),
         "window_hours": window_hours,
+        "range_key": range_key,
+        "range_label": range_config["label"],
+        "coverage_mode": source_mode,
+        "coverage_started_at": oldest_filtered["first_seen_at"] if oldest_filtered else None,
+        "coverage_started_alberta": oldest_filtered["first_seen_alberta"] if oldest_filtered else None,
+        "note": note,
         "offset": offset,
         "limit": limit,
         "total": total,
