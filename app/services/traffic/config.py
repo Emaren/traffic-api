@@ -31,6 +31,9 @@ NOTIFICATION_LOOP_SECONDS = float(os.getenv("TRAFFIC_NOTIFICATION_LOOP_SECONDS",
 NOTIFICATION_BATCH_LIMIT = int(os.getenv("TRAFFIC_NOTIFICATION_BATCH_LIMIT", "25"))
 SITE_BASE_URL = os.getenv("TRAFFIC_SITE_BASE_URL", "https://traffic.tokentap.ca").rstrip("/")
 ADMIN_API_KEY = os.getenv("TRAFFIC_ADMIN_API_KEY", "").strip()
+WEB_PUSH_PRIVATE_KEY = os.getenv("TRAFFIC_WEB_PUSH_PRIVATE_KEY", "").strip()
+WEB_PUSH_PUBLIC_KEY = os.getenv("TRAFFIC_WEB_PUSH_PUBLIC_KEY", "").strip()
+WEB_PUSH_SUBJECT = os.getenv("TRAFFIC_WEB_PUSH_SUBJECT", SITE_BASE_URL).strip() or SITE_BASE_URL
 
 LEGACY_LOG_LINE_RE = re.compile(
     r'(?P<ip>[0-9a-fA-F:.]+)\s+\S+\s+\S+\s+\[(?P<ts>[^\]]+)\]\s+"(?P<request>[^"]*)"\s+'

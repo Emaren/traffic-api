@@ -23,7 +23,9 @@ from app.services.traffic.notifications import (
     build_notification_dashboard,
     create_notification_mute,
     delete_notification_mute,
+    delete_web_push_subscription,
     process_notification_batch,
+    register_web_push_subscription,
     send_test_notification,
     update_notification_settings,
 )
@@ -299,6 +301,34 @@ def api_admin_notification_test(
         "ok": True,
         "generated_at": iso_now(),
         "result": result,
+    }
+
+
+@app.post("/api/admin/web-push/subscriptions")
+def api_admin_web_push_subscription_create(
+    payload: dict = Body(...),
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    try:
+        subscription = register_web_push_subscription(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "generated_at": iso_now(),
+        "subscription": subscription,
+    }
+
+
+@app.delete("/api/admin/web-push/subscriptions/{subscription_id}")
+def api_admin_web_push_subscription_delete(
+    subscription_id: int,
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    delete_web_push_subscription(subscription_id)
+    return {
+        "ok": True,
+        "generated_at": iso_now(),
     }
 
 

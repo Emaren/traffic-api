@@ -127,6 +127,22 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_traffic_notification_events_session_time
             ON traffic_notification_events(session_id, event_timestamp DESC);
+
+        CREATE TABLE IF NOT EXISTS traffic_push_subscriptions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            endpoint TEXT NOT NULL UNIQUE,
+            subscription_json TEXT NOT NULL,
+            device_label TEXT NOT NULL DEFAULT '',
+            user_agent TEXT NOT NULL DEFAULT '',
+            active INTEGER NOT NULL DEFAULT 1,
+            last_error TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_success_at TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_traffic_push_subscriptions_active
+            ON traffic_push_subscriptions(active, updated_at DESC);
         """
     )
 

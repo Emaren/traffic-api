@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import base64
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
+
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from py_vapid import Vapid01
+from pywebpush import WebPushException, webpush
 
 from app.services.traffic.classify import classify_request, detect_route_kind
 from app.services.traffic.config import (
@@ -16,6 +20,9 @@ from app.services.traffic.config import (
     NOTIFICATION_BATCH_LIMIT,
     PROJECTS,
     SITE_BASE_URL,
+    WEB_PUSH_PRIVATE_KEY,
+    WEB_PUSH_PUBLIC_KEY,
+    WEB_PUSH_SUBJECT,
 )
 from app.services.traffic.overview import should_ignore_entry
 from app.services.traffic.parse import iso_now, parse_iso_timestamp
@@ -58,6 +65,9 @@ DEFAULT_NOTIFICATION_SETTINGS: dict[str, Any] = {
             "token": "",
             "priority": 4,
             "tags": "traffic,eyes",
+        },
+        "web_push": {
+            "ttl_seconds": 120,
         },
     },
     "policy": {
@@ -122,7 +132,7 @@ def _normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
 
     normalized["enabled"] = _normalize_bool(payload.get("enabled"))
     provider = str(payload.get("provider") or normalized["provider"]).strip().lower()
-    normalized["provider"] = provider if provider in {"pushover", "ntfy"} else "pushover"
+    normalized["provider"] = provider if provider in {"pushover", "ntfy", "web_push"} else "pushover"
     armed_at = str(payload.get("armed_at") or "").strip()
     normalized["armed_at"] = armed_at or None
     site_base_url = str(payload.get("site_base_url") or normalized["site_base_url"]).strip()
@@ -148,6 +158,17 @@ def _normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
                 "token": str(ntfy.get("token") or "").strip(),
                 "priority": _normalize_int(ntfy.get("priority"), default=4, minimum=1, maximum=5),
                 "tags": str(ntfy.get("tags") or "traffic,eyes").strip(),
+            }
+
+        web_push = incoming_providers.get("web_push") or {}
+        if isinstance(web_push, dict):
+            normalized["providers"]["web_push"] = {
+                "ttl_seconds": _normalize_int(
+                    web_push.get("ttl_seconds"),
+                    default=120,
+                    minimum=30,
+                    maximum=86400,
+                ),
             }
 
     incoming_policy = payload.get("policy") or {}
@@ -246,6 +267,236 @@ def _event_timestamp_alberta(value: str) -> str:
     if not parsed:
         return value
     return parsed.astimezone(ALBERTA_ZONE).strftime("%Y-%m-%d %I:%M:%S %p")
+
+
+def _b64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _web_push_public_key() -> str:
+    if WEB_PUSH_PUBLIC_KEY:
+        return WEB_PUSH_PUBLIC_KEY
+    if not WEB_PUSH_PRIVATE_KEY:
+        return ""
+    try:
+        vapid = Vapid01.from_string(WEB_PUSH_PRIVATE_KEY)
+        public_bytes = vapid.public_key.public_bytes(
+            encoding=Encoding.X962,
+            format=PublicFormat.UncompressedPoint,
+        )
+        return _b64url_encode(public_bytes)
+    except Exception:
+        return ""
+
+
+def web_push_configured() -> bool:
+    return bool(WEB_PUSH_PRIVATE_KEY and _web_push_public_key())
+
+
+def web_push_public_key() -> str:
+    return _web_push_public_key()
+
+
+def _web_push_subject() -> str:
+    return WEB_PUSH_SUBJECT or SITE_BASE_URL
+
+
+def list_web_push_subscriptions(*, active_only: bool = False) -> list[dict[str, Any]]:
+    with _connect() as connection:
+        _ensure_schema(connection)
+        query = """
+            SELECT
+                id,
+                endpoint,
+                subscription_json,
+                device_label,
+                user_agent,
+                active,
+                last_error,
+                created_at,
+                updated_at,
+                last_success_at
+            FROM traffic_push_subscriptions
+        """
+        params: tuple[Any, ...] = ()
+        if active_only:
+            query += " WHERE active = 1"
+        query += " ORDER BY active DESC, updated_at DESC, id DESC"
+        rows = connection.execute(query, params).fetchall()
+
+    subscriptions: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            subscription = json.loads(row["subscription_json"] or "{}")
+        except Exception:
+            subscription = {}
+
+        endpoint = row["endpoint"] or ""
+        subscriptions.append(
+            {
+                "id": int(row["id"]),
+                "endpoint": endpoint,
+                "endpoint_tail": endpoint[-36:] if endpoint else "",
+                "device_label": row["device_label"] or "",
+                "user_agent": row["user_agent"] or "",
+                "active": bool(row["active"]),
+                "last_error": row["last_error"] or "",
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "last_success_at": row["last_success_at"],
+                "subscription": subscription,
+            }
+        )
+    return subscriptions
+
+
+def register_web_push_subscription(payload: dict[str, Any]) -> dict[str, Any]:
+    subscription = payload.get("subscription") or {}
+    if not isinstance(subscription, dict):
+        raise ValueError("Web-push subscription payload is required")
+
+    endpoint = str(subscription.get("endpoint") or "").strip()
+    keys = subscription.get("keys") or {}
+    if not isinstance(keys, dict):
+        keys = {}
+    p256dh = str(keys.get("p256dh") or "").strip()
+    auth = str(keys.get("auth") or "").strip()
+
+    if not endpoint or not p256dh or not auth:
+        raise ValueError("Web-push subscription is missing endpoint or keys")
+
+    device_label = str(payload.get("device_label") or "").strip() or "Traffic device"
+    user_agent = str(payload.get("user_agent") or "").strip()
+    now = iso_now()
+    subscription_json = json.dumps(
+        {
+            "endpoint": endpoint,
+            "keys": {
+                "p256dh": p256dh,
+                "auth": auth,
+            },
+        }
+    )
+
+    with _connect() as connection:
+        _ensure_schema(connection)
+        connection.execute(
+            """
+            INSERT INTO traffic_push_subscriptions (
+                endpoint,
+                subscription_json,
+                device_label,
+                user_agent,
+                active,
+                last_error,
+                created_at,
+                updated_at,
+                last_success_at
+            ) VALUES (?, ?, ?, ?, 1, '', ?, ?, NULL)
+            ON CONFLICT(endpoint) DO UPDATE SET
+                subscription_json = excluded.subscription_json,
+                device_label = excluded.device_label,
+                user_agent = excluded.user_agent,
+                active = 1,
+                last_error = '',
+                updated_at = excluded.updated_at
+            """,
+            (
+                endpoint,
+                subscription_json,
+                device_label,
+                user_agent,
+                now,
+                now,
+            ),
+        )
+        connection.commit()
+
+        row = connection.execute(
+            """
+            SELECT
+                id,
+                endpoint,
+                subscription_json,
+                device_label,
+                user_agent,
+                active,
+                last_error,
+                created_at,
+                updated_at,
+                last_success_at
+            FROM traffic_push_subscriptions
+            WHERE endpoint = ?
+            """,
+            (endpoint,),
+        ).fetchone()
+
+    if not row:
+        raise RuntimeError("Could not persist web-push subscription")
+
+    return {
+        "id": int(row["id"]),
+        "endpoint": row["endpoint"],
+        "endpoint_tail": row["endpoint"][-36:] if row["endpoint"] else "",
+        "device_label": row["device_label"] or "",
+        "user_agent": row["user_agent"] or "",
+        "active": bool(row["active"]),
+        "last_error": row["last_error"] or "",
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "last_success_at": row["last_success_at"],
+    }
+
+
+def delete_web_push_subscription(subscription_id: int) -> None:
+    with _connect() as connection:
+        _ensure_schema(connection)
+        connection.execute(
+            "DELETE FROM traffic_push_subscriptions WHERE id = ?",
+            (subscription_id,),
+        )
+        connection.commit()
+
+
+def _mark_web_push_subscription_result(
+    connection: Any,
+    *,
+    endpoint: str,
+    active: bool,
+    last_error: str = "",
+    success_at: str | None = None,
+) -> None:
+    connection.execute(
+        """
+        UPDATE traffic_push_subscriptions
+        SET
+            active = ?,
+            last_error = ?,
+            updated_at = ?,
+            last_success_at = COALESCE(?, last_success_at)
+        WHERE endpoint = ?
+        """,
+        (
+            1 if active else 0,
+            last_error,
+            iso_now(),
+            success_at,
+            endpoint,
+        ),
+    )
+
+
+def _web_push_info() -> dict[str, Any]:
+    subscriptions = list_web_push_subscriptions()
+    active = [subscription for subscription in subscriptions if subscription["active"]]
+    return {
+        "configured": web_push_configured(),
+        "public_key": web_push_public_key(),
+        "subject": _web_push_subject(),
+        "ready": bool(web_push_configured() and active),
+        "active_count": len(active),
+        "subscriptions": subscriptions,
+    }
 
 
 def list_notification_mutes() -> list[dict[str, Any]]:
@@ -460,6 +711,7 @@ def build_notification_dashboard(loop_state: dict[str, Any] | None = None) -> di
         "projects": [{"slug": project["slug"], "name": project["name"]} for project in PROJECTS],
         "settings": settings,
         "provider_ready": provider_ready,
+        "web_push": _web_push_info(),
         "mutes": list_notification_mutes(),
         "recent_events": list_notification_events(limit=120),
         "stats": _notification_stats(),
@@ -475,6 +727,8 @@ def _provider_ready(settings: dict[str, Any]) -> bool:
     if provider == "ntfy":
         provider_settings = settings["providers"]["ntfy"]
         return bool(provider_settings.get("base_url") and provider_settings.get("topic"))
+    if provider == "web_push":
+        return _web_push_info()["ready"]
     return False
 
 
@@ -828,6 +1082,122 @@ def _send_ntfy(
     }
 
 
+def _send_web_push(
+    settings: dict[str, Any],
+    *,
+    title: str,
+    body: str,
+    url: str,
+) -> dict[str, Any]:
+    if not web_push_configured():
+        raise RuntimeError("Traffic web push is not configured yet on the server.")
+
+    subscriptions = list_web_push_subscriptions(active_only=True)
+    if not subscriptions:
+        raise RuntimeError("No active Traffic web-push subscriptions are registered yet.")
+
+    payload = json.dumps(
+        {
+            "title": title,
+            "body": body,
+            "url": url,
+            "icon": f"{SITE_BASE_URL}/icons/traffic-192.png",
+            "badge": f"{SITE_BASE_URL}/icons/traffic-180.png",
+            "tag": "traffic-observatory",
+        }
+    )
+    vapid_claims = {"sub": _web_push_subject()}
+    ttl_seconds = int(settings["providers"]["web_push"]["ttl_seconds"])
+
+    sent_devices: list[dict[str, Any]] = []
+    failed_devices: list[dict[str, Any]] = []
+
+    with _connect() as connection:
+        _ensure_schema(connection)
+
+        for subscription in subscriptions:
+            endpoint = subscription["endpoint"]
+            try:
+                response = webpush(
+                    subscription_info=subscription["subscription"],
+                    data=payload,
+                    vapid_private_key=WEB_PUSH_PRIVATE_KEY,
+                    vapid_claims=vapid_claims,
+                    ttl=ttl_seconds,
+                    timeout=10,
+                )
+                status_code = getattr(response, "status_code", None)
+                _mark_web_push_subscription_result(
+                    connection,
+                    endpoint=endpoint,
+                    active=True,
+                    last_error="",
+                    success_at=iso_now(),
+                )
+                sent_devices.append(
+                    {
+                        "subscription_id": subscription["id"],
+                        "device_label": subscription["device_label"],
+                        "endpoint_tail": subscription["endpoint_tail"],
+                        "status_code": status_code,
+                    }
+                )
+            except WebPushException as exc:
+                status_code = getattr(exc.response, "status_code", None)
+                message = str(exc)
+                deactivate = status_code in {404, 410}
+                _mark_web_push_subscription_result(
+                    connection,
+                    endpoint=endpoint,
+                    active=not deactivate,
+                    last_error=message,
+                )
+                failed_devices.append(
+                    {
+                        "subscription_id": subscription["id"],
+                        "device_label": subscription["device_label"],
+                        "endpoint_tail": subscription["endpoint_tail"],
+                        "status_code": status_code,
+                        "error": message,
+                        "deactivated": deactivate,
+                    }
+                )
+            except Exception as exc:
+                message = str(exc)
+                _mark_web_push_subscription_result(
+                    connection,
+                    endpoint=endpoint,
+                    active=True,
+                    last_error=message,
+                )
+                failed_devices.append(
+                    {
+                        "subscription_id": subscription["id"],
+                        "device_label": subscription["device_label"],
+                        "endpoint_tail": subscription["endpoint_tail"],
+                        "error": message,
+                        "deactivated": False,
+                    }
+                )
+
+        connection.commit()
+
+    if not sent_devices:
+        if failed_devices:
+            raise RuntimeError(failed_devices[0].get("error") or "Traffic web push failed")
+        raise RuntimeError("Traffic web push did not find any active devices")
+
+    return {
+        "provider": "web_push",
+        "provider_message_id": f"{len(sent_devices)}-device{'s' if len(sent_devices) != 1 else ''}",
+        "details": {
+            "sent": sent_devices,
+            "failed": failed_devices,
+            "count": len(sent_devices),
+        },
+    }
+
+
 def _deliver_notification(
     settings: dict[str, Any],
     *,
@@ -840,6 +1210,8 @@ def _deliver_notification(
         return _send_pushover(settings, title=title, body=body, url=url)
     if provider == "ntfy":
         return _send_ntfy(settings, title=title, body=body, url=url)
+    if provider == "web_push":
+        return _send_web_push(settings, title=title, body=body, url=url)
     raise RuntimeError("No supported notification provider selected")
 
 
@@ -1034,7 +1406,7 @@ def process_notification_batch(limit: int = NOTIFICATION_BATCH_LIMIT) -> dict[st
                     details=delivered_payload.get("details", {}),
                 )
                 delivered += 1
-            except (HTTPError, URLError, RuntimeError, TimeoutError, json.JSONDecodeError) as exc:
+            except Exception as exc:
                 _record_notification_event(
                     connection,
                     entry=entry,

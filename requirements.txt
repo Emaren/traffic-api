@@ -4,3 +4,4 @@ sqlalchemy
 asyncpg
 python-dotenv
 pydantic
+pywebpush
