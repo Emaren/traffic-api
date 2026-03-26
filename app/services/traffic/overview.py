@@ -9,6 +9,7 @@ from app.services.traffic.config import (
     INTERNAL_IGNORE_PATHS,
     LIVE_TILE_LIMIT,
     LOG_PATH,
+    PERSIST_DB_PATH,
     SERIES_BUCKET_MINUTES,
     TAIL_LINES,
     TOP_LIMIT,
@@ -19,6 +20,7 @@ from app.services.traffic.config import (
 from app.services.traffic.geo import get_geo_details
 from app.services.traffic.normalize import ALLOWED_HOSTS, is_allowed_host, project_for_host
 from app.services.traffic.parse import iso_now, parse_log_line, read_recent_log_lines
+from app.services.traffic.persistence import load_recent_entries, persistence_enabled
 from app.services.traffic.sessions import (
     activity_sequence_for_events,
     build_path_stats,
@@ -54,15 +56,21 @@ def should_ignore_entry(entry: dict[str, Any]) -> bool:
 
 def collect_recent_entries(window_hours: int = 24) -> list[dict[str, Any]]:
     cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
-    lines = read_recent_log_lines(LOG_PATH, TAIL_LINES)
-
     recent_entries: list[dict[str, Any]] = []
+    persisted_entries = load_recent_entries(window_hours=window_hours)
 
-    for line in lines:
-        parsed = parse_log_line(line)
-        if not parsed:
-            continue
+    if persisted_entries is None:
+        lines = read_recent_log_lines(LOG_PATH, TAIL_LINES)
 
+        source_entries: list[dict[str, Any]] = []
+        for line in lines:
+            parsed = parse_log_line(line)
+            if parsed:
+                source_entries.append(parsed)
+    else:
+        source_entries = persisted_entries
+
+    for parsed in source_entries:
         if not is_allowed_host(parsed["host"]):
             continue
 
@@ -341,6 +349,11 @@ def build_overview(window_hours: int = 24) -> dict[str, Any]:
         notes.append(f"GeoIP DB loaded: {GEOIP_DB_PATH}")
     else:
         notes.append(f"GeoIP DB missing: {GEOIP_DB_PATH}")
+
+    if persistence_enabled():
+        notes.append(f"Durable traffic store active: {PERSIST_DB_PATH}")
+    else:
+        notes.append("Durable traffic store disabled: Traffic is reading the live log tail only.")
 
     notes.append("Route classification is live: page, api, probe, asset.")
     notes.append("Live visitor tower and human series endpoints are now available.")

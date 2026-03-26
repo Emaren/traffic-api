@@ -6,6 +6,16 @@ from pathlib import Path
 
 LOG_PATH = Path(os.getenv("TRAFFIC_LOG_PATH", "runtime/dev_access.log"))
 GEOIP_DB_PATH = Path(os.getenv("TRAFFIC_GEOIP_DB_PATH", "runtime/geoip/GeoLite2-City.mmdb"))
+PERSIST_ENABLED = os.getenv("TRAFFIC_PERSIST_ENABLED", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+PERSIST_DB_PATH = Path(
+    os.getenv("TRAFFIC_PERSIST_DB_PATH", "runtime/traffic_history.sqlite3")
+)
+PERSIST_RETENTION_DAYS = int(os.getenv("TRAFFIC_PERSIST_RETENTION_DAYS", "120"))
 
 TAIL_LINES = int(os.getenv("TRAFFIC_TAIL_LINES", "5000"))
 SESSION_GAP_MINUTES = int(os.getenv("TRAFFIC_SESSION_GAP_MINUTES", "30"))
