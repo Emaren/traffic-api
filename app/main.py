@@ -236,11 +236,11 @@ def api_live_visitors_stream(
 @app.get("/api/visitors/{visitor_id}")
 def api_visitor_profile(
     visitor_id: str,
-    window_hours: int = Query(24, ge=1, le=168),
+    range_key: str = Query("all", pattern="^(24h|7d|30d|all)$"),
 ) -> dict:
     return build_visitor_profile(
         visitor_id=visitor_id,
-        window_hours=window_hours,
+        range_key=range_key,
     )
 
 
@@ -248,13 +248,13 @@ def api_visitor_profile(
 async def api_visitor_profile_stream(
     request: Request,
     visitor_id: str,
-    window_hours: int = Query(24, ge=1, le=168),
+    range_key: str = Query("all", pattern="^(24h|7d|30d|all)$"),
     poll_seconds: float = Query(1.5, ge=0.5, le=10.0),
     heartbeat_seconds: int = Query(20, ge=5, le=60),
 ) -> StreamingResponse:
     initial_profile = build_visitor_profile(
         visitor_id=visitor_id,
-        window_hours=window_hours,
+        range_key=range_key,
     )
     if not initial_profile.get("ok"):
         raise HTTPException(status_code=404, detail="Unknown visitor")
@@ -263,7 +263,7 @@ async def api_visitor_profile_stream(
         request=request,
         builder=lambda: build_visitor_profile(
             visitor_id=visitor_id,
-            window_hours=window_hours,
+            range_key=range_key,
         ),
         poll_seconds=poll_seconds,
         heartbeat_seconds=heartbeat_seconds,

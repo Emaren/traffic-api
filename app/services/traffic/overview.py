@@ -13,6 +13,7 @@ from app.services.traffic.config import (
     SERIES_BUCKET_MINUTES,
     TAIL_LINES,
     TOP_LIMIT,
+    VISITOR_SESSION_LIMIT,
     VISITS_HISTORY_LIMIT,
     PROJECTS,
     ALBERTA_TZ_NAME,
@@ -535,6 +536,14 @@ def _align_bucket(value: datetime, bucket_minutes: int) -> datetime:
     return datetime.fromtimestamp(aligned_timestamp, tz=value.tzinfo or timezone.utc)
 
 
+def _range_config(range_key: str) -> dict[str, Any]:
+    return PROJECT_GRAPH_RANGES.get(range_key, PROJECT_GRAPH_RANGES["24h"])
+
+
+def _window_hours_for_range(range_key: str) -> int | None:
+    return _range_config(range_key)["window_hours"]
+
+
 def _format_alberta_timestamp(value: datetime) -> str:
     return value.astimezone(ALBERTA_ZONE).strftime("%Y-%m-%d %I:%M %p")
 
@@ -987,9 +996,11 @@ def build_project_live_feed(
 def build_visitor_profile(
     *,
     visitor_id: str,
-    window_hours: int = 24,
+    range_key: str = "all",
 ) -> dict[str, Any]:
-    recent_entries = collect_recent_entries(window_hours=window_hours)
+    range_config = _range_config(range_key)
+    window_hours = _window_hours_for_range(range_key)
+    recent_entries, source_mode = collect_recent_entries_with_source(window_hours=window_hours)
     sessions = build_sessions(recent_entries)
     visitor_sessions = [
         session for session in sessions if session.get("visitor_profile_id") == visitor_id
@@ -1000,12 +1011,34 @@ def build_visitor_profile(
             "ok": False,
             "generated_at": iso_now(),
             "window_hours": window_hours,
+            "range_key": range_key,
             "visitor_id": visitor_id,
         }
 
     newest_first = _chronological_sessions_desc(visitor_sessions)
     latest = newest_first[0]
     oldest = newest_first[-1]
+    requested_start = (
+        datetime.now(timezone.utc) - timedelta(hours=window_hours)
+        if window_hours is not None
+        else None
+    )
+    coverage_started_at = datetime.fromisoformat(oldest["first_seen_at"])
+
+    note: str | None = None
+    if range_key == "all":
+        note = (
+            "All-time currently means everything Traffic has stored for this visitor since "
+            f"{oldest['first_seen_alberta']}."
+        )
+    elif requested_start and coverage_started_at > requested_start:
+        note = (
+            f"Durable storage for this visitor currently begins at {oldest['first_seen_alberta']}, "
+            f"so this {range_config['label'].lower()} view starts there."
+        )
+
+    if source_mode != "durable_store":
+        note = "Durable storage is unavailable, so this visitor profile is currently reading the live log tail."
 
     project_counts = Counter(session["project_slug"] for session in newest_first)
     project_names = {
@@ -1047,7 +1080,7 @@ def build_visitor_profile(
         }
 
     profile_sessions = []
-    for session in newest_first[:25]:
+    for session in newest_first[:VISITOR_SESSION_LIMIT]:
         profile_sessions.append(
             {
                 **session,
@@ -1059,6 +1092,13 @@ def build_visitor_profile(
         "ok": True,
         "generated_at": iso_now(),
         "window_hours": window_hours,
+        "range_key": range_key,
+        "range_label": range_config["label"],
+        "coverage_mode": source_mode,
+        "coverage_started_at": oldest["first_seen_at"],
+        "coverage_started_alberta": oldest["first_seen_alberta"],
+        "note": note,
+        "session_limit": VISITOR_SESSION_LIMIT,
         "visitor": {
             "id": visitor_id,
             "alias": latest["visitor_alias"],
