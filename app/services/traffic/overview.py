@@ -698,12 +698,27 @@ def _project_graph_payload(
 
 def build_project_human_series(
     *,
-    window_hours: int = 24,
-    bucket_minutes: int = SERIES_BUCKET_MINUTES,
+    range_key: str = "24h",
+    bucket_minutes_override: int | None = None,
 ) -> dict[str, Any]:
+    range_config = PROJECT_GRAPH_RANGES.get(range_key, PROJECT_GRAPH_RANGES["24h"])
+    window_hours = range_config["window_hours"]
+    recent_entries, source_mode = collect_recent_entries_with_source(window_hours=window_hours)
     now = datetime.now(timezone.utc)
-    window_start = now - timedelta(hours=window_hours)
-    first_bucket = _align_bucket(window_start, bucket_minutes)
+    earliest_entry_at = recent_entries[0]["timestamp"] if recent_entries else None
+    requested_start = (
+        now - timedelta(hours=window_hours) if window_hours is not None else None
+    )
+
+    if requested_start is None:
+        effective_start = earliest_entry_at or (now - timedelta(hours=24))
+    elif earliest_entry_at and earliest_entry_at > requested_start:
+        effective_start = earliest_entry_at
+    else:
+        effective_start = requested_start
+
+    bucket_minutes = bucket_minutes_override or _bucket_minutes_for_span(effective_start, now)
+    first_bucket = _align_bucket(effective_start, bucket_minutes)
     last_bucket = _align_bucket(now, bucket_minutes)
 
     bucket_list: list[datetime] = []
@@ -712,7 +727,7 @@ def build_project_human_series(
         bucket_list.append(cursor)
         cursor += timedelta(minutes=bucket_minutes)
 
-    sessions = build_sessions(collect_recent_entries(window_hours=window_hours))
+    sessions = build_sessions(recent_entries)
 
     points_by_project: dict[str, Counter] = defaultdict(Counter)
     live_counts = Counter()
@@ -757,11 +772,40 @@ def build_project_human_series(
                 }
             )
 
+    note: str | None = None
+    if range_key == "all":
+        if earliest_entry_at:
+            note = (
+                "All-time currently means everything Traffic has stored for the observatory since "
+                f"{_format_alberta_timestamp(earliest_entry_at)}."
+            )
+        elif source_mode == "durable_store":
+            note = "All-time view is ready, but Traffic has not stored any human sessions yet."
+    elif earliest_entry_at and requested_start and earliest_entry_at > requested_start:
+        note = (
+            f"Durable storage for the observatory currently begins at "
+            f"{_format_alberta_timestamp(earliest_entry_at)}, so this {range_config['label'].lower()} "
+            "view starts there."
+        )
+
+    if source_mode != "durable_store":
+        note = (
+            "Durable storage is unavailable, so these graphs are currently reading the live log tail."
+        )
+
     return {
         "ok": True,
         "generated_at": iso_now(),
+        "range_key": range_key,
+        "range_label": range_config["label"],
         "window_hours": window_hours,
         "bucket_minutes": bucket_minutes,
+        "coverage_mode": source_mode,
+        "coverage_started_at": earliest_entry_at.isoformat() if earliest_entry_at else None,
+        "coverage_started_alberta": (
+            _format_alberta_timestamp(earliest_entry_at) if earliest_entry_at else None
+        ),
+        "note": note,
         "series_kind": "new_human_visitors",
         "projects": projects_output,
     }

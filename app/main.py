@@ -333,12 +333,12 @@ async def api_visitor_profile_stream(
 
 @app.get("/api/project-human-series")
 def api_project_human_series(
-    window_hours: int = Query(24, ge=1, le=168),
-    bucket_minutes: int = Query(30, ge=1, le=120),
+    range_key: str = Query("24h", pattern="^(24h|7d|30d|all)$"),
+    bucket_minutes: int | None = Query(None, ge=1, le=1440),
 ) -> dict:
     return build_project_human_series(
-        window_hours=window_hours,
-        bucket_minutes=bucket_minutes,
+        range_key=range_key,
+        bucket_minutes_override=bucket_minutes,
     )
 
 
