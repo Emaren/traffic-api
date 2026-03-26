@@ -820,3 +820,70 @@ def build_project_live_feed(
         "visible_count": len(live_feed),
         "live_feed": live_feed,
     }
+
+
+def build_visitor_profile(
+    *,
+    visitor_id: str,
+    window_hours: int = 24,
+) -> dict[str, Any]:
+    sessions = build_sessions(collect_recent_entries(window_hours=window_hours))
+    visitor_sessions = [
+        session for session in sessions if session.get("visitor_profile_id") == visitor_id
+    ]
+
+    if not visitor_sessions:
+        return {
+            "ok": False,
+            "generated_at": iso_now(),
+            "window_hours": window_hours,
+            "visitor_id": visitor_id,
+        }
+
+    newest_first = _chronological_sessions_desc(visitor_sessions)
+    latest = newest_first[0]
+    oldest = newest_first[-1]
+
+    project_counts = Counter(session["project_slug"] for session in newest_first)
+    project_names = {
+        session["project_slug"]: session["project_name"] for session in newest_first
+    }
+    project_last_seen = {
+        session["project_slug"]: session["last_seen_at"] for session in newest_first
+    }
+
+    return {
+        "ok": True,
+        "generated_at": iso_now(),
+        "window_hours": window_hours,
+        "visitor": {
+            "id": visitor_id,
+            "alias": latest["visitor_alias"],
+            "person_key": latest["person_key"],
+            "ip": latest["ip"],
+            "country": latest["country"],
+            "country_code": latest["country_code"],
+            "area": latest["area"],
+            "city": latest["city"],
+            "device": latest["device"],
+            "os": latest["os"],
+            "browser": latest["browser"],
+            "first_seen_at": oldest["first_seen_at"],
+            "last_seen_at": latest["last_seen_at"],
+            "first_seen_alberta": oldest["first_seen_alberta"],
+            "last_seen_alberta": latest["last_seen_alberta"],
+            "projects_visited": len(project_counts),
+            "total_sessions": len(newest_first),
+            "active_now": any(session["active_now"] for session in newest_first),
+        },
+        "projects": [
+            {
+                "slug": slug,
+                "name": project_names[slug],
+                "visits": count,
+                "last_seen_at": project_last_seen[slug],
+            }
+            for slug, count in project_counts.most_common()
+        ],
+        "sessions": newest_first[:25],
+    }

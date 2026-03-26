@@ -10,6 +10,7 @@ from app.services.traffic_core import (
     build_overview,
     build_project_detail,
     build_project_live_feed,
+    build_visitor_profile,
     build_project_human_series,
     build_visits_history,
 )
@@ -119,6 +120,17 @@ def api_live_visitors(
     return build_live_visitors(
         limit=limit,
         history_limit=history_limit,
+        window_hours=window_hours,
+    )
+
+
+@app.get("/api/visitors/{visitor_id}")
+def api_visitor_profile(
+    visitor_id: str,
+    window_hours: int = Query(24, ge=1, le=168),
+) -> dict:
+    return build_visitor_profile(
+        visitor_id=visitor_id,
         window_hours=window_hours,
     )
 

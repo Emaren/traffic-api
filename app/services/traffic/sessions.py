@@ -88,6 +88,10 @@ def person_key_for_session(ip: str, ua: str | None) -> str:
     return f"{ip}|{(ua or '').lower()}"
 
 
+def visitor_profile_id_for_person(person_key: str) -> str:
+    return hashlib.sha1(person_key.encode("utf-8")).hexdigest()[:16]
+
+
 def humanize_reason(reason: str) -> str:
     return REASON_LABELS.get(reason, reason.replace("_", " "))
 
@@ -315,6 +319,7 @@ def build_single_session(events: list[dict[str, Any]], now: datetime | None = No
         "session_id": f"{first['host']}|{first['ip']}|{first['timestamp_iso']}",
         "visitor_key": f"{first['host']}|{first['ip']}|{ua_lower}",
         "person_key": person_key,
+        "visitor_profile_id": visitor_profile_id_for_person(person_key),
         "project_slug": project["slug"],
         "project_name": project["name"],
         "project_category": project["category"],
