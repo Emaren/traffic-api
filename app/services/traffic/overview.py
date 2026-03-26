@@ -19,7 +19,16 @@ from app.services.traffic.config import (
 from app.services.traffic.geo import get_geo_details
 from app.services.traffic.normalize import ALLOWED_HOSTS, is_allowed_host, project_for_host
 from app.services.traffic.parse import iso_now, parse_log_line, read_recent_log_lines
-from app.services.traffic.sessions import build_path_stats, build_sessions, live_session_sort_key
+from app.services.traffic.sessions import (
+    activity_sequence_for_events,
+    build_path_stats,
+    build_sessions,
+    live_session_sort_key,
+    ordered_unique,
+    page_sequence_for_events,
+    session_id_for_events,
+    split_session_events,
+)
 
 from zoneinfo import ZoneInfo
 
@@ -827,7 +836,8 @@ def build_visitor_profile(
     visitor_id: str,
     window_hours: int = 24,
 ) -> dict[str, Any]:
-    sessions = build_sessions(collect_recent_entries(window_hours=window_hours))
+    recent_entries = collect_recent_entries(window_hours=window_hours)
+    sessions = build_sessions(recent_entries)
     visitor_sessions = [
         session for session in sessions if session.get("visitor_profile_id") == visitor_id
     ]
@@ -851,6 +861,46 @@ def build_visitor_profile(
     project_last_seen = {
         session["project_slug"]: session["last_seen_at"] for session in newest_first
     }
+    visitor_session_map = {
+        session["session_id"]: session for session in visitor_sessions
+    }
+    enriched_by_session_id: dict[str, dict[str, Any]] = {}
+
+    for session_events in split_session_events(recent_entries):
+        session_id = session_id_for_events(session_events)
+        matched_session = visitor_session_map.get(session_id)
+        if not matched_session:
+            continue
+
+        full_page_sequence = page_sequence_for_events(session_events)
+        enriched_by_session_id[session_id] = {
+            "entry_page": full_page_sequence[0]
+            if full_page_sequence
+            else matched_session["entry_page"],
+            "current_page": full_page_sequence[-1]
+            if full_page_sequence
+            else matched_session["current_page"],
+            "exit_page": full_page_sequence[-1]
+            if full_page_sequence
+            else matched_session["exit_page"],
+            "next_page": full_page_sequence[1]
+            if len(full_page_sequence) > 1
+            else matched_session["next_page"],
+            "page_sequence": full_page_sequence,
+            "page_count": len(ordered_unique(full_page_sequence))
+            if full_page_sequence
+            else matched_session["page_count"],
+            "activity_sequence": activity_sequence_for_events(session_events),
+        }
+
+    profile_sessions = []
+    for session in newest_first[:25]:
+        profile_sessions.append(
+            {
+                **session,
+                **enriched_by_session_id.get(session["session_id"], {}),
+            }
+        )
 
     return {
         "ok": True,
@@ -885,5 +935,5 @@ def build_visitor_profile(
             }
             for slug, count in project_counts.most_common()
         ],
-        "sessions": newest_first[:25],
+        "sessions": profile_sessions,
     }

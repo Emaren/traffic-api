@@ -80,6 +80,86 @@ def compress_consecutive(values: list[str]) -> list[str]:
     return output
 
 
+def session_id_for_events(events: list[dict[str, Any]]) -> str:
+    first = events[0]
+    return f"{first['host']}|{first['ip']}|{first['timestamp_iso']}"
+
+
+def split_session_events(recent_entries: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+
+    for entry in recent_entries:
+        host = entry["host"]
+        if host == UNKNOWN_HOST:
+            continue
+
+        visitor_key = (host, entry["ip"], (entry["ua"] or "").lower())
+        grouped[visitor_key].append(entry)
+
+    session_gap_seconds = SESSION_GAP_MINUTES * 60
+    session_groups: list[list[dict[str, Any]]] = []
+
+    for events in grouped.values():
+        ordered_events = sorted(events, key=lambda item: item["timestamp"])
+        current_session: list[dict[str, Any]] = []
+
+        for event in ordered_events:
+            if not current_session:
+                current_session = [event]
+                continue
+
+            gap = int((event["timestamp"] - current_session[-1]["timestamp"]).total_seconds())
+            if gap > session_gap_seconds:
+                session_groups.append(current_session)
+                current_session = [event]
+            else:
+                current_session.append(event)
+
+        if current_session:
+            session_groups.append(current_session)
+
+    return session_groups
+
+
+def path_events_for_session(
+    events: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    trackable_events = [event for event in events if is_trackable_path(event["normalized_path"])]
+    page_events = [
+        event for event in trackable_events if detect_route_kind(event["normalized_path"]) == "page"
+    ]
+    return trackable_events, page_events
+
+
+def page_sequence_for_events(events: list[dict[str, Any]]) -> list[str]:
+    trackable_events, page_events = path_events_for_session(events)
+    source_events = page_events if page_events else trackable_events
+    return compress_consecutive([event["normalized_path"] for event in source_events])
+
+
+def activity_sequence_for_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    trackable_events, _page_events = path_events_for_session(events)
+    activity_sequence: list[dict[str, Any]] = []
+
+    for index, event in enumerate(trackable_events):
+        path = event["normalized_path"]
+        route_kind = detect_route_kind(path)
+        activity_sequence.append(
+            {
+                "id": hashlib.sha1(
+                    f"{event['timestamp_iso']}|{path}|{route_kind}|{index}".encode("utf-8")
+                ).hexdigest()[:16],
+                "path": path,
+                "route_kind": route_kind,
+                "category": event["category"],
+                "timestamp": event["timestamp_iso"],
+                "timestamp_alberta": to_alberta_display(event["timestamp"]),
+            }
+        )
+
+    return activity_sequence
+
+
 def to_alberta_display(value: datetime) -> str:
     return value.astimezone(ALBERTA_ZONE).strftime("%Y-%m-%d %I:%M:%S %p")
 
@@ -226,13 +306,10 @@ def build_single_session(events: list[dict[str, Any]], now: datetime | None = No
     first = events[0]
     last = events[-1]
 
-    trackable_events = [event for event in events if is_trackable_path(event["normalized_path"])]
-    page_events = [event for event in trackable_events if detect_route_kind(event["normalized_path"]) == "page"]
+    trackable_events, page_events = path_events_for_session(events)
 
-    page_sequence = compress_consecutive(
-        [event["normalized_path"] for event in (page_events if page_events else trackable_events)]
-    )[:50]
-    ordered_paths = ordered_unique(page_sequence)[:20]
+    page_sequence = page_sequence_for_events(events)
+    ordered_paths = ordered_unique(page_sequence)
 
     entry_page = page_sequence[0] if page_sequence else first["normalized_path"]
     current_page = page_sequence[-1] if page_sequence else last["normalized_path"]
@@ -316,7 +393,7 @@ def build_single_session(events: list[dict[str, Any]], now: datetime | None = No
     person_key = person_key_for_session(first["ip"], first["ua"])
 
     return {
-        "session_id": f"{first['host']}|{first['ip']}|{first['timestamp_iso']}",
+        "session_id": session_id_for_events(events),
         "visitor_key": f"{first['host']}|{first['ip']}|{ua_lower}",
         "person_key": person_key,
         "visitor_profile_id": visitor_profile_id_for_person(person_key),
@@ -417,38 +494,11 @@ def enrich_sessions(sessions: list[dict[str, Any]]) -> None:
 
 
 def build_sessions(recent_entries: list[dict[str, Any]], limit: int | None = None) -> list[dict[str, Any]]:
-    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
-
-    for entry in recent_entries:
-        host = entry["host"]
-        if host == UNKNOWN_HOST:
-            continue
-
-        visitor_key = (host, entry["ip"], (entry["ua"] or "").lower())
-        grouped[visitor_key].append(entry)
-
-    session_gap_seconds = SESSION_GAP_MINUTES * 60
     sessions: list[dict[str, Any]] = []
     now = datetime.now(timezone.utc)
 
-    for events in grouped.values():
-        ordered_events = sorted(events, key=lambda item: item["timestamp"])
-        current_session: list[dict[str, Any]] = []
-
-        for event in ordered_events:
-            if not current_session:
-                current_session = [event]
-                continue
-
-            gap = int((event["timestamp"] - current_session[-1]["timestamp"]).total_seconds())
-            if gap > session_gap_seconds:
-                sessions.append(build_single_session(current_session, now=now))
-                current_session = [event]
-            else:
-                current_session.append(event)
-
-        if current_session:
-            sessions.append(build_single_session(current_session, now=now))
+    for events in split_session_events(recent_entries):
+        sessions.append(build_single_session(events, now=now))
 
     enrich_sessions(sessions)
     sessions.sort(key=lambda item: item["ended_at"], reverse=True)
