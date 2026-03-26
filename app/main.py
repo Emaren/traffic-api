@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 import json
+import signal
 from time import monotonic
+import threading
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,7 +25,37 @@ from app.services.traffic_core import (
     build_visits_history,
 )
 
-app = FastAPI(title="Traffic API", version="0.3.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    shutdown_event = asyncio.Event()
+    app.state.shutdown_event = shutdown_event
+    app.state.active_streams = 0
+
+    previous_handlers: dict[signal.Signals, object] = {}
+    loop = asyncio.get_running_loop()
+
+    def request_shutdown(signum: int, _frame) -> None:
+        loop.call_soon_threadsafe(shutdown_event.set)
+        previous = previous_handlers.get(signal.Signals(signum))
+        if callable(previous):
+            previous(signum, _frame)
+
+    if threading.current_thread() is threading.main_thread():
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            previous_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, request_shutdown)
+
+    try:
+        yield
+    finally:
+        shutdown_event.set()
+        if threading.current_thread() is threading.main_thread():
+            for signum, previous in previous_handlers.items():
+                signal.signal(signum, previous)
+
+
+app = FastAPI(title="Traffic API", version="0.3.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -34,6 +67,21 @@ app.add_middleware(
     allow_methods=["GET"],
     allow_headers=["*"],
 )
+
+
+def get_shutdown_event(app: FastAPI) -> asyncio.Event:
+    shutdown_event = getattr(app.state, "shutdown_event", None)
+    if isinstance(shutdown_event, asyncio.Event):
+        return shutdown_event
+
+    fallback_event = asyncio.Event()
+    app.state.shutdown_event = fallback_event
+    return fallback_event
+
+
+def get_active_streams(app: FastAPI) -> int:
+    active_streams = getattr(app.state, "active_streams", 0)
+    return active_streams if isinstance(active_streams, int) else 0
 
 
 def sse_payload(data: dict) -> str:
@@ -50,23 +98,34 @@ def stream_json_response(
     async def event_stream():
         last_signature = ""
         last_heartbeat = monotonic()
+        shutdown_event = get_shutdown_event(request.app)
+        request.app.state.active_streams = get_active_streams(request.app) + 1
 
-        while True:
-            if await request.is_disconnected():
-                break
+        try:
+            while True:
+                if shutdown_event.is_set():
+                    break
+                if await request.is_disconnected():
+                    break
 
-            payload = builder()
-            signature = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+                payload = builder()
+                signature = json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
-            if signature != last_signature:
-                last_signature = signature
-                last_heartbeat = monotonic()
-                yield sse_payload(payload)
-            elif monotonic() - last_heartbeat >= heartbeat_seconds:
-                last_heartbeat = monotonic()
-                yield ": keep-alive\n\n"
+                if signature != last_signature:
+                    last_signature = signature
+                    last_heartbeat = monotonic()
+                    yield sse_payload(payload)
+                elif monotonic() - last_heartbeat >= heartbeat_seconds:
+                    last_heartbeat = monotonic()
+                    yield ": keep-alive\n\n"
 
-            await asyncio.sleep(poll_seconds)
+                try:
+                    await asyncio.wait_for(shutdown_event.wait(), timeout=poll_seconds)
+                    break
+                except asyncio.TimeoutError:
+                    continue
+        finally:
+            request.app.state.active_streams = max(0, get_active_streams(request.app) - 1)
 
     return StreamingResponse(
         event_stream(),
@@ -80,11 +139,13 @@ def stream_json_response(
 
 
 @app.get("/healthz")
-def healthz() -> dict[str, str | bool]:
+def healthz() -> dict[str, str | bool | int]:
     return {
         "ok": True,
         "service": "traffic-api",
         "version": app.version,
+        "shutdown_requested": get_shutdown_event(app).is_set(),
+        "active_streams": get_active_streams(app),
         "generated_at": iso_now(),
     }
 
