@@ -15,6 +15,7 @@ from app.services.traffic_core import (
     build_live_visitors,
     build_overview,
     build_project_detail,
+    build_project_graph,
     build_project_live_feed,
     build_visitor_profile,
     build_project_human_series,
@@ -116,6 +117,20 @@ def api_project_detail(
         project_slug=project_slug,
         window_hours=window_hours,
         bucket_minutes=bucket_minutes,
+    )
+
+
+@app.get("/api/projects/{project_slug}/graph")
+def api_project_graph(
+    project_slug: str,
+    range_key: str = Query("24h", pattern="^(24h|7d|30d|all)$"),
+) -> dict:
+    if not any(project["slug"] == project_slug for project in PROJECTS):
+        raise HTTPException(status_code=404, detail="Unknown project")
+
+    return build_project_graph(
+        project_slug=project_slug,
+        range_key=range_key,
     )
 
 

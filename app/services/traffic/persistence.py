@@ -201,7 +201,10 @@ def sync_log_to_persistence(log_path: Path = LOG_PATH) -> dict[str, int | str]:
     return {"inserted": inserted, "offset": final_offset, "mode": "persisted"}
 
 
-def load_recent_entries(window_hours: int, log_path: Path = LOG_PATH) -> list[dict[str, Any]] | None:
+def load_recent_entries(
+    window_hours: int | None,
+    log_path: Path = LOG_PATH,
+) -> list[dict[str, Any]] | None:
     if not persistence_enabled():
         return None
 
@@ -210,13 +213,10 @@ def load_recent_entries(window_hours: int, log_path: Path = LOG_PATH) -> list[di
     except Exception:
         return None
 
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).isoformat()
-
     try:
         with _connect() as connection:
             _ensure_schema(connection)
-            rows = connection.execute(
-                """
+            query = """
                 SELECT
                     timestamp,
                     ip,
@@ -231,11 +231,14 @@ def load_recent_entries(window_hours: int, log_path: Path = LOG_PATH) -> list[di
                     host,
                     raw
                 FROM traffic_entries
-                WHERE timestamp >= ?
-                ORDER BY timestamp ASC
-                """,
-                (cutoff,),
-            ).fetchall()
+            """
+            params: tuple[str, ...] = ()
+            if window_hours is not None:
+                cutoff = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).isoformat()
+                query += " WHERE timestamp >= ?"
+                params = (cutoff,)
+            query += " ORDER BY timestamp ASC"
+            rows = connection.execute(query, params).fetchall()
     except Exception:
         return None
 

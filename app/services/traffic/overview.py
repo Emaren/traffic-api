@@ -35,6 +35,12 @@ from app.services.traffic.sessions import (
 from zoneinfo import ZoneInfo
 
 ALBERTA_ZONE = ZoneInfo(ALBERTA_TZ_NAME)
+PROJECT_GRAPH_RANGES: dict[str, dict[str, Any]] = {
+    "24h": {"label": "24 Hours", "window_hours": 24},
+    "7d": {"label": "1 Week", "window_hours": 24 * 7},
+    "30d": {"label": "1 Month", "window_hours": 24 * 30},
+    "all": {"label": "All Time", "window_hours": None},
+}
 
 
 def should_ignore_entry(entry: dict[str, Any]) -> bool:
@@ -54,10 +60,24 @@ def should_ignore_entry(entry: dict[str, Any]) -> bool:
     return False
 
 
-def collect_recent_entries(window_hours: int = 24) -> list[dict[str, Any]]:
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+def collect_recent_entries(
+    window_hours: int | None = 24,
+) -> list[dict[str, Any]]:
+    recent_entries, _ = collect_recent_entries_with_source(window_hours=window_hours)
+    return recent_entries
+
+
+def collect_recent_entries_with_source(
+    window_hours: int | None = 24,
+) -> tuple[list[dict[str, Any]], str]:
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(hours=window_hours)
+        if window_hours is not None
+        else None
+    )
     recent_entries: list[dict[str, Any]] = []
     persisted_entries = load_recent_entries(window_hours=window_hours)
+    source_mode = "durable_store" if persisted_entries is not None else "log_tail"
 
     if persisted_entries is None:
         lines = read_recent_log_lines(LOG_PATH, TAIL_LINES)
@@ -74,7 +94,7 @@ def collect_recent_entries(window_hours: int = 24) -> list[dict[str, Any]]:
         if not is_allowed_host(parsed["host"]):
             continue
 
-        if parsed["timestamp"] < cutoff:
+        if cutoff is not None and parsed["timestamp"] < cutoff:
             continue
 
         parsed["category"] = classify_request(parsed["ua"], parsed["normalized_path"])
@@ -85,7 +105,7 @@ def collect_recent_entries(window_hours: int = 24) -> list[dict[str, Any]]:
 
         recent_entries.append(parsed)
 
-    return recent_entries
+    return recent_entries, source_mode
 
 
 def build_overview(window_hours: int = 24) -> dict[str, Any]:
@@ -511,8 +531,125 @@ def build_visits_history(
 
 
 def _align_bucket(value: datetime, bucket_minutes: int) -> datetime:
-    minute = (value.minute // bucket_minutes) * bucket_minutes
-    return value.replace(minute=minute, second=0, microsecond=0)
+    aligned_timestamp = int(value.timestamp() // (bucket_minutes * 60)) * (bucket_minutes * 60)
+    return datetime.fromtimestamp(aligned_timestamp, tz=value.tzinfo or timezone.utc)
+
+
+def _format_alberta_timestamp(value: datetime) -> str:
+    return value.astimezone(ALBERTA_ZONE).strftime("%Y-%m-%d %I:%M %p")
+
+
+def _bucket_minutes_for_span(start: datetime, end: datetime) -> int:
+    span_hours = max((end - start).total_seconds() / 3600, 0.5)
+    if span_hours <= 36:
+        return 30
+    if span_hours <= 72:
+        return 60
+    if span_hours <= 24 * 10:
+        return 180
+    if span_hours <= 24 * 40:
+        return 720
+    return 1440
+
+
+def _bucket_label(bucket: datetime, bucket_minutes: int) -> str:
+    local_bucket = bucket.astimezone(ALBERTA_ZONE)
+    if bucket_minutes >= 1440:
+        return local_bucket.strftime("%b %d")
+    if bucket_minutes >= 60:
+        return local_bucket.strftime("%b %d %I %p")
+    return local_bucket.strftime("%I:%M %p")
+
+
+def _project_graph_payload(
+    *,
+    project_slug: str,
+    range_key: str = "24h",
+    bucket_minutes_override: int | None = None,
+) -> dict[str, Any]:
+    range_config = PROJECT_GRAPH_RANGES.get(range_key, PROJECT_GRAPH_RANGES["24h"])
+    window_hours = range_config["window_hours"]
+    recent_entries, source_mode = collect_recent_entries_with_source(window_hours=window_hours)
+    project_entries = [
+        entry
+        for entry in recent_entries
+        if project_for_host(entry["host"])["slug"] == project_slug
+    ]
+    sessions = build_sessions(project_entries)
+
+    now = datetime.now(timezone.utc)
+    earliest_entry_at = project_entries[0]["timestamp"] if project_entries else None
+    requested_start = (
+        now - timedelta(hours=window_hours) if window_hours is not None else None
+    )
+
+    if requested_start is None:
+        effective_start = earliest_entry_at or (now - timedelta(hours=24))
+    elif earliest_entry_at and earliest_entry_at > requested_start:
+        effective_start = earliest_entry_at
+    else:
+        effective_start = requested_start
+
+    bucket_minutes = bucket_minutes_override or _bucket_minutes_for_span(effective_start, now)
+    first_bucket = _align_bucket(effective_start, bucket_minutes)
+    last_bucket = _align_bucket(now, bucket_minutes)
+
+    bucket_list: list[datetime] = []
+    cursor = first_bucket
+    while cursor <= last_bucket:
+        bucket_list.append(cursor)
+        cursor += timedelta(minutes=bucket_minutes)
+
+    series_counter = Counter()
+    for session in sessions:
+        if session["classification_state"] != "human_confirmed":
+            continue
+
+        started_at = datetime.fromisoformat(session["started_at"])
+        bucket = _align_bucket(started_at, bucket_minutes)
+        if first_bucket <= bucket <= last_bucket:
+            series_counter[bucket.isoformat()] += 1
+
+    note: str | None = None
+    if range_key == "all":
+        if earliest_entry_at:
+            note = (
+                "All-time currently means everything Traffic has stored for this project since "
+                f"{_format_alberta_timestamp(earliest_entry_at)}."
+            )
+        elif source_mode == "durable_store":
+            note = "All-time view is ready, but this project has no stored visits yet."
+    elif earliest_entry_at and requested_start and earliest_entry_at > requested_start:
+        note = (
+            f"Durable storage for this project currently begins at "
+            f"{_format_alberta_timestamp(earliest_entry_at)}, so this {range_config['label'].lower()} "
+            "view starts there."
+        )
+
+    if source_mode != "durable_store":
+        note = "Durable storage is unavailable, so this graph is currently reading the live log tail."
+
+    return {
+        "label": "New likely-human visitors",
+        "range_key": range_key,
+        "range_label": range_config["label"],
+        "window_hours": window_hours,
+        "bucket_minutes": bucket_minutes,
+        "coverage_mode": source_mode,
+        "coverage_started_at": earliest_entry_at.isoformat() if earliest_entry_at else None,
+        "coverage_started_alberta": (
+            _format_alberta_timestamp(earliest_entry_at) if earliest_entry_at else None
+        ),
+        "note": note,
+        "points": [
+            {
+                "bucket_start": bucket.isoformat(),
+                "label": _bucket_label(bucket, bucket_minutes),
+                "visitors": series_counter.get(bucket.isoformat(), 0),
+            }
+            for bucket in bucket_list
+        ],
+    }
 
 
 def build_project_human_series(
@@ -583,6 +720,34 @@ def build_project_human_series(
         "bucket_minutes": bucket_minutes,
         "series_kind": "new_human_visitors",
         "projects": projects_output,
+    }
+
+
+def build_project_graph(
+    *,
+    project_slug: str,
+    range_key: str = "24h",
+) -> dict[str, Any]:
+    project = next((item for item in PROJECTS if item["slug"] == project_slug), None)
+    if not project:
+        return {
+            "ok": False,
+            "generated_at": iso_now(),
+            "project_slug": project_slug,
+            "range_key": range_key,
+        }
+
+    return {
+        "ok": True,
+        "generated_at": iso_now(),
+        "project": {
+            "slug": project["slug"],
+            "name": project["name"],
+        },
+        "graph": _project_graph_payload(
+            project_slug=project["slug"],
+            range_key=range_key,
+        ),
     }
 
 
@@ -702,26 +867,11 @@ def build_project_detail(
     top_pages = build_path_stats(recent_entries)
     live_feed = _project_live_feed_sessions(sessions, limit=10)
     recent_sessions = _chronological_sessions_desc(sessions, limit=10)
-
-    now = datetime.now(timezone.utc)
-    window_start = now - timedelta(hours=window_hours)
-    first_bucket = _align_bucket(window_start, bucket_minutes)
-    last_bucket = _align_bucket(now, bucket_minutes)
-    bucket_list: list[datetime] = []
-    cursor = first_bucket
-    while cursor <= last_bucket:
-        bucket_list.append(cursor)
-        cursor += timedelta(minutes=bucket_minutes)
-
-    series_counter = Counter()
-    for session in sessions:
-        if session["classification_state"] != "human_confirmed":
-            continue
-
-        started_at = datetime.fromisoformat(session["started_at"])
-        bucket = _align_bucket(started_at, bucket_minutes)
-        if first_bucket <= bucket <= last_bucket:
-            series_counter[bucket.isoformat()] += 1
+    graph = _project_graph_payload(
+        project_slug=project["slug"],
+        range_key="24h",
+        bucket_minutes_override=bucket_minutes,
+    )
 
     country_rows = [
         {
@@ -762,7 +912,7 @@ def build_project_detail(
         "ok": True,
         "generated_at": iso_now(),
         "window_hours": window_hours,
-        "bucket_minutes": bucket_minutes,
+        "bucket_minutes": graph["bucket_minutes"],
         "project": {
             "slug": project["slug"],
             "name": project["name"],
@@ -777,17 +927,7 @@ def build_project_detail(
             "avg_session_seconds": avg_session_seconds,
             "unique_visitors": len(unique_people),
         },
-        "graph": {
-            "label": "New likely-human visitors",
-            "points": [
-                {
-                    "bucket_start": bucket.isoformat(),
-                    "label": bucket.astimezone(ALBERTA_ZONE).strftime("%I:%M %p"),
-                    "visitors": series_counter.get(bucket.isoformat(), 0),
-                }
-                for bucket in bucket_list
-            ],
-        },
+        "graph": graph,
         "live_feed": live_feed,
         "recent_sessions": recent_sessions,
         "hosts": hosts,
