@@ -10,3 +10,5 @@ build/
 .mypy_cache/
 .DS_Store
 runtime/
+db/*.sqlite3
+db/*.sqlite3-*

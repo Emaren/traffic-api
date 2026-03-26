@@ -13,7 +13,7 @@ PERSIST_ENABLED = os.getenv("TRAFFIC_PERSIST_ENABLED", "1").strip().lower() not 
     "off",
 }
 PERSIST_DB_PATH = Path(
-    os.getenv("TRAFFIC_PERSIST_DB_PATH", "runtime/traffic_history.sqlite3")
+    os.getenv("TRAFFIC_PERSIST_DB_PATH", "db/traffic_history.sqlite3")
 )
 PERSIST_RETENTION_DAYS = int(os.getenv("TRAFFIC_PERSIST_RETENTION_DAYS", "120"))
 
