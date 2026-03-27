@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlencode
@@ -12,7 +13,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from py_vapid import Vapid01
 from pywebpush import WebPushException, webpush
 
-from app.services.traffic.classify import classify_request, detect_route_kind
+from app.services.traffic.classify import classify_request, detect_route_kind, is_suspicious_path
 from app.services.traffic.config import (
     ALBERTA_TZ_NAME,
     ADMIN_API_KEY,
@@ -72,6 +73,7 @@ DEFAULT_NOTIFICATION_SETTINGS: dict[str, Any] = {
     },
     "policy": {
         "page_hits_only": True,
+        "filter_exploit_probes": True,
         "include_human_confirmed": True,
         "include_likely_human": True,
         "include_unclear": True,
@@ -85,6 +87,26 @@ DEFAULT_NOTIFICATION_SETTINGS: dict[str, Any] = {
         "max_notifications_per_path_per_visitor_per_hour": 0,
     },
 }
+
+EXECUTABLE_PATH_RE = re.compile(
+    r"/[^/?]+\.(?:php\d*|phtml|phar|asp|aspx|jsp|cgi|pl)(?:$|[/?])",
+    re.IGNORECASE,
+)
+
+EXPLOIT_PATH_SNIPPETS = (
+    "/wp-admin",
+    "/wp-content",
+    "/wp-includes",
+    "xmlrpc.php",
+    "phpmyadmin",
+    "/cgi-bin",
+    "/vendor/phpunit",
+    "/boaform",
+    "/hnap1",
+    "/public/index.php",
+    "/storage/",
+    ".env",
+)
 
 
 def admin_api_configured() -> bool:
@@ -175,6 +197,9 @@ def _normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
     if isinstance(incoming_policy, dict):
         normalized["policy"] = {
             "page_hits_only": _normalize_bool(incoming_policy.get("page_hits_only", True)),
+            "filter_exploit_probes": _normalize_bool(
+                incoming_policy.get("filter_exploit_probes", True)
+            ),
             "include_human_confirmed": _normalize_bool(
                 incoming_policy.get("include_human_confirmed", True)
             ),
@@ -946,6 +971,8 @@ def _suppression_reason(
     policy = settings["policy"]
     if policy["page_hits_only"] and entry["route_kind"] != "page":
         return "page_only_filter"
+    if policy["filter_exploit_probes"] and _looks_like_exploit_probe(entry["normalized_path"]):
+        return "exploit_probe_filter"
 
     selected_projects = policy["selected_projects"]
     if selected_projects and session["project_slug"] not in selected_projects:
@@ -1019,6 +1046,19 @@ def _suppression_reason(
             return "path_hour_cap"
 
     return None
+
+
+def _looks_like_exploit_probe(path: str | None) -> bool:
+    lowered = (path or "").strip().lower()
+    if not lowered:
+        return False
+    if detect_route_kind(lowered) == "probe":
+        return True
+    if is_suspicious_path(lowered):
+        return True
+    if any(snippet in lowered for snippet in EXPLOIT_PATH_SNIPPETS):
+        return True
+    return bool(EXECUTABLE_PATH_RE.search(lowered))
 
 
 def _notification_title(session: dict[str, Any]) -> str:
