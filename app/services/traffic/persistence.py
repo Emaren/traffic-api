@@ -313,6 +313,9 @@ def sync_log_to_persistence(log_path: Path = LOG_PATH) -> dict[str, int | str]:
 def load_recent_entries(
     window_hours: int | None,
     log_path: Path = LOG_PATH,
+    *,
+    hosts: list[str] | None = None,
+    include_raw_fields: bool = True,
 ) -> list[dict[str, Any]] | None:
     if not persistence_enabled():
         return None
@@ -325,29 +328,51 @@ def load_recent_entries(
     try:
         with _connect() as connection:
             _ensure_schema(connection)
+            if hosts is not None and not hosts:
+                return []
+
+            selected_columns = [
+                "timestamp",
+                "ip",
+                "raw_path",
+                "normalized_path",
+                "referrer_host",
+                "ua",
+                "host",
+            ]
+            if include_raw_fields:
+                selected_columns = [
+                    "timestamp",
+                    "ip",
+                    "request",
+                    "method",
+                    "raw_path",
+                    "normalized_path",
+                    "status",
+                    "referrer",
+                    "referrer_host",
+                    "ua",
+                    "host",
+                    "raw",
+                ]
             query = """
                 SELECT
-                    timestamp,
-                    ip,
-                    request,
-                    method,
-                    raw_path,
-                    normalized_path,
-                    status,
-                    referrer,
-                    referrer_host,
-                    ua,
-                    host,
-                    raw
+                    {}
                 FROM traffic_entries
-            """
-            params: tuple[str, ...] = ()
+            """.format(",\n                    ".join(selected_columns))
+            params: list[str] = []
+            where_clauses: list[str] = []
             if window_hours is not None:
                 cutoff = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).isoformat()
-                query += " WHERE timestamp >= ?"
-                params = (cutoff,)
+                where_clauses.append("timestamp >= ?")
+                params.append(cutoff)
+            if hosts is not None:
+                where_clauses.append(f"host IN ({', '.join('?' for _ in hosts)})")
+                params.extend(hosts)
+            if where_clauses:
+                query += " WHERE " + " AND ".join(where_clauses)
             query += " ORDER BY timestamp ASC"
-            rows = connection.execute(query, params).fetchall()
+            rows = connection.execute(query, tuple(params)).fetchall()
     except Exception:
         return None
 
@@ -362,17 +387,18 @@ def load_recent_entries(
                 "ip": row["ip"],
                 "timestamp": parsed_timestamp,
                 "timestamp_iso": row["timestamp"],
-                "request": row["request"],
-                "method": row["method"],
                 "raw_path": row["raw_path"],
                 "normalized_path": row["normalized_path"],
-                "status": row["status"],
-                "referrer": row["referrer"],
                 "referrer_host": row["referrer_host"],
                 "ua": row["ua"],
                 "host": row["host"],
-                "raw": row["raw"],
             }
         )
+        if include_raw_fields:
+            entries[-1]["request"] = row["request"]
+            entries[-1]["method"] = row["method"]
+            entries[-1]["status"] = row["status"]
+            entries[-1]["referrer"] = row["referrer"]
+            entries[-1]["raw"] = row["raw"]
 
     return entries

@@ -671,7 +671,14 @@ def api_visits_history(
     range_key: str = Query("all", pattern="^(24h|7d|30d|all)$"),
     classification: str | None = Query(None),
     project: str | None = Query(None),
+    projects: str | None = Query(None),
 ) -> dict:
+    selected_projects: list[str] | None = None
+    if projects is not None:
+        selected_projects = [value.strip() for value in projects.split(",") if value.strip()]
+    elif project:
+        selected_projects = [project]
+
     return cached_response(
         "visits_history",
         ttl_seconds=VISITS_HISTORY_CACHE_TTL_SECONDS,
@@ -680,11 +687,11 @@ def api_visits_history(
             offset=offset,
             range_key=range_key,
             classification=classification,
-            project=project,
+            project_slugs=selected_projects,
         ),
         limit=limit,
         offset=offset,
         range_key=range_key,
         classification=classification,
-        project=project,
+        projects=",".join(selected_projects or ()),
     )

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
+from threading import Lock
+from time import monotonic
 from typing import Any
 
 from app.services.traffic.classify import classify_request, detect_route_kind
@@ -42,6 +44,10 @@ PROJECT_GRAPH_RANGES: dict[str, dict[str, Any]] = {
     "30d": {"label": "1 Month", "window_hours": 24 * 30},
     "all": {"label": "All Time", "window_hours": None},
 }
+SESSION_SNAPSHOT_CACHE_TTL_SECONDS = 3.0
+SESSION_SNAPSHOT_CACHE_LIMIT = 8
+_SESSION_SNAPSHOT_CACHE_LOCK = Lock()
+_SESSION_SNAPSHOT_CACHE: dict[tuple[int | None, tuple[str, ...]], dict[str, Any]] = {}
 
 
 def should_ignore_entry(entry: dict[str, Any]) -> bool:
@@ -70,6 +76,8 @@ def collect_recent_entries(
 
 def collect_recent_entries_with_source(
     window_hours: int | None = 24,
+    *,
+    project_slugs: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     cutoff = (
         datetime.now(timezone.utc) - timedelta(hours=window_hours)
@@ -77,7 +85,12 @@ def collect_recent_entries_with_source(
         else None
     )
     recent_entries: list[dict[str, Any]] = []
-    persisted_entries = load_recent_entries(window_hours=window_hours)
+    project_hosts = _hosts_for_projects(project_slugs)
+    persisted_entries = load_recent_entries(
+        window_hours=window_hours,
+        hosts=project_hosts,
+        include_raw_fields=False,
+    )
     source_mode = "durable_store" if persisted_entries is not None else "log_tail"
 
     if persisted_entries is None:
@@ -98,6 +111,10 @@ def collect_recent_entries_with_source(
         if cutoff is not None and parsed["timestamp"] < cutoff:
             continue
 
+        project = project_for_host(parsed["host"])
+        if project_slugs is not None and project["slug"] not in project_slugs:
+            continue
+
         parsed["category"] = classify_request(parsed["ua"], parsed["normalized_path"])
         parsed["route_kind"] = detect_route_kind(parsed["normalized_path"])
 
@@ -109,10 +126,94 @@ def collect_recent_entries_with_source(
     return recent_entries, source_mode
 
 
+def _hosts_for_projects(project_slugs: set[str] | None) -> list[str] | None:
+    if project_slugs is None:
+        return None
+
+    return sorted(
+        {
+            host
+            for project in PROJECTS
+            if project["slug"] in project_slugs
+            for host in project["hosts"]
+        }
+    )
+
+
+def _session_snapshot_key(
+    window_hours: int | None,
+    project_slugs: set[str] | None,
+) -> tuple[int | None, tuple[str, ...]]:
+    return window_hours, tuple(sorted(project_slugs or ()))
+
+
+def _cached_session_snapshot(
+    window_hours: int | None,
+    *,
+    project_slugs: set[str] | None = None,
+) -> dict[str, Any] | None:
+    cache_key = _session_snapshot_key(window_hours, project_slugs)
+    now_tick = monotonic()
+
+    with _SESSION_SNAPSHOT_CACHE_LOCK:
+        cached = _SESSION_SNAPSHOT_CACHE.get(cache_key)
+        if not cached or cached["expires_at"] <= now_tick:
+            return None
+        return cached["value"]
+
+
+def _store_session_snapshot(
+    window_hours: int | None,
+    *,
+    project_slugs: set[str] | None = None,
+    sessions: list[dict[str, Any]],
+    source_mode: str,
+) -> dict[str, Any]:
+    cache_key = _session_snapshot_key(window_hours, project_slugs)
+    value = {"sessions": sessions, "source_mode": source_mode}
+
+    with _SESSION_SNAPSHOT_CACHE_LOCK:
+        if len(_SESSION_SNAPSHOT_CACHE) >= SESSION_SNAPSHOT_CACHE_LIMIT:
+            _SESSION_SNAPSHOT_CACHE.clear()
+        _SESSION_SNAPSHOT_CACHE[cache_key] = {
+            "expires_at": monotonic() + SESSION_SNAPSHOT_CACHE_TTL_SECONDS,
+            "value": value,
+        }
+
+    return value
+
+
+def _build_session_snapshot(
+    *,
+    window_hours: int | None,
+    project_slugs: set[str] | None = None,
+) -> dict[str, Any]:
+    cached = _cached_session_snapshot(window_hours, project_slugs=project_slugs)
+    if cached:
+        return cached
+
+    entries, source_mode = collect_recent_entries_with_source(
+        window_hours=window_hours,
+        project_slugs=project_slugs,
+    )
+    sessions = build_sessions(entries)
+    return _store_session_snapshot(
+        window_hours,
+        project_slugs=project_slugs,
+        sessions=sessions,
+        source_mode=source_mode,
+    )
+
+
+def _project_options() -> list[dict[str, str]]:
+    return [{"slug": project["slug"], "name": project["name"]} for project in PROJECTS]
+
+
 def build_overview(range_key: str = "24h") -> dict[str, Any]:
     range_config = _range_config(range_key)
     window_hours = _window_hours_for_range(range_key)
     recent_entries, source_mode = collect_recent_entries_with_source(window_hours=window_hours)
+    cached_snapshot = _cached_session_snapshot(window_hours)
     earliest_entry_at = min((entry["timestamp"] for entry in recent_entries), default=None)
     now = datetime.now(timezone.utc)
     requested_start = (
@@ -177,7 +278,15 @@ def build_overview(range_key: str = "24h") -> dict[str, Any]:
         else:
             unknown_requests += 1
 
-    sessions = build_sessions(recent_entries)
+    if cached_snapshot and cached_snapshot["source_mode"] == source_mode:
+        sessions = cached_snapshot["sessions"]
+    else:
+        sessions = build_sessions(recent_entries)
+        _store_session_snapshot(
+            window_hours,
+            sessions=sessions,
+            source_mode=source_mode,
+        )
     likely_human_states = {"human_confirmed", "likely_human"}
     automated_states = {"bot", "suspicious"}
 
@@ -462,7 +571,8 @@ def build_live_visitors(
     history_limit: int = VISITS_HISTORY_LIMIT,
     window_hours: int = 24,
 ) -> dict[str, Any]:
-    sessions = build_sessions(collect_recent_entries(window_hours=window_hours))
+    snapshot = _build_session_snapshot(window_hours=window_hours)
+    sessions = snapshot["sessions"]
 
     tower_candidates = [
         session
@@ -505,6 +615,7 @@ def build_live_visitors(
         "history_count": max(0, len(history_candidates) - limit),
         "stream_total": len(history_candidates),
         "stream_items": stream_items,
+        "available_projects": _project_options(),
         "project_counts": project_counts,
         "top_25": tower,
         "history_preview": history_items,
@@ -540,18 +651,21 @@ def build_visits_history(
     offset: int = 0,
     range_key: str = "all",
     classification: str | None = None,
-    project: str | None = None,
+    project_slugs: list[str] | None = None,
 ) -> dict[str, Any]:
     range_config = _range_config(range_key)
     window_hours = _window_hours_for_range(range_key)
-    entries, source_mode = collect_recent_entries_with_source(window_hours=window_hours)
-    sessions = build_sessions(entries)
+    selected_project_slugs = set(project_slugs) if project_slugs is not None else None
+    snapshot = _build_session_snapshot(
+        window_hours=window_hours,
+        project_slugs=selected_project_slugs,
+    )
+    source_mode = snapshot["source_mode"]
+    sessions = snapshot["sessions"]
 
     filtered = sessions
     if classification:
         filtered = [session for session in filtered if session["classification_state"] == classification]
-    if project:
-        filtered = [session for session in filtered if session["project_slug"] == project]
 
     filtered = sorted(filtered, key=lambda item: item["ended_at"], reverse=True)
     total = len(filtered)
@@ -596,6 +710,7 @@ def build_visits_history(
         "offset": offset,
         "limit": limit,
         "total": total,
+        "available_projects": _project_options(),
         "items": items,
     }
 
