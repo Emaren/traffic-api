@@ -656,16 +656,19 @@ def build_visits_history(
     range_config = _range_config(range_key)
     window_hours = _window_hours_for_range(range_key)
     selected_project_slugs = set(project_slugs) if project_slugs is not None else None
-    snapshot = _build_session_snapshot(
-        window_hours=window_hours,
-        project_slugs=selected_project_slugs,
-    )
+    snapshot = _build_session_snapshot(window_hours=window_hours)
     source_mode = snapshot["source_mode"]
     sessions = snapshot["sessions"]
 
     filtered = sessions
     if classification:
         filtered = [session for session in filtered if session["classification_state"] == classification]
+    if selected_project_slugs is not None:
+        filtered = [
+            session
+            for session in filtered
+            if session["project_slug"] in selected_project_slugs
+        ]
 
     filtered = sorted(filtered, key=lambda item: item["ended_at"], reverse=True)
     total = len(filtered)
