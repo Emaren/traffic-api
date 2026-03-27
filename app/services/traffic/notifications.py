@@ -486,6 +486,36 @@ def _mark_web_push_subscription_result(
     )
 
 
+def _persist_web_push_subscription_results(
+    results: list[dict[str, Any]],
+    *,
+    connection: Any | None = None,
+) -> None:
+    if not results:
+        return
+
+    should_commit = connection is None
+    managed_connection = connection
+    if managed_connection is None:
+        managed_connection = _connect()
+        _ensure_schema(managed_connection)
+
+    try:
+        for result in results:
+            _mark_web_push_subscription_result(
+                managed_connection,
+                endpoint=result["endpoint"],
+                active=bool(result.get("active", True)),
+                last_error=str(result.get("last_error") or ""),
+                success_at=result.get("success_at"),
+            )
+        if should_commit:
+            managed_connection.commit()
+    finally:
+        if should_commit:
+            managed_connection.close()
+
+
 def _web_push_info() -> dict[str, Any]:
     subscriptions = list_web_push_subscriptions()
     active = [subscription for subscription in subscriptions if subscription["active"]]
@@ -1088,6 +1118,7 @@ def _send_web_push(
     title: str,
     body: str,
     url: str,
+    connection: Any | None = None,
 ) -> dict[str, Any]:
     if not web_push_configured():
         raise RuntimeError("Traffic web push is not configured yet on the server.")
@@ -1111,76 +1142,79 @@ def _send_web_push(
 
     sent_devices: list[dict[str, Any]] = []
     failed_devices: list[dict[str, Any]] = []
+    subscription_results: list[dict[str, Any]] = []
 
-    with _connect() as connection:
-        _ensure_schema(connection)
+    for subscription in subscriptions:
+        endpoint = subscription["endpoint"]
+        try:
+            response = webpush(
+                subscription_info=subscription["subscription"],
+                data=payload,
+                vapid_private_key=WEB_PUSH_PRIVATE_KEY,
+                vapid_claims=vapid_claims,
+                ttl=ttl_seconds,
+                timeout=10,
+            )
+            status_code = getattr(response, "status_code", None)
+            subscription_results.append(
+                {
+                    "endpoint": endpoint,
+                    "active": True,
+                    "last_error": "",
+                    "success_at": iso_now(),
+                }
+            )
+            sent_devices.append(
+                {
+                    "subscription_id": subscription["id"],
+                    "device_label": subscription["device_label"],
+                    "endpoint_tail": subscription["endpoint_tail"],
+                    "status_code": status_code,
+                }
+            )
+        except WebPushException as exc:
+            status_code = getattr(exc.response, "status_code", None)
+            message = str(exc)
+            deactivate = status_code in {404, 410}
+            subscription_results.append(
+                {
+                    "endpoint": endpoint,
+                    "active": not deactivate,
+                    "last_error": message,
+                    "success_at": None,
+                }
+            )
+            failed_devices.append(
+                {
+                    "subscription_id": subscription["id"],
+                    "device_label": subscription["device_label"],
+                    "endpoint_tail": subscription["endpoint_tail"],
+                    "status_code": status_code,
+                    "error": message,
+                    "deactivated": deactivate,
+                }
+            )
+        except Exception as exc:
+            message = str(exc)
+            subscription_results.append(
+                {
+                    "endpoint": endpoint,
+                    "active": True,
+                    "last_error": message,
+                    "success_at": None,
+                }
+            )
+            failed_devices.append(
+                {
+                    "subscription_id": subscription["id"],
+                    "device_label": subscription["device_label"],
+                    "endpoint_tail": subscription["endpoint_tail"],
+                    "error": message,
+                    "deactivated": False,
+                }
+            )
 
-        for subscription in subscriptions:
-            endpoint = subscription["endpoint"]
-            try:
-                response = webpush(
-                    subscription_info=subscription["subscription"],
-                    data=payload,
-                    vapid_private_key=WEB_PUSH_PRIVATE_KEY,
-                    vapid_claims=vapid_claims,
-                    ttl=ttl_seconds,
-                    timeout=10,
-                )
-                status_code = getattr(response, "status_code", None)
-                _mark_web_push_subscription_result(
-                    connection,
-                    endpoint=endpoint,
-                    active=True,
-                    last_error="",
-                    success_at=iso_now(),
-                )
-                sent_devices.append(
-                    {
-                        "subscription_id": subscription["id"],
-                        "device_label": subscription["device_label"],
-                        "endpoint_tail": subscription["endpoint_tail"],
-                        "status_code": status_code,
-                    }
-                )
-            except WebPushException as exc:
-                status_code = getattr(exc.response, "status_code", None)
-                message = str(exc)
-                deactivate = status_code in {404, 410}
-                _mark_web_push_subscription_result(
-                    connection,
-                    endpoint=endpoint,
-                    active=not deactivate,
-                    last_error=message,
-                )
-                failed_devices.append(
-                    {
-                        "subscription_id": subscription["id"],
-                        "device_label": subscription["device_label"],
-                        "endpoint_tail": subscription["endpoint_tail"],
-                        "status_code": status_code,
-                        "error": message,
-                        "deactivated": deactivate,
-                    }
-                )
-            except Exception as exc:
-                message = str(exc)
-                _mark_web_push_subscription_result(
-                    connection,
-                    endpoint=endpoint,
-                    active=True,
-                    last_error=message,
-                )
-                failed_devices.append(
-                    {
-                        "subscription_id": subscription["id"],
-                        "device_label": subscription["device_label"],
-                        "endpoint_tail": subscription["endpoint_tail"],
-                        "error": message,
-                        "deactivated": False,
-                    }
-                )
-
-        connection.commit()
+    _persist_web_push_subscription_results(subscription_results, connection=connection)
 
     if not sent_devices:
         if failed_devices:
@@ -1204,6 +1238,7 @@ def _deliver_notification(
     title: str,
     body: str,
     url: str,
+    connection: Any | None = None,
 ) -> dict[str, Any]:
     provider = settings.get("provider")
     if provider == "pushover":
@@ -1211,7 +1246,7 @@ def _deliver_notification(
     if provider == "ntfy":
         return _send_ntfy(settings, title=title, body=body, url=url)
     if provider == "web_push":
-        return _send_web_push(settings, title=title, body=body, url=url)
+        return _send_web_push(settings, title=title, body=body, url=url, connection=connection)
     raise RuntimeError("No supported notification provider selected")
 
 
@@ -1392,6 +1427,7 @@ def process_notification_batch(limit: int = NOTIFICATION_BATCH_LIMIT) -> dict[st
                     title=title,
                     body=body,
                     url=url,
+                    connection=connection,
                 )
                 _record_notification_event(
                     connection,
