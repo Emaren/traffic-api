@@ -22,7 +22,9 @@ from app.services.traffic.config import (
 from app.services.traffic.notifications import (
     admin_api_configured,
     build_notification_dashboard,
+    create_operator_identity,
     create_notification_mute,
+    delete_operator_identity,
     delete_notification_mute,
     delete_web_push_subscription,
     process_notification_batch,
@@ -328,12 +330,40 @@ def api_admin_notification_mutes(
     }
 
 
+@app.post("/api/admin/notifications/operators")
+def api_admin_notification_operators(
+    payload: dict = Body(...),
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    try:
+        operator = create_operator_identity(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "generated_at": iso_now(),
+        "operator": operator,
+    }
+
+
 @app.delete("/api/admin/notifications/mutes/{mute_id}")
 def api_admin_notification_mute_delete(
     mute_id: int,
     _: None = Depends(require_admin_api_key),
 ) -> dict:
     delete_notification_mute(mute_id)
+    return {
+        "ok": True,
+        "generated_at": iso_now(),
+    }
+
+
+@app.delete("/api/admin/notifications/operators/{operator_id}")
+def api_admin_notification_operator_delete(
+    operator_id: int,
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    delete_operator_identity(operator_id)
     return {
         "ok": True,
         "generated_at": iso_now(),

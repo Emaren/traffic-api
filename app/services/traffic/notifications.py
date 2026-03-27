@@ -47,6 +47,12 @@ ALLOWED_RULE_TYPES = {
     "host",
 }
 
+ALLOWED_OPERATOR_RULE_TYPES = {
+    "person_key",
+    "visitor_profile_id",
+    "ip",
+}
+
 DEFAULT_NOTIFICATION_SETTINGS: dict[str, Any] = {
     "enabled": False,
     "provider": "pushover",
@@ -582,6 +588,121 @@ def list_notification_mutes() -> list[dict[str, Any]]:
     ]
 
 
+def list_operator_identities() -> list[dict[str, Any]]:
+    with _connect() as connection:
+        _ensure_schema(connection)
+        rows = connection.execute(
+            """
+            SELECT id, rule_type, match_value, label, notes, active, created_at, updated_at
+            FROM traffic_operator_identities
+            ORDER BY active DESC, updated_at DESC, created_at DESC, id DESC
+            """
+        ).fetchall()
+
+    return [
+        {
+            "id": int(row["id"]),
+            "rule_type": row["rule_type"],
+            "match_value": row["match_value"],
+            "label": row["label"],
+            "notes": row["notes"],
+            "active": bool(row["active"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+        for row in rows
+    ]
+
+
+def create_operator_identity(payload: dict[str, Any]) -> dict[str, Any]:
+    rule_type = str(payload.get("rule_type") or "").strip()
+    match_value = str(payload.get("match_value") or "").strip()
+    if rule_type not in ALLOWED_OPERATOR_RULE_TYPES:
+        raise ValueError("Unsupported operator rule type")
+    if not match_value:
+        raise ValueError("Operator match value is required")
+
+    label = str(payload.get("label") or match_value).strip() or match_value
+    notes = str(payload.get("notes") or "Marked as self traffic from the admin dashboard").strip()
+    timestamp = iso_now()
+
+    with _connect() as connection:
+        _ensure_schema(connection)
+        connection.execute(
+            """
+            INSERT INTO traffic_operator_identities (
+                rule_type,
+                match_value,
+                label,
+                notes,
+                active,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, 1, ?, ?)
+            ON CONFLICT(rule_type, match_value) DO UPDATE SET
+                label = excluded.label,
+                notes = excluded.notes,
+                active = 1,
+                updated_at = excluded.updated_at
+            """,
+            (rule_type, match_value, label, notes, timestamp, timestamp),
+        )
+        connection.commit()
+        row = connection.execute(
+            """
+            SELECT id, rule_type, match_value, label, notes, active, created_at, updated_at
+            FROM traffic_operator_identities
+            WHERE rule_type = ? AND match_value = ?
+            """,
+            (rule_type, match_value),
+        ).fetchone()
+
+    if not row:
+        raise RuntimeError("Could not save operator identity")
+
+    return {
+        "id": int(row["id"]),
+        "rule_type": row["rule_type"],
+        "match_value": row["match_value"],
+        "label": row["label"],
+        "notes": row["notes"],
+        "active": bool(row["active"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def delete_operator_identity(operator_id: int) -> None:
+    with _connect() as connection:
+        _ensure_schema(connection)
+        connection.execute(
+            "DELETE FROM traffic_operator_identities WHERE id = ?",
+            (operator_id,),
+        )
+        connection.commit()
+
+
+def _match_operator_identity(
+    operators: list[dict[str, Any]],
+    *,
+    person_key: str,
+    visitor_profile_id: str,
+    ip: str,
+) -> dict[str, Any] | None:
+    for operator in operators:
+        if not operator["active"]:
+            continue
+        rule_type = operator["rule_type"]
+        match_value = operator["match_value"]
+        if rule_type == "person_key" and person_key == match_value:
+            return operator
+        if rule_type == "visitor_profile_id" and visitor_profile_id == match_value:
+            return operator
+        if rule_type == "ip" and ip == match_value:
+            return operator
+    return None
+
+
 def create_notification_mute(payload: dict[str, Any]) -> dict[str, Any]:
     rule_type = str(payload.get("rule_type") or "").strip()
     match_value = str(payload.get("match_value") or "").strip()
@@ -634,6 +755,7 @@ def delete_notification_mute(mute_id: int) -> None:
 
 
 def list_notification_events(limit: int = 100) -> list[dict[str, Any]]:
+    operators = list_operator_identities()
     with _connect() as connection:
         _ensure_schema(connection)
         rows = connection.execute(
@@ -683,6 +805,12 @@ def list_notification_events(limit: int = 100) -> list[dict[str, Any]]:
             details = json.loads(row["details_json"] or "{}")
         except Exception:
             details = {}
+        operator_identity = _match_operator_identity(
+            operators,
+            person_key=row["person_key"],
+            visitor_profile_id=row["visitor_profile_id"],
+            ip=row["ip"],
+        )
         events.append(
             {
                 "id": int(row["id"]),
@@ -714,6 +842,7 @@ def list_notification_events(limit: int = 100) -> list[dict[str, Any]]:
                 "notification_title": row["notification_title"],
                 "notification_body": row["notification_body"],
                 "destination_url": row["destination_url"],
+                "operator_identity": operator_identity,
                 "details": details,
                 "created_at": row["created_at"],
                 "delivered_at": row["delivered_at"],
@@ -770,6 +899,7 @@ def build_notification_dashboard(loop_state: dict[str, Any] | None = None) -> di
         "settings": settings,
         "provider_ready": provider_ready,
         "web_push": _web_push_info(),
+        "operators": list_operator_identities(),
         "mutes": list_notification_mutes(),
         "recent_events": list_notification_events(limit=120),
         "stats": _notification_stats(),
@@ -968,10 +1098,19 @@ def _suppression_reason(
     settings: dict[str, Any],
     session: dict[str, Any],
     entry: dict[str, Any],
+    operators: list[dict[str, Any]],
     mutes: list[dict[str, Any]],
     connection: Any,
 ) -> str | None:
     policy = settings["policy"]
+    operator_identity = _match_operator_identity(
+        operators,
+        person_key=session["person_key"],
+        visitor_profile_id=session["visitor_profile_id"],
+        ip=session["ip"],
+    )
+    if operator_identity:
+        return "operator_traffic"
     if policy["page_hits_only"] and entry["route_kind"] != "page":
         return "page_only_filter"
     if policy["filter_exploit_probes"] and _looks_like_exploit_probe(entry["normalized_path"]):
@@ -1414,6 +1553,7 @@ def process_notification_batch(limit: int = NOTIFICATION_BATCH_LIMIT) -> dict[st
 
     with _connect() as connection:
         _ensure_schema(connection)
+        operators = list_operator_identities()
         mutes = list_notification_mutes()
         candidates = _load_unprocessed_candidates(
             connection,
@@ -1442,6 +1582,7 @@ def process_notification_batch(limit: int = NOTIFICATION_BATCH_LIMIT) -> dict[st
                 settings,
                 session,
                 entry,
+                operators,
                 mutes,
                 connection,
             )

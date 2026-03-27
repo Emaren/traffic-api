@@ -86,6 +86,23 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_traffic_notification_mutes_active
             ON traffic_notification_mutes(active, rule_type);
 
+        CREATE TABLE IF NOT EXISTS traffic_operator_identities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_type TEXT NOT NULL,
+            match_value TEXT NOT NULL,
+            label TEXT NOT NULL,
+            notes TEXT NOT NULL DEFAULT '',
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_traffic_operator_identities_match
+            ON traffic_operator_identities(rule_type, match_value);
+
+        CREATE INDEX IF NOT EXISTS idx_traffic_operator_identities_active
+            ON traffic_operator_identities(active, updated_at DESC);
+
         CREATE TABLE IF NOT EXISTS traffic_notification_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             traffic_event_id TEXT NOT NULL UNIQUE,
