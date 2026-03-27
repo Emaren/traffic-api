@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
-from threading import Lock
+from threading import Lock, Thread
 from time import monotonic
 from typing import Any
 
@@ -44,10 +44,14 @@ PROJECT_GRAPH_RANGES: dict[str, dict[str, Any]] = {
     "30d": {"label": "1 Month", "window_hours": 24 * 30},
     "all": {"label": "All Time", "window_hours": None},
 }
-SESSION_SNAPSHOT_CACHE_TTL_SECONDS = 3.0
+SESSION_SNAPSHOT_CACHE_TTL_SECONDS = 15.0
+SESSION_SNAPSHOT_CACHE_STALE_SECONDS = 120.0
+SESSION_SNAPSHOT_ALL_TIME_TTL_SECONDS = 60.0
+SESSION_SNAPSHOT_ALL_TIME_STALE_SECONDS = 300.0
 SESSION_SNAPSHOT_CACHE_LIMIT = 8
 _SESSION_SNAPSHOT_CACHE_LOCK = Lock()
 _SESSION_SNAPSHOT_CACHE: dict[tuple[int | None, tuple[str, ...]], dict[str, Any]] = {}
+_SESSION_SNAPSHOT_CACHE_REFRESHING: set[tuple[int | None, tuple[str, ...]]] = set()
 
 
 def should_ignore_entry(entry: dict[str, Any]) -> bool:
@@ -151,13 +155,18 @@ def _cached_session_snapshot(
     window_hours: int | None,
     *,
     project_slugs: set[str] | None = None,
+    allow_stale: bool = False,
 ) -> dict[str, Any] | None:
     cache_key = _session_snapshot_key(window_hours, project_slugs)
     now_tick = monotonic()
 
     with _SESSION_SNAPSHOT_CACHE_LOCK:
         cached = _SESSION_SNAPSHOT_CACHE.get(cache_key)
-        if not cached or cached["expires_at"] <= now_tick:
+        if not cached:
+            return None
+        if cached["expires_at"] > now_tick:
+            return cached["value"]
+        if not allow_stale or cached["stale_until"] <= now_tick:
             return None
         return cached["value"]
 
@@ -171,27 +180,35 @@ def _store_session_snapshot(
 ) -> dict[str, Any]:
     cache_key = _session_snapshot_key(window_hours, project_slugs)
     value = {"sessions": sessions, "source_mode": source_mode}
+    now_tick = monotonic()
+    fresh_ttl = (
+        SESSION_SNAPSHOT_ALL_TIME_TTL_SECONDS
+        if window_hours is None
+        else SESSION_SNAPSHOT_CACHE_TTL_SECONDS
+    )
+    stale_ttl = (
+        SESSION_SNAPSHOT_ALL_TIME_STALE_SECONDS
+        if window_hours is None
+        else SESSION_SNAPSHOT_CACHE_STALE_SECONDS
+    )
 
     with _SESSION_SNAPSHOT_CACHE_LOCK:
         if len(_SESSION_SNAPSHOT_CACHE) >= SESSION_SNAPSHOT_CACHE_LIMIT:
             _SESSION_SNAPSHOT_CACHE.clear()
         _SESSION_SNAPSHOT_CACHE[cache_key] = {
-            "expires_at": monotonic() + SESSION_SNAPSHOT_CACHE_TTL_SECONDS,
+            "expires_at": now_tick + fresh_ttl,
+            "stale_until": now_tick + fresh_ttl + stale_ttl,
             "value": value,
         }
 
     return value
 
 
-def _build_session_snapshot(
+def _rebuild_session_snapshot(
     *,
     window_hours: int | None,
     project_slugs: set[str] | None = None,
 ) -> dict[str, Any]:
-    cached = _cached_session_snapshot(window_hours, project_slugs=project_slugs)
-    if cached:
-        return cached
-
     entries, source_mode = collect_recent_entries_with_source(
         window_hours=window_hours,
         project_slugs=project_slugs,
@@ -203,6 +220,64 @@ def _build_session_snapshot(
         sessions=sessions,
         source_mode=source_mode,
     )
+
+
+def _refresh_session_snapshot_async(
+    *,
+    window_hours: int | None,
+    project_slugs: set[str] | None = None,
+) -> bool:
+    cache_key = _session_snapshot_key(window_hours, project_slugs)
+
+    with _SESSION_SNAPSHOT_CACHE_LOCK:
+        if cache_key in _SESSION_SNAPSHOT_CACHE_REFRESHING:
+            return False
+        _SESSION_SNAPSHOT_CACHE_REFRESHING.add(cache_key)
+
+    def refresh() -> None:
+        try:
+            _rebuild_session_snapshot(
+                window_hours=window_hours,
+                project_slugs=project_slugs,
+            )
+        finally:
+            with _SESSION_SNAPSHOT_CACHE_LOCK:
+                _SESSION_SNAPSHOT_CACHE_REFRESHING.discard(cache_key)
+
+    Thread(target=refresh, daemon=True).start()
+    return True
+
+
+def _build_session_snapshot(
+    *,
+    window_hours: int | None,
+    project_slugs: set[str] | None = None,
+) -> dict[str, Any]:
+    cached = _cached_session_snapshot(window_hours, project_slugs=project_slugs)
+    if cached:
+        return cached
+
+    stale = _cached_session_snapshot(
+        window_hours,
+        project_slugs=project_slugs,
+        allow_stale=True,
+    )
+    if stale:
+        _refresh_session_snapshot_async(
+            window_hours=window_hours,
+            project_slugs=project_slugs,
+        )
+        return stale
+
+    return _rebuild_session_snapshot(
+        window_hours=window_hours,
+        project_slugs=project_slugs,
+    )
+
+
+def warm_session_snapshots() -> None:
+    _refresh_session_snapshot_async(window_hours=24)
+    _refresh_session_snapshot_async(window_hours=None)
 
 
 def _project_options() -> list[dict[str, str]]:

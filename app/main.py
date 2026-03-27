@@ -13,6 +13,7 @@ from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Reques
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+from app.services.traffic.overview import warm_session_snapshots
 from app.services.traffic.config import (
     ADMIN_API_KEY,
     NOTIFICATION_BATCH_LIMIT,
@@ -62,6 +63,7 @@ async def lifespan(app: FastAPI):
     previous_handlers: dict[signal.Signals, object] = {}
     loop = asyncio.get_running_loop()
     notification_task: asyncio.Task | None = None
+    warm_cache_task: asyncio.Task | None = None
 
     def request_shutdown(signum: int, _frame) -> None:
         loop.call_soon_threadsafe(shutdown_event.set)
@@ -75,6 +77,7 @@ async def lifespan(app: FastAPI):
             signal.signal(signum, request_shutdown)
 
     notification_task = asyncio.create_task(notification_worker(app))
+    warm_cache_task = asyncio.create_task(asyncio.to_thread(warm_session_snapshots))
 
     try:
         yield
@@ -85,6 +88,8 @@ async def lifespan(app: FastAPI):
                 await asyncio.wait_for(notification_task, timeout=NOTIFICATION_LOOP_SECONDS + 5)
             except asyncio.TimeoutError:
                 notification_task.cancel()
+        if warm_cache_task is not None and not warm_cache_task.done():
+            warm_cache_task.cancel()
         if threading.current_thread() is threading.main_thread():
             for signum, previous in previous_handlers.items():
                 signal.signal(signum, previous)
@@ -95,7 +100,7 @@ app = FastAPI(title="Traffic API", version="0.3.0", lifespan=lifespan)
 OVERVIEW_CACHE_TTL_SECONDS = 20.0
 SERIES_CACHE_TTL_SECONDS = 20.0
 LIVE_VISITORS_CACHE_TTL_SECONDS = 5.0
-VISITS_HISTORY_CACHE_TTL_SECONDS = 10.0
+VISITS_HISTORY_CACHE_TTL_SECONDS = 30.0
 _response_cache_lock = threading.Lock()
 _response_cache: dict[tuple[str, tuple[tuple[str, Any], ...]], tuple[float, Any]] = {}
 _response_cache_refreshing: set[tuple[str, tuple[tuple[str, Any], ...]]] = set()
