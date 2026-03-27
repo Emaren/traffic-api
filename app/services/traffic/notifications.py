@@ -339,27 +339,36 @@ def _web_push_subject() -> str:
     return WEB_PUSH_SUBJECT or SITE_BASE_URL
 
 
-def list_web_push_subscriptions(*, active_only: bool = False) -> list[dict[str, Any]]:
-    with _connect() as connection:
+def list_web_push_subscriptions(
+    *,
+    active_only: bool = False,
+    connection: Any | None = None,
+) -> list[dict[str, Any]]:
+    query = """
+        SELECT
+            id,
+            endpoint,
+            subscription_json,
+            device_label,
+            user_agent,
+            active,
+            last_error,
+            created_at,
+            updated_at,
+            last_success_at
+        FROM traffic_push_subscriptions
+    """
+    params: tuple[Any, ...] = ()
+    if active_only:
+        query += " WHERE active = 1"
+    query += " ORDER BY active DESC, updated_at DESC, id DESC"
+
+    if connection is None:
+        with _connect() as managed_connection:
+            _ensure_schema(managed_connection)
+            rows = managed_connection.execute(query, params).fetchall()
+    else:
         _ensure_schema(connection)
-        query = """
-            SELECT
-                id,
-                endpoint,
-                subscription_json,
-                device_label,
-                user_agent,
-                active,
-                last_error,
-                created_at,
-                updated_at,
-                last_success_at
-            FROM traffic_push_subscriptions
-        """
-        params: tuple[Any, ...] = ()
-        if active_only:
-            query += " WHERE active = 1"
-        query += " ORDER BY active DESC, updated_at DESC, id DESC"
         rows = connection.execute(query, params).fetchall()
 
     subscriptions: list[dict[str, Any]] = []
@@ -1309,7 +1318,7 @@ def _send_web_push(
     if not web_push_configured():
         raise RuntimeError("Traffic web push is not configured yet on the server.")
 
-    subscriptions = list_web_push_subscriptions(active_only=True)
+    subscriptions = list_web_push_subscriptions(active_only=True, connection=connection)
     if not subscriptions:
         raise RuntimeError("No active Traffic web-push subscriptions are registered yet.")
 
@@ -1606,6 +1615,7 @@ def process_notification_batch(limit: int = NOTIFICATION_BATCH_LIMIT) -> dict[st
                     destination_url=url,
                     details={"reason": suppression_reason},
                 )
+                connection.commit()
                 suppressed += 1
                 continue
 
@@ -1629,6 +1639,7 @@ def process_notification_batch(limit: int = NOTIFICATION_BATCH_LIMIT) -> dict[st
                     destination_url=url,
                     details=delivered_payload.get("details", {}),
                 )
+                connection.commit()
                 delivered += 1
             except Exception as exc:
                 _record_notification_event(
@@ -1643,9 +1654,8 @@ def process_notification_batch(limit: int = NOTIFICATION_BATCH_LIMIT) -> dict[st
                     destination_url=url,
                     details={"error": str(exc)},
                 )
+                connection.commit()
                 errors += 1
-
-        connection.commit()
 
     return {
         "mode": "running",

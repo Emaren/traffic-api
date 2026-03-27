@@ -16,6 +16,8 @@ from app.services.traffic.config import (
 from app.services.traffic.parse import parse_iso_timestamp, parse_log_line
 
 _SYNC_LOCK = Lock()
+_SCHEMA_LOCK = Lock()
+_SCHEMA_READY = False
 
 
 def persistence_enabled() -> bool:
@@ -33,136 +35,147 @@ def _connect() -> sqlite3.Connection:
 
 
 def _ensure_schema(connection: sqlite3.Connection) -> None:
-    connection.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS traffic_entries (
-            event_id TEXT PRIMARY KEY,
-            source_path TEXT NOT NULL,
-            source_inode INTEGER NOT NULL,
-            line_offset INTEGER NOT NULL,
-            timestamp TEXT NOT NULL,
-            ip TEXT NOT NULL,
-            request TEXT NOT NULL,
-            method TEXT NOT NULL,
-            raw_path TEXT NOT NULL,
-            normalized_path TEXT NOT NULL,
-            status INTEGER NOT NULL,
-            referrer TEXT NOT NULL,
-            referrer_host TEXT NOT NULL,
-            ua TEXT NOT NULL,
-            host TEXT NOT NULL,
-            raw TEXT NOT NULL
-        );
+    global _SCHEMA_READY
 
-        CREATE INDEX IF NOT EXISTS idx_traffic_entries_timestamp
-            ON traffic_entries(timestamp);
+    if _SCHEMA_READY:
+        return
 
-        CREATE INDEX IF NOT EXISTS idx_traffic_entries_host_timestamp
-            ON traffic_entries(host, timestamp);
+    with _SCHEMA_LOCK:
+        if _SCHEMA_READY:
+            return
 
-        CREATE TABLE IF NOT EXISTS traffic_ingest_state (
-            source_path TEXT PRIMARY KEY,
-            source_inode INTEGER NOT NULL,
-            offset INTEGER NOT NULL,
-            updated_at TEXT NOT NULL
-        );
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS traffic_entries (
+                event_id TEXT PRIMARY KEY,
+                source_path TEXT NOT NULL,
+                source_inode INTEGER NOT NULL,
+                line_offset INTEGER NOT NULL,
+                timestamp TEXT NOT NULL,
+                ip TEXT NOT NULL,
+                request TEXT NOT NULL,
+                method TEXT NOT NULL,
+                raw_path TEXT NOT NULL,
+                normalized_path TEXT NOT NULL,
+                status INTEGER NOT NULL,
+                referrer TEXT NOT NULL,
+                referrer_host TEXT NOT NULL,
+                ua TEXT NOT NULL,
+                host TEXT NOT NULL,
+                raw TEXT NOT NULL
+            );
 
-        CREATE TABLE IF NOT EXISTS traffic_notification_settings (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            payload_json TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
+            CREATE INDEX IF NOT EXISTS idx_traffic_entries_timestamp
+                ON traffic_entries(timestamp);
 
-        CREATE TABLE IF NOT EXISTS traffic_notification_mutes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            rule_type TEXT NOT NULL,
-            match_value TEXT NOT NULL,
-            label TEXT NOT NULL,
-            reason TEXT NOT NULL,
-            active INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL
-        );
+            CREATE INDEX IF NOT EXISTS idx_traffic_entries_host_timestamp
+                ON traffic_entries(host, timestamp);
 
-        CREATE INDEX IF NOT EXISTS idx_traffic_notification_mutes_active
-            ON traffic_notification_mutes(active, rule_type);
+            CREATE TABLE IF NOT EXISTS traffic_ingest_state (
+                source_path TEXT PRIMARY KEY,
+                source_inode INTEGER NOT NULL,
+                offset INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            );
 
-        CREATE TABLE IF NOT EXISTS traffic_operator_identities (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            rule_type TEXT NOT NULL,
-            match_value TEXT NOT NULL,
-            label TEXT NOT NULL,
-            notes TEXT NOT NULL DEFAULT '',
-            active INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
+            CREATE TABLE IF NOT EXISTS traffic_notification_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                payload_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
 
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_traffic_operator_identities_match
-            ON traffic_operator_identities(rule_type, match_value);
+            CREATE TABLE IF NOT EXISTS traffic_notification_mutes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_type TEXT NOT NULL,
+                match_value TEXT NOT NULL,
+                label TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            );
 
-        CREATE INDEX IF NOT EXISTS idx_traffic_operator_identities_active
-            ON traffic_operator_identities(active, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_traffic_notification_mutes_active
+                ON traffic_notification_mutes(active, rule_type);
 
-        CREATE TABLE IF NOT EXISTS traffic_notification_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            traffic_event_id TEXT NOT NULL UNIQUE,
-            session_id TEXT NOT NULL,
-            event_timestamp TEXT NOT NULL,
-            project_slug TEXT NOT NULL,
-            project_name TEXT NOT NULL,
-            host TEXT NOT NULL,
-            path TEXT NOT NULL,
-            route_kind TEXT NOT NULL,
-            person_key TEXT NOT NULL,
-            visitor_profile_id TEXT NOT NULL,
-            visitor_alias TEXT NOT NULL,
-            ip TEXT NOT NULL,
-            country_code TEXT NOT NULL,
-            country TEXT NOT NULL,
-            classification_state TEXT NOT NULL,
-            verdict_label TEXT NOT NULL,
-            returning_visitor INTEGER NOT NULL DEFAULT 0,
-            total_project_visits INTEGER NOT NULL DEFAULT 0,
-            projects_visited_in_window INTEGER NOT NULL DEFAULT 0,
-            status TEXT NOT NULL,
-            suppression_reason TEXT NOT NULL DEFAULT '',
-            provider TEXT NOT NULL DEFAULT '',
-            provider_message_id TEXT NOT NULL DEFAULT '',
-            delivery_error TEXT NOT NULL DEFAULT '',
-            notification_title TEXT NOT NULL DEFAULT '',
-            notification_body TEXT NOT NULL DEFAULT '',
-            destination_url TEXT NOT NULL DEFAULT '',
-            details_json TEXT NOT NULL DEFAULT '{}',
-            created_at TEXT NOT NULL,
-            delivered_at TEXT
-        );
+            CREATE TABLE IF NOT EXISTS traffic_operator_identities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_type TEXT NOT NULL,
+                match_value TEXT NOT NULL,
+                label TEXT NOT NULL,
+                notes TEXT NOT NULL DEFAULT '',
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
 
-        CREATE INDEX IF NOT EXISTS idx_traffic_notification_events_status_time
-            ON traffic_notification_events(status, event_timestamp DESC);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_traffic_operator_identities_match
+                ON traffic_operator_identities(rule_type, match_value);
 
-        CREATE INDEX IF NOT EXISTS idx_traffic_notification_events_person_time
-            ON traffic_notification_events(person_key, event_timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_traffic_operator_identities_active
+                ON traffic_operator_identities(active, updated_at DESC);
 
-        CREATE INDEX IF NOT EXISTS idx_traffic_notification_events_session_time
-            ON traffic_notification_events(session_id, event_timestamp DESC);
+            CREATE TABLE IF NOT EXISTS traffic_notification_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                traffic_event_id TEXT NOT NULL UNIQUE,
+                session_id TEXT NOT NULL,
+                event_timestamp TEXT NOT NULL,
+                project_slug TEXT NOT NULL,
+                project_name TEXT NOT NULL,
+                host TEXT NOT NULL,
+                path TEXT NOT NULL,
+                route_kind TEXT NOT NULL,
+                person_key TEXT NOT NULL,
+                visitor_profile_id TEXT NOT NULL,
+                visitor_alias TEXT NOT NULL,
+                ip TEXT NOT NULL,
+                country_code TEXT NOT NULL,
+                country TEXT NOT NULL,
+                classification_state TEXT NOT NULL,
+                verdict_label TEXT NOT NULL,
+                returning_visitor INTEGER NOT NULL DEFAULT 0,
+                total_project_visits INTEGER NOT NULL DEFAULT 0,
+                projects_visited_in_window INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                suppression_reason TEXT NOT NULL DEFAULT '',
+                provider TEXT NOT NULL DEFAULT '',
+                provider_message_id TEXT NOT NULL DEFAULT '',
+                delivery_error TEXT NOT NULL DEFAULT '',
+                notification_title TEXT NOT NULL DEFAULT '',
+                notification_body TEXT NOT NULL DEFAULT '',
+                destination_url TEXT NOT NULL DEFAULT '',
+                details_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                delivered_at TEXT
+            );
 
-        CREATE TABLE IF NOT EXISTS traffic_push_subscriptions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            endpoint TEXT NOT NULL UNIQUE,
-            subscription_json TEXT NOT NULL,
-            device_label TEXT NOT NULL DEFAULT '',
-            user_agent TEXT NOT NULL DEFAULT '',
-            active INTEGER NOT NULL DEFAULT 1,
-            last_error TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            last_success_at TEXT
-        );
+            CREATE INDEX IF NOT EXISTS idx_traffic_notification_events_status_time
+                ON traffic_notification_events(status, event_timestamp DESC);
 
-        CREATE INDEX IF NOT EXISTS idx_traffic_push_subscriptions_active
-            ON traffic_push_subscriptions(active, updated_at DESC);
-        """
-    )
+            CREATE INDEX IF NOT EXISTS idx_traffic_notification_events_person_time
+                ON traffic_notification_events(person_key, event_timestamp DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_traffic_notification_events_session_time
+                ON traffic_notification_events(session_id, event_timestamp DESC);
+
+            CREATE TABLE IF NOT EXISTS traffic_push_subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                endpoint TEXT NOT NULL UNIQUE,
+                subscription_json TEXT NOT NULL,
+                device_label TEXT NOT NULL DEFAULT '',
+                user_agent TEXT NOT NULL DEFAULT '',
+                active INTEGER NOT NULL DEFAULT 1,
+                last_error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_success_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_traffic_push_subscriptions_active
+                ON traffic_push_subscriptions(active, updated_at DESC);
+            """
+        )
+        connection.commit()
+        _SCHEMA_READY = True
 
 
 def _event_id(*, source_path: str, source_inode: int, line_offset: int, raw_line: str) -> str:
