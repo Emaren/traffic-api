@@ -333,6 +333,7 @@ def load_recent_entries(
 
             selected_columns = [
                 "timestamp",
+                "line_offset",
                 "ip",
                 "raw_path",
                 "normalized_path",
@@ -343,6 +344,7 @@ def load_recent_entries(
             if include_raw_fields:
                 selected_columns = [
                     "timestamp",
+                    "line_offset",
                     "ip",
                     "request",
                     "method",
@@ -371,7 +373,7 @@ def load_recent_entries(
                 params.extend(hosts)
             if where_clauses:
                 query += " WHERE " + " AND ".join(where_clauses)
-            query += " ORDER BY timestamp ASC"
+            query += " ORDER BY timestamp ASC, line_offset ASC"
             rows = connection.execute(query, tuple(params)).fetchall()
     except Exception:
         return None
@@ -387,6 +389,7 @@ def load_recent_entries(
                 "ip": row["ip"],
                 "timestamp": parsed_timestamp,
                 "timestamp_iso": row["timestamp"],
+                "line_offset": row["line_offset"],
                 "raw_path": row["raw_path"],
                 "normalized_path": row["normalized_path"],
                 "referrer_host": row["referrer_host"],

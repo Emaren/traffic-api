@@ -33,7 +33,12 @@ from app.services.traffic.persistence import (
     persistence_enabled,
     sync_log_to_persistence,
 )
-from app.services.traffic.sessions import build_single_session, enrich_sessions, split_session_events
+from app.services.traffic.sessions import (
+    build_single_session,
+    enrich_sessions,
+    primary_navigation_event_ids_for_session,
+    split_session_events,
+)
 from app.services.traffic.normalize import ALLOWED_HOSTS, is_allowed_host
 
 ALBERTA_ZONE = ZoneInfo(ALBERTA_TZ_NAME)
@@ -961,6 +966,8 @@ def _entry_from_row(row: Any) -> dict[str, Any] | None:
         "host": row["host"],
         "raw": row["raw"],
     }
+    if "line_offset" in row.keys():
+        entry["line_offset"] = row["line_offset"]
     entry["category"] = classify_request(entry["ua"], entry["normalized_path"])
     entry["route_kind"] = detect_route_kind(entry["normalized_path"])
     return entry
@@ -978,6 +985,7 @@ def _load_unprocessed_candidates(
     query = """
         SELECT
             event_id,
+            line_offset,
             timestamp,
             ip,
             request,
@@ -1028,6 +1036,7 @@ def _load_person_recent_entries(
         """
         SELECT
             event_id,
+            line_offset,
             timestamp,
             ip,
             request,
@@ -1060,7 +1069,9 @@ def _load_person_recent_entries(
     return entries
 
 
-def _find_session_for_entry(connection: Any, entry: dict[str, Any]) -> dict[str, Any] | None:
+def _find_session_for_entry(
+    connection: Any, entry: dict[str, Any]
+) -> tuple[dict[str, Any] | None, bool]:
     recent_entries = _load_person_recent_entries(
         connection,
         ip=entry["ip"],
@@ -1068,7 +1079,7 @@ def _find_session_for_entry(connection: Any, entry: dict[str, Any]) -> dict[str,
         window_hours=24,
     )
     if not recent_entries:
-        return None
+        return None, False
 
     session_groups = split_session_events(recent_entries)
     sessions = [build_single_session(group) for group in session_groups]
@@ -1076,8 +1087,12 @@ def _find_session_for_entry(connection: Any, entry: dict[str, Any]) -> dict[str,
 
     for group, session in zip(session_groups, sessions):
         if any(candidate["event_id"] == entry["event_id"] for candidate in group):
-            return session
-    return None
+            primary_navigation_event_ids = primary_navigation_event_ids_for_session(group)
+            return session, (
+                not primary_navigation_event_ids
+                or entry["event_id"] in primary_navigation_event_ids
+            )
+    return None, False
 
 
 def _count_recent_notifications(
@@ -1111,6 +1126,7 @@ def _suppression_reason(
     settings: dict[str, Any],
     session: dict[str, Any],
     entry: dict[str, Any],
+    is_primary_navigation_event: bool,
     operators: list[dict[str, Any]],
     mutes: list[dict[str, Any]],
     connection: Any,
@@ -1126,6 +1142,8 @@ def _suppression_reason(
         return "operator_traffic"
     if policy["page_hits_only"] and entry["route_kind"] != "page":
         return "page_only_filter"
+    if entry["route_kind"] == "page" and not is_primary_navigation_event:
+        return "prefetch_page_burst"
     if policy["filter_exploit_probes"] and _looks_like_exploit_probe(entry["normalized_path"]):
         return "exploit_probe_filter"
 
@@ -1587,7 +1605,7 @@ def process_notification_batch(limit: int = NOTIFICATION_BATCH_LIMIT) -> dict[st
             if should_ignore_entry(entry):
                 continue
 
-            session = _find_session_for_entry(connection, entry)
+            session, is_primary_navigation_event = _find_session_for_entry(connection, entry)
             if not session:
                 continue
 
@@ -1595,6 +1613,7 @@ def process_notification_batch(limit: int = NOTIFICATION_BATCH_LIMIT) -> dict[st
                 settings,
                 session,
                 entry,
+                is_primary_navigation_event,
                 operators,
                 mutes,
                 connection,

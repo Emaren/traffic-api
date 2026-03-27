@@ -34,6 +34,8 @@ from app.services.traffic.normalize import is_internal_referrer, project_for_hos
 from app.services.traffic.parse import parse_iso_timestamp, safe_int
 
 ALBERTA_ZONE = ZoneInfo(ALBERTA_TZ_NAME)
+PREFETCH_BURST_WINDOW_SECONDS = 2
+PREFETCH_BURST_MIN_UNIQUE_PAGES = 4
 
 REASON_LABELS = {
     "browser_ua": "Browser fingerprint looks like a real person",
@@ -80,6 +82,14 @@ def compress_consecutive(values: list[str]) -> list[str]:
     return output
 
 
+def event_order_key(event: dict[str, Any]) -> tuple[datetime, int]:
+    return event["timestamp"], safe_int(event.get("line_offset"), 0)
+
+
+def sort_session_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(events, key=event_order_key)
+
+
 def session_id_for_events(events: list[dict[str, Any]]) -> str:
     first = events[0]
     return f"{first['host']}|{first['ip']}|{first['timestamp_iso']}"
@@ -100,7 +110,7 @@ def split_session_events(recent_entries: list[dict[str, Any]]) -> list[list[dict
     session_groups: list[list[dict[str, Any]]] = []
 
     for events in grouped.values():
-        ordered_events = sorted(events, key=lambda item: item["timestamp"])
+        ordered_events = sort_session_events(events)
         current_session: list[dict[str, Any]] = []
 
         for event in ordered_events:
@@ -124,16 +134,79 @@ def split_session_events(recent_entries: list[dict[str, Any]]) -> list[list[dict
 def path_events_for_session(
     events: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    trackable_events = [event for event in events if is_trackable_path(event["normalized_path"])]
+    ordered_events = sort_session_events(events)
+    trackable_events = [event for event in ordered_events if is_trackable_path(event["normalized_path"])]
     page_events = [
         event for event in trackable_events if detect_route_kind(event["normalized_path"]) == "page"
     ]
     return trackable_events, page_events
 
 
+def _looks_like_prefetch_page_burst(page_events: list[dict[str, Any]]) -> bool:
+    if len(page_events) < PREFETCH_BURST_MIN_UNIQUE_PAGES:
+        return False
+
+    first = page_events[0]
+    last = page_events[-1]
+    if int((last["timestamp"] - first["timestamp"]).total_seconds()) > PREFETCH_BURST_WINDOW_SECONDS:
+        return False
+
+    unique_paths = ordered_unique([event["normalized_path"] for event in page_events])
+    if len(unique_paths) < PREFETCH_BURST_MIN_UNIQUE_PAGES:
+        return False
+
+    host = first["host"]
+    internalish_count = 0
+    for event in page_events:
+        referrer_host = event.get("referrer_host") or UNKNOWN_REFERRER
+        if referrer_host in {"", UNKNOWN_REFERRER, UNKNOWN_HOST, host} or is_internal_referrer(
+            host, referrer_host
+        ):
+            internalish_count += 1
+
+    return internalish_count >= len(page_events) - 1
+
+
+def compact_page_events_for_session(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    _trackable_events, page_events = path_events_for_session(events)
+    if not page_events:
+        return []
+
+    compacted: list[dict[str, Any]] = []
+    cluster: list[dict[str, Any]] = []
+
+    for event in page_events:
+        if not cluster:
+            cluster = [event]
+            continue
+
+        gap = int((event["timestamp"] - cluster[0]["timestamp"]).total_seconds())
+        if gap <= PREFETCH_BURST_WINDOW_SECONDS:
+            cluster.append(event)
+            continue
+
+        compacted.extend([cluster[0]] if _looks_like_prefetch_page_burst(cluster) else cluster)
+        cluster = [event]
+
+    if cluster:
+        compacted.extend([cluster[0]] if _looks_like_prefetch_page_burst(cluster) else cluster)
+
+    return compacted
+
+
+def primary_navigation_event_ids_for_session(events: list[dict[str, Any]]) -> set[str]:
+    trackable_events, page_events = path_events_for_session(events)
+    source_events = compact_page_events_for_session(events) if page_events else trackable_events
+    return {
+        event["event_id"]
+        for event in source_events
+        if event.get("event_id")
+    }
+
+
 def page_sequence_for_events(events: list[dict[str, Any]]) -> list[str]:
     trackable_events, page_events = path_events_for_session(events)
-    source_events = page_events if page_events else trackable_events
+    source_events = compact_page_events_for_session(events) if page_events else trackable_events
     return compress_consecutive([event["normalized_path"] for event in source_events])
 
 
@@ -303,12 +376,13 @@ def build_single_session(events: list[dict[str, Any]], now: datetime | None = No
     if now is None:
         now = datetime.now(timezone.utc)
 
-    first = events[0]
-    last = events[-1]
+    ordered_events = sort_session_events(events)
+    first = ordered_events[0]
+    last = ordered_events[-1]
 
-    trackable_events, page_events = path_events_for_session(events)
+    trackable_events, page_events = path_events_for_session(ordered_events)
 
-    page_sequence = page_sequence_for_events(events)
+    page_sequence = page_sequence_for_events(ordered_events)
     ordered_paths = ordered_unique(page_sequence)
 
     entry_page = page_sequence[0] if page_sequence else first["normalized_path"]
@@ -326,7 +400,7 @@ def build_single_session(events: list[dict[str, Any]], now: datetime | None = No
     engaged_seconds = 0
     total_seconds = 0
 
-    for previous, current in zip(events, events[1:]):
+    for previous, current in zip(ordered_events, ordered_events[1:]):
         gap = int((current["timestamp"] - previous["timestamp"]).total_seconds())
         if gap <= 0:
             continue
@@ -426,7 +500,7 @@ def build_single_session(events: list[dict[str, Any]], now: datetime | None = No
         "next_page": page_sequence[1] if len(page_sequence) > 1 else "",
         "page_sequence": page_sequence,
         "page_count": len(ordered_paths),
-        "event_count": len(events),
+        "event_count": len(ordered_events),
         "total_seconds": total_seconds,
         "engaged_seconds": engaged_seconds,
         "idle_seconds": idle_seconds,
@@ -526,7 +600,7 @@ def build_path_stats(recent_entries: list[dict[str, Any]]) -> list[dict[str, Any
         by_session_key[key].append(entry)
 
     for session_entries in by_session_key.values():
-        ordered_events = sorted(session_entries, key=lambda item: item["timestamp"])
+        ordered_events = sort_session_events(session_entries)
         trackable_events = [event for event in ordered_events if is_trackable_path(event["normalized_path"])]
 
         if not trackable_events:
