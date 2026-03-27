@@ -79,6 +79,7 @@ DEFAULT_NOTIFICATION_SETTINGS: dict[str, Any] = {
     },
     "policy": {
         "page_hits_only": True,
+        "suppress_operator_traffic": False,
         "filter_exploit_probes": True,
         "include_human_confirmed": True,
         "include_likely_human": True,
@@ -206,6 +207,9 @@ def _normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
     if isinstance(incoming_policy, dict):
         normalized["policy"] = {
             "page_hits_only": _normalize_bool(incoming_policy.get("page_hits_only", True)),
+            "suppress_operator_traffic": _normalize_bool(
+                incoming_policy.get("suppress_operator_traffic", False)
+            ),
             "filter_exploit_probes": _normalize_bool(
                 incoming_policy.get("filter_exploit_probes", True)
             ),
@@ -1109,7 +1113,7 @@ def _suppression_reason(
         visitor_profile_id=session["visitor_profile_id"],
         ip=session["ip"],
     )
-    if operator_identity:
+    if operator_identity and policy["suppress_operator_traffic"]:
         return "operator_traffic"
     if policy["page_hits_only"] and entry["route_kind"] != "page":
         return "page_only_filter"
