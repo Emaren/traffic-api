@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 from time import monotonic
 from typing import Any
 
@@ -52,6 +52,7 @@ SESSION_SNAPSHOT_CACHE_LIMIT = 8
 _SESSION_SNAPSHOT_CACHE_LOCK = Lock()
 _SESSION_SNAPSHOT_CACHE: dict[tuple[int | None, tuple[str, ...]], dict[str, Any]] = {}
 _SESSION_SNAPSHOT_CACHE_REFRESHING: set[tuple[int | None, tuple[str, ...]]] = set()
+_SESSION_SNAPSHOT_CACHE_EVENTS: dict[tuple[int | None, tuple[str, ...]], Event] = {}
 
 
 def should_ignore_entry(entry: dict[str, Any]) -> bool:
@@ -233,6 +234,8 @@ def _refresh_session_snapshot_async(
         if cache_key in _SESSION_SNAPSHOT_CACHE_REFRESHING:
             return False
         _SESSION_SNAPSHOT_CACHE_REFRESHING.add(cache_key)
+        refresh_event = Event()
+        _SESSION_SNAPSHOT_CACHE_EVENTS[cache_key] = refresh_event
 
     def refresh() -> None:
         try:
@@ -243,9 +246,30 @@ def _refresh_session_snapshot_async(
         finally:
             with _SESSION_SNAPSHOT_CACHE_LOCK:
                 _SESSION_SNAPSHOT_CACHE_REFRESHING.discard(cache_key)
+                _SESSION_SNAPSHOT_CACHE_EVENTS.get(cache_key, refresh_event).set()
 
     Thread(target=refresh, daemon=True).start()
     return True
+
+
+def _wait_for_session_snapshot_refresh(
+    *,
+    window_hours: int | None,
+    project_slugs: set[str] | None = None,
+) -> dict[str, Any] | None:
+    cache_key = _session_snapshot_key(window_hours, project_slugs)
+    timeout_seconds = 8.0 if window_hours is None else 4.0
+
+    with _SESSION_SNAPSHOT_CACHE_LOCK:
+        if cache_key not in _SESSION_SNAPSHOT_CACHE_REFRESHING:
+            return None
+        refresh_event = _SESSION_SNAPSHOT_CACHE_EVENTS.get(cache_key)
+
+    if refresh_event is None:
+        return None
+
+    refresh_event.wait(timeout=timeout_seconds)
+    return _cached_session_snapshot(window_hours, project_slugs=project_slugs)
 
 
 def _build_session_snapshot(
@@ -268,6 +292,13 @@ def _build_session_snapshot(
             project_slugs=project_slugs,
         )
         return stale
+
+    waited = _wait_for_session_snapshot_refresh(
+        window_hours=window_hours,
+        project_slugs=project_slugs,
+    )
+    if waited:
+        return waited
 
     return _rebuild_session_snapshot(
         window_hours=window_hours,
