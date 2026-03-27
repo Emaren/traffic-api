@@ -34,6 +34,11 @@ from app.services.traffic.sessions import (
     session_id_for_events,
     split_session_events,
 )
+from app.services.traffic.visibility import (
+    entry_hidden_by_visibility_rules,
+    list_visibility_rules,
+    visibility_signature,
+)
 
 from zoneinfo import ZoneInfo
 
@@ -50,9 +55,9 @@ SESSION_SNAPSHOT_ALL_TIME_TTL_SECONDS = 60.0
 SESSION_SNAPSHOT_ALL_TIME_STALE_SECONDS = 300.0
 SESSION_SNAPSHOT_CACHE_LIMIT = 8
 _SESSION_SNAPSHOT_CACHE_LOCK = Lock()
-_SESSION_SNAPSHOT_CACHE: dict[tuple[int | None, tuple[str, ...]], dict[str, Any]] = {}
-_SESSION_SNAPSHOT_CACHE_REFRESHING: set[tuple[int | None, tuple[str, ...]]] = set()
-_SESSION_SNAPSHOT_CACHE_EVENTS: dict[tuple[int | None, tuple[str, ...]], Event] = {}
+_SESSION_SNAPSHOT_CACHE: dict[tuple[int | None, tuple[str, ...], tuple[str, ...]], dict[str, Any]] = {}
+_SESSION_SNAPSHOT_CACHE_REFRESHING: set[tuple[int | None, tuple[str, ...], tuple[str, ...]]] = set()
+_SESSION_SNAPSHOT_CACHE_EVENTS: dict[tuple[int | None, tuple[str, ...], tuple[str, ...]], Event] = {}
 
 
 def should_ignore_entry(entry: dict[str, Any]) -> bool:
@@ -91,6 +96,7 @@ def collect_recent_entries_with_source(
     )
     recent_entries: list[dict[str, Any]] = []
     project_hosts = _hosts_for_projects(project_slugs)
+    active_visibility_rules = list_visibility_rules(active_only=True)
     persisted_entries = load_recent_entries(
         window_hours=window_hours,
         hosts=project_hosts,
@@ -123,6 +129,9 @@ def collect_recent_entries_with_source(
         parsed["category"] = classify_request(parsed["ua"], parsed["normalized_path"])
         parsed["route_kind"] = detect_route_kind(parsed["normalized_path"])
 
+        if entry_hidden_by_visibility_rules(parsed, rules=active_visibility_rules):
+            continue
+
         if should_ignore_entry(parsed):
             continue
 
@@ -148,8 +157,8 @@ def _hosts_for_projects(project_slugs: set[str] | None) -> list[str] | None:
 def _session_snapshot_key(
     window_hours: int | None,
     project_slugs: set[str] | None,
-) -> tuple[int | None, tuple[str, ...]]:
-    return window_hours, tuple(sorted(project_slugs or ()))
+) -> tuple[int | None, tuple[str, ...], tuple[str, ...]]:
+    return window_hours, tuple(sorted(project_slugs or ())), visibility_signature()
 
 
 def _cached_session_snapshot(
@@ -309,6 +318,13 @@ def _build_session_snapshot(
 def warm_session_snapshots() -> None:
     _refresh_session_snapshot_async(window_hours=24)
     _refresh_session_snapshot_async(window_hours=None)
+
+
+def clear_session_snapshot_cache() -> None:
+    with _SESSION_SNAPSHOT_CACHE_LOCK:
+        _SESSION_SNAPSHOT_CACHE.clear()
+        _SESSION_SNAPSHOT_CACHE_REFRESHING.clear()
+        _SESSION_SNAPSHOT_CACHE_EVENTS.clear()
 
 
 def _project_options() -> list[dict[str, str]]:

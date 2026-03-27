@@ -13,7 +13,7 @@ from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Reques
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from app.services.traffic.overview import warm_session_snapshots
+from app.services.traffic.overview import clear_session_snapshot_cache, warm_session_snapshots
 from app.services.traffic.config import (
     ADMIN_API_KEY,
     NOTIFICATION_BATCH_LIMIT,
@@ -34,6 +34,11 @@ from app.services.traffic.notifications import (
     update_notification_settings,
 )
 from app.services.traffic.parse import iso_now
+from app.services.traffic.visibility import (
+    create_visibility_rule,
+    delete_visibility_rule,
+    list_visibility_rules,
+)
 from app.services.traffic_core import (
     build_live_visitors,
     build_overview,
@@ -186,6 +191,12 @@ def cached_response(
     return payload
 
 
+def clear_response_cache() -> None:
+    with _response_cache_lock:
+        _response_cache.clear()
+        _response_cache_refreshing.clear()
+
+
 async def notification_worker(app: FastAPI) -> None:
     shutdown_event = get_shutdown_event(app)
     while not shutdown_event.is_set():
@@ -335,6 +346,36 @@ def api_admin_notification_mutes(
     }
 
 
+@app.get("/api/admin/visibility-rules")
+def api_admin_visibility_rules(
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    return {
+        "ok": True,
+        "generated_at": iso_now(),
+        "rules": list_visibility_rules(),
+    }
+
+
+@app.post("/api/admin/visibility-rules")
+def api_admin_visibility_rules_create(
+    payload: dict = Body(...),
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    try:
+        rule = create_visibility_rule(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    clear_session_snapshot_cache()
+    clear_response_cache()
+    return {
+        "ok": True,
+        "generated_at": iso_now(),
+        "rule": rule,
+    }
+
+
 @app.post("/api/admin/notifications/operators")
 def api_admin_notification_operators(
     payload: dict = Body(...),
@@ -357,6 +398,20 @@ def api_admin_notification_mute_delete(
     _: None = Depends(require_admin_api_key),
 ) -> dict:
     delete_notification_mute(mute_id)
+    return {
+        "ok": True,
+        "generated_at": iso_now(),
+    }
+
+
+@app.delete("/api/admin/visibility-rules/{rule_id}")
+def api_admin_visibility_rule_delete(
+    rule_id: int,
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    delete_visibility_rule(rule_id)
+    clear_session_snapshot_cache()
+    clear_response_cache()
     return {
         "ok": True,
         "generated_at": iso_now(),

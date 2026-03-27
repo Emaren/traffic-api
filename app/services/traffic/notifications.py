@@ -40,6 +40,7 @@ from app.services.traffic.sessions import (
     split_session_events,
 )
 from app.services.traffic.normalize import ALLOWED_HOSTS, is_allowed_host
+from app.services.traffic.visibility import list_visibility_rules
 
 ALBERTA_ZONE = ZoneInfo(ALBERTA_TZ_NAME)
 
@@ -919,6 +920,7 @@ def build_notification_dashboard(loop_state: dict[str, Any] | None = None) -> di
         "web_push": _web_push_info(),
         "operators": list_operator_identities(),
         "mutes": list_notification_mutes(),
+        "visibility_rules": list_visibility_rules(),
         "recent_events": list_notification_events(limit=120),
         "stats": _notification_stats(),
         "loop": loop_state or {},
