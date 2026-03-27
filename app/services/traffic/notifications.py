@@ -136,14 +136,17 @@ def _normalize_int(value: Any, default: int = 0, minimum: int = 0, maximum: int 
 
 
 def _normalize_project_slugs(values: Any) -> list[str]:
-    known = {project["slug"] for project in PROJECTS}
+    known = [project["slug"] for project in PROJECTS]
+    known_set = set(known)
     if not isinstance(values, list):
         return []
     cleaned: list[str] = []
     for value in values:
         text = str(value or "").strip().lower()
-        if text and text in known and text not in cleaned:
+        if text and text in known_set and text not in cleaned:
             cleaned.append(text)
+    if len(cleaned) == len(known):
+        return []
     return cleaned
 
 

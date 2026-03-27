@@ -203,6 +203,18 @@ PROJECTS = [
         "category": "analytics",
         "hosts": ["traffic.tokentap.ca"],
     },
+    {
+        "slug": "wallyverse",
+        "name": "Wallyverse",
+        "category": "creative",
+        "hosts": ["wallyverse.tokentap.ca"],
+    },
+    {
+        "slug": "redlinelegal",
+        "name": "Redline Legal",
+        "category": "legal",
+        "hosts": ["redlinelegal.ca", "www.redlinelegal.ca"],
+    },
 ]
 
 PROJECT_INDEX = {host: project for project in PROJECTS for host in project["hosts"]}
@@ -218,12 +230,16 @@ DEFAULT_ALLOWED_HOSTS = (
     "vps-sentry.tokentap.ca",
     "pulse.tokentap.ca",
     "tmail.tokentap.ca",
+    "wallyverse.tokentap.ca",
+    "redlinelegal.ca",
+    "www.redlinelegal.ca",
 )
 
 CANONICAL_HOST_MAP = {
     "www.aoe2hdbets.com": "aoe2hdbets.com",
     "www.tokentap.ca": "tokentap.ca",
     "www.wheatandstone.ca": "wheatandstone.ca",
+    "www.redlinelegal.ca": "redlinelegal.ca",
 }
 
 INTERNAL_IGNORE_PATHS = {
