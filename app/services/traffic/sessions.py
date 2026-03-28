@@ -37,6 +37,11 @@ from app.services.traffic.parse import parse_iso_timestamp, safe_int
 ALBERTA_ZONE = ZoneInfo(ALBERTA_TZ_NAME)
 PREFETCH_BURST_WINDOW_SECONDS = 2
 PREFETCH_BURST_MIN_UNIQUE_PAGES = 4
+ROTATING_UA_ROUTE_SPAM_MIN_REQUESTS = 24
+ROTATING_UA_ROUTE_SPAM_MIN_UNIQUE_UAS = 4
+ROTATING_UA_ROUTE_SPAM_MIN_UNIQUE_PATHS = 4
+ROTATING_UA_ROUTE_SPAM_MAX_UNIQUE_PATHS = 8
+ROTATING_UA_ROUTE_SPAM_DIRECT_RATIO = 0.9
 
 REASON_LABELS = {
     "browser_ua": "Browser fingerprint looks like a real person",
@@ -59,6 +64,8 @@ REASON_LABELS = {
     "low_suspicion": "Triggered mild suspicious-traffic signals",
     "api_only": "Did not show a clear page-view trail",
     "bounce": "One quick hit with no follow-up",
+    "ua_rotation": "One IP rapidly rotated through multiple browser fingerprints",
+    "route_bundle_spam": "One IP is cycling through a synthetic framework route bundle",
 }
 
 
@@ -193,6 +200,54 @@ def compact_page_events_for_session(events: list[dict[str, Any]]) -> list[dict[s
         compacted.extend([cluster[0]] if _looks_like_prefetch_page_burst(cluster) else cluster)
 
     return compacted
+
+
+def _is_framework_route_bundle_path(path: str) -> bool:
+    return path == "/" or path == "/app" or path.startswith("/_next") or path == "/api" or path.startswith("/api/")
+
+
+def build_ip_behavior_map(recent_entries: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+
+    for entry in recent_entries:
+        host = entry["host"]
+        if host == UNKNOWN_HOST:
+            continue
+        grouped[(host, entry["ip"])].append(entry)
+
+    behavior_map: dict[tuple[str, str], dict[str, Any]] = {}
+    for key, entries in grouped.items():
+        ordered_entries = sort_session_events(entries)
+        unique_uas = {
+            (entry.get("ua") or "").lower()
+            for entry in ordered_entries
+            if (entry.get("ua") or "").strip()
+        }
+        unique_paths = ordered_unique([entry["normalized_path"] for entry in ordered_entries])
+        direct_referrers = sum(
+            1
+            for entry in ordered_entries
+            if (entry.get("referrer_host") or UNKNOWN_REFERRER) in {UNKNOWN_REFERRER, "", UNKNOWN_HOST}
+        )
+        route_bundle_spam = (
+            len(ordered_entries) >= ROTATING_UA_ROUTE_SPAM_MIN_REQUESTS
+            and len(unique_uas) >= ROTATING_UA_ROUTE_SPAM_MIN_UNIQUE_UAS
+            and ROTATING_UA_ROUTE_SPAM_MIN_UNIQUE_PATHS
+            <= len(unique_paths)
+            <= ROTATING_UA_ROUTE_SPAM_MAX_UNIQUE_PATHS
+            and all(_is_framework_route_bundle_path(path) for path in unique_paths)
+            and direct_referrers / len(ordered_entries) >= ROTATING_UA_ROUTE_SPAM_DIRECT_RATIO
+        )
+
+        behavior_map[key] = {
+            "request_count": len(ordered_entries),
+            "unique_uas": len(unique_uas),
+            "unique_paths": len(unique_paths),
+            "route_bundle_paths": unique_paths,
+            "route_bundle_spam": route_bundle_spam,
+        }
+
+    return behavior_map
 
 
 def primary_navigation_event_ids_for_session(events: list[dict[str, Any]]) -> set[str]:
@@ -373,9 +428,15 @@ def detect_source_medium_campaign(entry: dict[str, Any]) -> tuple[str, str, str]
     return referrer, "referral", ""
 
 
-def build_single_session(events: list[dict[str, Any]], now: datetime | None = None) -> dict[str, Any]:
+def build_single_session(
+    events: list[dict[str, Any]],
+    now: datetime | None = None,
+    ip_behavior: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if now is None:
         now = datetime.now(timezone.utc)
+    if ip_behavior is None:
+        ip_behavior = {}
 
     ordered_events = sort_session_events(events)
     first = ordered_events[0]
@@ -397,6 +458,8 @@ def build_single_session(events: list[dict[str, Any]], now: datetime | None = No
         100,
         category_counter.get("suspicious", 0) * 35 + category_counter.get("bot", 0) * 8,
     )
+    if ip_behavior.get("route_bundle_spam"):
+        suspicious_score = max(suspicious_score, 92)
 
     engaged_seconds = 0
     total_seconds = 0
@@ -442,6 +505,10 @@ def build_single_session(events: list[dict[str, Any]], now: datetime | None = No
         suspicious_score=suspicious_score,
         source=source,
     )
+    if ip_behavior.get("route_bundle_spam"):
+        for reason in ("ua_rotation", "route_bundle_spam"):
+            if reason not in classification_reasons:
+                classification_reasons.append(reason)
 
     classification_state = classification_state_for_confidence(
         primary_category=primary_category,
@@ -495,6 +562,9 @@ def build_single_session(events: list[dict[str, Any]], now: datetime | None = No
         "browser": detect_browser(first["ua"]),
         "known_automation": known_automation,
         "automation_family": automation_label,
+        "route_bundle_spam": bool(ip_behavior.get("route_bundle_spam")),
+        "network_ua_count": int(ip_behavior.get("unique_uas", 0)),
+        "network_path_count": int(ip_behavior.get("unique_paths", 0)),
         "referrer": first["referrer_host"],
         "source": source,
         "medium": medium,
@@ -572,25 +642,42 @@ def enrich_sessions(sessions: list[dict[str, Any]]) -> None:
                 f"{family} is known automation. Keep it available for context, but it usually "
                 "does not need the same attention as suspicious traffic."
             )
+        elif session.get("route_bundle_spam"):
+            session["classification_summary"] = (
+                f"One IP rotated through {session.get('network_ua_count', 0)} browser fingerprints "
+                f"across a tiny repeated route bundle ({session.get('network_path_count', 0)} paths) "
+                "with direct referrers, which strongly suggests scripted framework probing rather than a real visitor journey."
+            )
+            session["attention_label"] = "Investigate"
+            session["attention_summary"] = (
+                "This looks like coordinated scripted traffic from one source, not a person naturally browsing the site."
+            )
         else:
             session["classification_summary"] = summarize_classification(
                 session["classification_state"],
                 session["human_confidence"],
                 session["suspicious_score"],
             )
-        session["data_confidence_label"] = data_label
-        session["data_confidence_summary"] = data_summary
-        if not session["known_automation"] or session["classification_state"] != "bot":
             session["attention_label"] = attention_label
             session["attention_summary"] = attention_summary
+        session["data_confidence_label"] = data_label
+        session["data_confidence_summary"] = data_summary
 
 
 def build_sessions(recent_entries: list[dict[str, Any]], limit: int | None = None) -> list[dict[str, Any]]:
     sessions: list[dict[str, Any]] = []
     now = datetime.now(timezone.utc)
+    ip_behavior_map = build_ip_behavior_map(recent_entries)
 
     for events in split_session_events(recent_entries):
-        sessions.append(build_single_session(events, now=now))
+        first = events[0]
+        sessions.append(
+            build_single_session(
+                events,
+                now=now,
+                ip_behavior=ip_behavior_map.get((first["host"], first["ip"])),
+            )
+        )
 
     enrich_sessions(sessions)
     sessions.sort(key=lambda item: item["ended_at"], reverse=True)
