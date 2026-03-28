@@ -58,6 +58,8 @@ _SESSION_SNAPSHOT_CACHE_LOCK = Lock()
 _SESSION_SNAPSHOT_CACHE: dict[tuple[int | None, tuple[str, ...], tuple[str, ...]], dict[str, Any]] = {}
 _SESSION_SNAPSHOT_CACHE_REFRESHING: set[tuple[int | None, tuple[str, ...], tuple[str, ...]]] = set()
 _SESSION_SNAPSHOT_CACHE_EVENTS: dict[tuple[int | None, tuple[str, ...], tuple[str, ...]], Event] = {}
+LINKABLE_VISITOR_STATES = {"human_confirmed", "likely_human", "candidate"}
+LINKED_VISITOR_LIMIT = 6
 
 
 def should_ignore_entry(entry: dict[str, Any]) -> bool:
@@ -774,6 +776,139 @@ def _chronological_sessions_desc(
     return items[:limit]
 
 
+def _browser_family(browser: str) -> str:
+    lowered = (browser or "").strip().lower()
+    if lowered in {"chrome", "edge", "firefox", "safari"}:
+        return lowered
+    if lowered.startswith("chrome"):
+        return "chrome"
+    if lowered.startswith("firefox"):
+        return "firefox"
+    if lowered.startswith("safari"):
+        return "safari"
+    if lowered.startswith("edge"):
+        return "edge"
+    return lowered
+
+
+def _session_windows_close(
+    session_a: dict[str, Any],
+    session_b: dict[str, Any],
+    *,
+    window_hours: int = 18,
+) -> bool:
+    a_start = datetime.fromisoformat(session_a["first_seen_at"])
+    a_end = datetime.fromisoformat(session_a["last_seen_at"])
+    b_start = datetime.fromisoformat(session_b["first_seen_at"])
+    b_end = datetime.fromisoformat(session_b["last_seen_at"])
+
+    latest_start = max(a_start, b_start)
+    earliest_end = min(a_end, b_end)
+    if latest_start <= earliest_end:
+        return True
+
+    gap_seconds = min(
+        abs((b_start - a_end).total_seconds()),
+        abs((a_start - b_end).total_seconds()),
+    )
+    return gap_seconds <= window_hours * 3600
+
+
+def _build_linked_visitor_profiles(
+    *,
+    all_sessions: list[dict[str, Any]],
+    visitor_sessions: list[dict[str, Any]],
+    visitor_id: str,
+) -> list[dict[str, Any]]:
+    if not visitor_sessions:
+        return []
+
+    latest = max(visitor_sessions, key=lambda session: session["last_seen_at"])
+    target_project_slugs = {session["project_slug"] for session in visitor_sessions}
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+    for session in all_sessions:
+        if session.get("visitor_profile_id") == visitor_id:
+            continue
+        if session["ip"] != latest["ip"]:
+            continue
+        if session["known_automation"] or session["classification_state"] not in LINKABLE_VISITOR_STATES:
+            continue
+        if session["country_code"] != latest["country_code"]:
+            continue
+        if session["area"] != latest["area"] or session["city"] != latest["city"]:
+            continue
+
+        same_browser_family = _browser_family(session["browser"]) == _browser_family(latest["browser"])
+        shared_project = session["project_slug"] in target_project_slugs
+        nearby_window = any(
+            _session_windows_close(session, target_session) for target_session in visitor_sessions
+        )
+
+        if not (same_browser_family or (shared_project and nearby_window)):
+            continue
+
+        grouped[session["visitor_profile_id"]].append(session)
+
+    linked_profiles: list[dict[str, Any]] = []
+    for profile_id, sessions in grouped.items():
+        newest = max(sessions, key=lambda session: session["last_seen_at"])
+        oldest = min(sessions, key=lambda session: session["first_seen_at"])
+        projects = ordered_unique([session["project_name"] for session in sessions])
+        same_browser_family = any(
+            _browser_family(session["browser"]) == _browser_family(latest["browser"])
+            for session in sessions
+        )
+        shared_projects = ordered_unique(
+            [
+                session["project_name"]
+                for session in sessions
+                if session["project_slug"] in target_project_slugs
+            ]
+        )
+        nearby_window = any(
+            any(_session_windows_close(session, target_session) for target_session in visitor_sessions)
+            for session in sessions
+        )
+
+        reason_bits: list[str] = []
+        if same_browser_family:
+            reason_bits.append("same browser family")
+        if shared_projects:
+            reason_bits.append(
+                "shared project "
+                + (shared_projects[0] if len(shared_projects) == 1 else f"{shared_projects[0]} +{len(shared_projects) - 1}")
+            )
+        if nearby_window:
+            reason_bits.append("nearby activity window")
+
+        linked_profiles.append(
+            {
+                "id": profile_id,
+                "alias": newest["visitor_alias"],
+                "ip": newest["ip"],
+                "browser": newest["browser"],
+                "device": newest["device"],
+                "os": newest["os"],
+                "country": newest["country"],
+                "country_code": newest["country_code"],
+                "area": newest["area"],
+                "city": newest["city"],
+                "first_seen_at": oldest["first_seen_at"],
+                "last_seen_at": newest["last_seen_at"],
+                "first_seen_alberta": oldest["first_seen_alberta"],
+                "last_seen_alberta": newest["last_seen_alberta"],
+                "total_sessions": len(sessions),
+                "projects_visited": len({session["project_slug"] for session in sessions}),
+                "project_names": projects,
+                "reason": ", ".join(reason_bits) if reason_bits else "same source context",
+            }
+        )
+
+    linked_profiles.sort(key=lambda item: item["last_seen_at"], reverse=True)
+    return linked_profiles[:LINKED_VISITOR_LIMIT]
+
+
 def _project_live_feed_sessions(
     sessions: list[dict[str, Any]],
     *,
@@ -1398,6 +1533,11 @@ def build_visitor_profile(
     newest_first = _chronological_sessions_desc(visitor_sessions)
     latest = max(visitor_sessions, key=lambda session: session["last_seen_at"])
     oldest = min(visitor_sessions, key=lambda session: session["first_seen_at"])
+    linked_profiles = _build_linked_visitor_profiles(
+        all_sessions=sessions,
+        visitor_sessions=visitor_sessions,
+        visitor_id=visitor_id,
+    )
     requested_start = (
         datetime.now(timezone.utc) - timedelta(hours=window_hours)
         if window_hours is not None
@@ -1424,8 +1564,33 @@ def build_visitor_profile(
     project_names = {
         session["project_slug"]: session["project_name"] for session in newest_first
     }
+    project_first_seen = {
+        slug: min(
+            (
+                session["first_seen_at"]
+                for session in newest_first
+                if session["project_slug"] == slug
+            ),
+            default=latest["first_seen_at"],
+        )
+        for slug in project_counts
+    }
+    project_first_seen_alberta = {
+        slug: min(
+            (
+                session["first_seen_alberta"]
+                for session in newest_first
+                if session["project_slug"] == slug
+            ),
+            default=latest["first_seen_alberta"],
+        )
+        for slug in project_counts
+    }
     project_last_seen = {
         session["project_slug"]: session["last_seen_at"] for session in newest_first
+    }
+    project_last_seen_alberta = {
+        session["project_slug"]: session["last_seen_alberta"] for session in newest_first
     }
     visitor_session_map = {
         session["session_id"]: session for session in visitor_sessions
@@ -1498,15 +1663,20 @@ def build_visitor_profile(
             "projects_visited": len(project_counts),
             "total_sessions": len(newest_first),
             "active_now": any(session["active_now"] for session in newest_first),
+            "linked_profiles_count": len(linked_profiles),
         },
         "projects": [
             {
                 "slug": slug,
                 "name": project_names[slug],
                 "visits": count,
+                "first_seen_at": project_first_seen[slug],
+                "first_seen_alberta": project_first_seen_alberta[slug],
                 "last_seen_at": project_last_seen[slug],
+                "last_seen_alberta": project_last_seen_alberta[slug],
             }
             for slug, count in project_counts.most_common()
         ],
+        "linked_profiles": linked_profiles,
         "sessions": profile_sessions,
     }
