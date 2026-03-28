@@ -111,6 +111,10 @@ VISITOR_PROFILE_CACHE_TTL_SECONDS = 30.0
 _response_cache_lock = threading.Lock()
 _response_cache: dict[tuple[str, tuple[tuple[str, Any], ...]], tuple[float, Any]] = {}
 _response_cache_refreshing: set[tuple[str, tuple[tuple[str, Any], ...]]] = set()
+_response_cache_events: dict[
+    tuple[str, tuple[tuple[str, Any], ...]],
+    threading.Event,
+] = {}
 
 app.add_middleware(
     CORSMiddleware,
@@ -164,6 +168,8 @@ def cached_response(
 ) -> Any:
     cache_key = (cache_name, tuple(sorted(params.items())))
     now = monotonic()
+    wait_event: threading.Event | None = None
+    build_here = False
 
     with _response_cache_lock:
         cached = _response_cache.get(cache_key)
@@ -172,6 +178,8 @@ def cached_response(
         if cached:
             if cache_key not in _response_cache_refreshing:
                 _response_cache_refreshing.add(cache_key)
+                refresh_event = threading.Event()
+                _response_cache_events[cache_key] = refresh_event
 
                 def refresh_in_background() -> None:
                     try:
@@ -181,14 +189,49 @@ def cached_response(
                     finally:
                         with _response_cache_lock:
                             _response_cache_refreshing.discard(cache_key)
+                            _response_cache_events.pop(cache_key, refresh_event).set()
 
                 threading.Thread(target=refresh_in_background, daemon=True).start()
             return cached[1]
+        if cache_key in _response_cache_refreshing:
+            wait_event = _response_cache_events.get(cache_key)
+        else:
+            _response_cache_refreshing.add(cache_key)
+            wait_event = threading.Event()
+            _response_cache_events[cache_key] = wait_event
+            build_here = True
 
-    payload = builder()
+    if not build_here and wait_event is not None:
+        wait_event.wait(timeout=max(ttl_seconds, 5.0))
+        with _response_cache_lock:
+            cached = _response_cache.get(cache_key)
+            if cached:
+                return cached[1]
+            if cache_key not in _response_cache_refreshing:
+                _response_cache_refreshing.add(cache_key)
+                wait_event = threading.Event()
+                _response_cache_events[cache_key] = wait_event
+                build_here = True
+
+    if not build_here:
+        with _response_cache_lock:
+            _response_cache_refreshing.add(cache_key)
+            wait_event = threading.Event()
+            _response_cache_events[cache_key] = wait_event
+        build_here = True
+
+    try:
+        payload = builder()
+    except Exception:
+        with _response_cache_lock:
+            _response_cache_refreshing.discard(cache_key)
+            _response_cache_events.pop(cache_key, wait_event or threading.Event()).set()
+        raise
 
     with _response_cache_lock:
         _response_cache[cache_key] = (monotonic(), payload)
+        _response_cache_refreshing.discard(cache_key)
+        _response_cache_events.pop(cache_key, wait_event or threading.Event()).set()
 
     return payload
 
