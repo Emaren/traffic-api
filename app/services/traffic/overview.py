@@ -1564,33 +1564,29 @@ def build_visitor_profile(
     project_names = {
         session["project_slug"]: session["project_name"] for session in newest_first
     }
-    project_first_seen = {
+    project_oldest_session = {
         slug: min(
             (
-                session["first_seen_at"]
+                session
                 for session in newest_first
                 if session["project_slug"] == slug
             ),
-            default=latest["first_seen_at"],
+            key=lambda session: session["first_seen_at"],
+            default=latest,
         )
         for slug in project_counts
     }
-    project_first_seen_alberta = {
-        slug: min(
+    project_latest_session = {
+        slug: max(
             (
-                session["first_seen_alberta"]
+                session
                 for session in newest_first
                 if session["project_slug"] == slug
             ),
-            default=latest["first_seen_alberta"],
+            key=lambda session: session["last_seen_at"],
+            default=latest,
         )
         for slug in project_counts
-    }
-    project_last_seen = {
-        session["project_slug"]: session["last_seen_at"] for session in newest_first
-    }
-    project_last_seen_alberta = {
-        session["project_slug"]: session["last_seen_alberta"] for session in newest_first
     }
     visitor_session_map = {
         session["session_id"]: session for session in visitor_sessions
@@ -1670,10 +1666,10 @@ def build_visitor_profile(
                 "slug": slug,
                 "name": project_names[slug],
                 "visits": count,
-                "first_seen_at": project_first_seen[slug],
-                "first_seen_alberta": project_first_seen_alberta[slug],
-                "last_seen_at": project_last_seen[slug],
-                "last_seen_alberta": project_last_seen_alberta[slug],
+                "first_seen_at": project_oldest_session[slug]["first_seen_at"],
+                "first_seen_alberta": project_oldest_session[slug]["first_seen_alberta"],
+                "last_seen_at": project_latest_session[slug]["last_seen_at"],
+                "last_seen_alberta": project_latest_session[slug]["last_seen_alberta"],
             }
             for slug, count in project_counts.most_common()
         ],
