@@ -106,6 +106,8 @@ OVERVIEW_CACHE_TTL_SECONDS = 20.0
 SERIES_CACHE_TTL_SECONDS = 20.0
 LIVE_VISITORS_CACHE_TTL_SECONDS = 5.0
 VISITS_HISTORY_CACHE_TTL_SECONDS = 30.0
+PROJECT_DETAIL_CACHE_TTL_SECONDS = 30.0
+VISITOR_PROFILE_CACHE_TTL_SECONDS = 30.0
 _response_cache_lock = threading.Lock()
 _response_cache: dict[tuple[str, tuple[tuple[str, Any], ...]], tuple[float, Any]] = {}
 _response_cache_refreshing: set[tuple[str, tuple[tuple[str, Any], ...]]] = set()
@@ -518,7 +520,14 @@ def api_project_detail(
     if not any(project["slug"] == project_slug for project in PROJECTS):
         raise HTTPException(status_code=404, detail="Unknown project")
 
-    return build_project_detail(
+    return cached_response(
+        "project_detail",
+        ttl_seconds=PROJECT_DETAIL_CACHE_TTL_SECONDS,
+        builder=lambda: build_project_detail(
+            project_slug=project_slug,
+            window_hours=window_hours,
+            bucket_minutes=bucket_minutes,
+        ),
         project_slug=project_slug,
         window_hours=window_hours,
         bucket_minutes=bucket_minutes,
@@ -533,7 +542,13 @@ def api_project_graph(
     if not any(project["slug"] == project_slug for project in PROJECTS):
         raise HTTPException(status_code=404, detail="Unknown project")
 
-    return build_project_graph(
+    return cached_response(
+        "project_graph",
+        ttl_seconds=SERIES_CACHE_TTL_SECONDS,
+        builder=lambda: build_project_graph(
+            project_slug=project_slug,
+            range_key=range_key,
+        ),
         project_slug=project_slug,
         range_key=range_key,
     )
@@ -548,7 +563,14 @@ def api_project_live_feed(
     if not any(project["slug"] == project_slug for project in PROJECTS):
         raise HTTPException(status_code=404, detail="Unknown project")
 
-    return build_project_live_feed(
+    return cached_response(
+        "project_live_feed",
+        ttl_seconds=LIVE_VISITORS_CACHE_TTL_SECONDS,
+        builder=lambda: build_project_live_feed(
+            project_slug=project_slug,
+            window_hours=window_hours,
+            limit=limit,
+        ),
         project_slug=project_slug,
         window_hours=window_hours,
         limit=limit,
@@ -569,7 +591,14 @@ def api_project_live_feed_stream(
 
     return stream_json_response(
         request=request,
-        builder=lambda: build_project_live_feed(
+        builder=lambda: cached_response(
+            "project_live_feed",
+            ttl_seconds=LIVE_VISITORS_CACHE_TTL_SECONDS,
+            builder=lambda: build_project_live_feed(
+                project_slug=project_slug,
+                window_hours=window_hours,
+                limit=limit,
+            ),
             project_slug=project_slug,
             window_hours=window_hours,
             limit=limit,
@@ -675,7 +704,13 @@ def api_visitor_profile(
     visitor_id: str,
     range_key: str = Query("all", pattern="^(24h|7d|30d|all)$"),
 ) -> dict:
-    return build_visitor_profile(
+    return cached_response(
+        "visitor_profile",
+        ttl_seconds=VISITOR_PROFILE_CACHE_TTL_SECONDS,
+        builder=lambda: build_visitor_profile(
+            visitor_id=visitor_id,
+            range_key=range_key,
+        ),
         visitor_id=visitor_id,
         range_key=range_key,
     )
@@ -689,7 +724,13 @@ async def api_visitor_profile_stream(
     poll_seconds: float = Query(1.5, ge=0.5, le=10.0),
     heartbeat_seconds: int = Query(20, ge=5, le=60),
 ) -> StreamingResponse:
-    initial_profile = build_visitor_profile(
+    initial_profile = cached_response(
+        "visitor_profile",
+        ttl_seconds=VISITOR_PROFILE_CACHE_TTL_SECONDS,
+        builder=lambda: build_visitor_profile(
+            visitor_id=visitor_id,
+            range_key=range_key,
+        ),
         visitor_id=visitor_id,
         range_key=range_key,
     )
@@ -698,7 +739,13 @@ async def api_visitor_profile_stream(
 
     return stream_json_response(
         request=request,
-        builder=lambda: build_visitor_profile(
+        builder=lambda: cached_response(
+            "visitor_profile",
+            ttl_seconds=VISITOR_PROFILE_CACHE_TTL_SECONDS,
+            builder=lambda: build_visitor_profile(
+                visitor_id=visitor_id,
+                range_key=range_key,
+            ),
             visitor_id=visitor_id,
             range_key=range_key,
         ),
