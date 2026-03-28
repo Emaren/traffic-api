@@ -5,6 +5,7 @@ from app.services.traffic.config import (
     ASSET_EXTENSIONS,
     BOT_TERMS,
     BROWSER_TERMS,
+    KNOWN_AUTOMATION_UA_TERMS,
     SUSPICIOUS_PATH_REGEXES,
     SUSPICIOUS_PATH_SNIPPETS,
     SUSPICIOUS_UA_TERMS,
@@ -36,11 +37,37 @@ def is_trackable_path(path: str | None) -> bool:
     return detect_route_kind(path) in {"page", "api", "probe"}
 
 
+def automation_family(ua: str | None) -> str | None:
+    lowered = (ua or "").lower()
+    if "googleother" in lowered:
+        return "GoogleOther"
+    if "adsbot-google" in lowered:
+        return "AdsBot-Google"
+    if "apis-google" in lowered:
+        return "APIs-Google"
+    if "mediapartners-google" in lowered:
+        return "Mediapartners-Google"
+    if "google-read-aloud" in lowered:
+        return "Google-Read-Aloud"
+    if "storebot-google" in lowered:
+        return "Storebot-Google"
+    if "googlebot" in lowered:
+        return "Googlebot"
+    return None
+
+
+def is_known_automation_ua(ua: str | None) -> bool:
+    lowered = (ua or "").lower()
+    return any(term in lowered for term in KNOWN_AUTOMATION_UA_TERMS) or "googlebot" in lowered
+
+
 def classify_request(ua: str | None, path: str | None) -> str:
     lowered_ua = (ua or "").lower()
 
     if is_suspicious_path(path):
         return "suspicious"
+    if is_known_automation_ua(lowered_ua):
+        return "bot"
     if any(term in lowered_ua for term in BOT_TERMS):
         return "bot"
     if any(term in lowered_ua for term in SUSPICIOUS_UA_TERMS):
@@ -53,6 +80,8 @@ def classify_request(ua: str | None, path: str | None) -> str:
 def detect_device_type(ua: str | None) -> str:
     lowered = (ua or "").lower()
 
+    if automation_family(lowered):
+        return "script"
     if any(term in lowered for term in BOT_TERMS + SUSPICIOUS_UA_TERMS):
         return "script"
     if "ipad" in lowered or "tablet" in lowered:
@@ -81,10 +110,9 @@ def detect_os(ua: str | None) -> str:
 def detect_browser(ua: str | None) -> str:
     lowered = (ua or "").lower()
 
-    if "googleother" in lowered:
-        return "GoogleOther"
-    if "googlebot" in lowered:
-        return "Googlebot"
+    automation = automation_family(lowered)
+    if automation:
+        return automation
     if "edg/" in lowered or " edge" in lowered:
         return "Edge"
     if "chrome/" in lowered and "chromium" not in lowered and "edg/" not in lowered:

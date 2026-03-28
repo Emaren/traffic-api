@@ -58,6 +58,15 @@ BOT_TERMS = [
     "twitterbot",
 ]
 
+KNOWN_AUTOMATION_UA_TERMS = [
+    "googleother",
+    "adsbot-google",
+    "apis-google",
+    "mediapartners-google",
+    "google-read-aloud",
+    "storebot-google",
+]
+
 SUSPICIOUS_UA_TERMS = [
     "curl",
     "wget",

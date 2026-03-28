@@ -13,7 +13,12 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from py_vapid import Vapid01
 from pywebpush import WebPushException, webpush
 
-from app.services.traffic.classify import classify_request, detect_route_kind, is_suspicious_path
+from app.services.traffic.classify import (
+    classify_request,
+    detect_route_kind,
+    is_known_automation_ua,
+    is_suspicious_path,
+)
 from app.services.traffic.config import (
     ALBERTA_TZ_NAME,
     ADMIN_API_KEY,
@@ -87,6 +92,7 @@ DEFAULT_NOTIFICATION_SETTINGS: dict[str, Any] = {
         "page_hits_only": True,
         "suppress_operator_traffic": False,
         "filter_exploit_probes": True,
+        "filter_known_automation": True,
         "include_human_confirmed": True,
         "include_likely_human": True,
         "include_unclear": True,
@@ -220,6 +226,9 @@ def _normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
             ),
             "filter_exploit_probes": _normalize_bool(
                 incoming_policy.get("filter_exploit_probes", True)
+            ),
+            "filter_known_automation": _normalize_bool(
+                incoming_policy.get("filter_known_automation", True)
             ),
             "include_human_confirmed": _normalize_bool(
                 incoming_policy.get("include_human_confirmed", True)
@@ -1179,6 +1188,8 @@ def _suppression_reason(
         return "prefetch_page_burst"
     if policy["filter_exploit_probes"] and _looks_like_exploit_probe(entry["normalized_path"]):
         return "exploit_probe_filter"
+    if policy["filter_known_automation"] and is_known_automation_ua(entry.get("ua")):
+        return "known_automation_filter"
 
     selected_projects = policy["selected_projects"]
     if selected_projects and session["project_slug"] not in selected_projects:
