@@ -695,6 +695,7 @@ def build_live_visitors(
 ) -> dict[str, Any]:
     snapshot = _build_session_snapshot(window_hours=window_hours)
     sessions = snapshot["sessions"]
+    auxiliary_limit = 12
 
     tower_candidates = [
         session
@@ -702,8 +703,22 @@ def build_live_visitors(
         if session["classification_state"] not in {"bot", "suspicious"}
         and (session["page_count"] > 0 or session["route_kind"] == "page")
     ]
+    automation_candidates = [
+        session
+        for session in sessions
+        if session.get("known_automation")
+        and (session["page_count"] > 0 or session["route_kind"] == "page")
+    ]
+    security_candidates = [
+        session
+        for session in sessions
+        if session["classification_state"] == "suspicious"
+        and (session["page_count"] > 0 or session["route_kind"] == "page")
+    ]
 
     tower = sorted(tower_candidates, key=live_session_sort_key)[:limit]
+    automation_preview = sorted(automation_candidates, key=live_session_sort_key)[:auxiliary_limit]
+    security_preview = sorted(security_candidates, key=live_session_sort_key)[:auxiliary_limit]
 
     history_candidates = sorted(tower_candidates, key=lambda item: item["ended_at"], reverse=True)
     history_items = history_candidates[limit : limit + history_limit]
@@ -737,6 +752,10 @@ def build_live_visitors(
         "history_count": max(0, len(history_candidates) - limit),
         "stream_total": len(history_candidates),
         "stream_items": stream_items,
+        "automation_count": len(automation_candidates),
+        "automation_preview": automation_preview,
+        "security_count": len(security_candidates),
+        "security_preview": security_preview,
         "available_projects": _project_options(),
         "project_counts": project_counts,
         "top_25": tower,
@@ -783,7 +802,15 @@ def build_visits_history(
     sessions = snapshot["sessions"]
 
     filtered = sessions
-    if classification:
+    if classification == "known_automation":
+        filtered = [session for session in filtered if session.get("known_automation")]
+    elif classification == "other_bot":
+        filtered = [
+            session
+            for session in filtered
+            if session["classification_state"] == "bot" and not session.get("known_automation")
+        ]
+    elif classification:
         filtered = [session for session in filtered if session["classification_state"] == classification]
     if selected_project_slugs is not None:
         filtered = [

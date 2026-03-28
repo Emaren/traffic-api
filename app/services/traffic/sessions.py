@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
 from app.services.traffic.classify import (
+    automation_family,
     classification_state_for_confidence,
     compute_human_confidence,
     compute_live_priority,
@@ -463,6 +464,8 @@ def build_single_session(events: list[dict[str, Any]], now: datetime | None = No
     )
 
     ua_lower = (first["ua"] or "").lower()
+    automation_label = automation_family(first["ua"]) or ""
+    known_automation = bool(automation_label)
 
     person_key = person_key_for_session(first["ip"], first["ua"])
 
@@ -490,6 +493,8 @@ def build_single_session(events: list[dict[str, Any]], now: datetime | None = No
         "device": detect_device_type(first["ua"]),
         "os": detect_os(first["ua"]),
         "browser": detect_browser(first["ua"]),
+        "known_automation": known_automation,
+        "automation_family": automation_label,
         "referrer": first["referrer_host"],
         "source": source,
         "medium": medium,
@@ -556,15 +561,28 @@ def enrich_sessions(sessions: list[dict[str, Any]]) -> None:
         session["classification_reason_labels"] = [
             humanize_reason(reason) for reason in session["classification_reasons"]
         ]
-        session["classification_summary"] = summarize_classification(
-            session["classification_state"],
-            session["human_confidence"],
-            session["suspicious_score"],
-        )
+        if session["known_automation"] and session["classification_state"] == "bot":
+            family = session["automation_family"] or "Known automation"
+            session["classification_summary"] = (
+                f"Recognized {family} automation. This looks like a crawler, preview, or proxy "
+                "fetch rather than a real person moving through the site."
+            )
+            session["attention_label"] = "Background"
+            session["attention_summary"] = (
+                f"{family} is known automation. Keep it available for context, but it usually "
+                "does not need the same attention as suspicious traffic."
+            )
+        else:
+            session["classification_summary"] = summarize_classification(
+                session["classification_state"],
+                session["human_confidence"],
+                session["suspicious_score"],
+            )
         session["data_confidence_label"] = data_label
         session["data_confidence_summary"] = data_summary
-        session["attention_label"] = attention_label
-        session["attention_summary"] = attention_summary
+        if not session["known_automation"] or session["classification_state"] != "bot":
+            session["attention_label"] = attention_label
+            session["attention_summary"] = attention_summary
 
 
 def build_sessions(recent_entries: list[dict[str, Any]], limit: int | None = None) -> list[dict[str, Any]]:
