@@ -81,6 +81,10 @@ def detect_os(ua: str | None) -> str:
 def detect_browser(ua: str | None) -> str:
     lowered = (ua or "").lower()
 
+    if "googleother" in lowered:
+        return "GoogleOther"
+    if "googlebot" in lowered:
+        return "Googlebot"
     if "edg/" in lowered or " edge" in lowered:
         return "Edge"
     if "chrome/" in lowered and "chromium" not in lowered and "edg/" not in lowered:
@@ -93,8 +97,6 @@ def detect_browser(ua: str | None) -> str:
         return "curl"
     if "wget" in lowered:
         return "wget"
-    if "googlebot" in lowered:
-        return "Googlebot"
     if "twitterbot" in lowered:
         return "Twitterbot"
     return "Unknown"

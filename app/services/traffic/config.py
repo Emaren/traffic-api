@@ -49,6 +49,7 @@ BOT_TERMS = [
     "zgrab",
     "uptimerobot",
     "googlebot",
+    "googleother",
     "bingbot",
     "bingpreview",
     "duckduckbot",
