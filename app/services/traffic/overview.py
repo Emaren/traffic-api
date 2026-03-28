@@ -1396,8 +1396,8 @@ def build_visitor_profile(
         }
 
     newest_first = _chronological_sessions_desc(visitor_sessions)
-    latest = newest_first[0]
-    oldest = newest_first[-1]
+    latest = max(visitor_sessions, key=lambda session: session["last_seen_at"])
+    oldest = min(visitor_sessions, key=lambda session: session["first_seen_at"])
     requested_start = (
         datetime.now(timezone.utc) - timedelta(hours=window_hours)
         if window_hours is not None
