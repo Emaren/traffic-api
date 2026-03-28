@@ -121,6 +121,8 @@ EXPLOIT_PATH_SNIPPETS = (
     ".env",
 )
 
+ACTIVE_VISIT_BURST_WINDOW_SECONDS = 75
+
 
 def admin_api_configured() -> bool:
     return bool(ADMIN_API_KEY)
@@ -1124,6 +1126,35 @@ def _count_recent_notifications(
     return int(row["count"]) if row else 0
 
 
+def _recent_delivered_event_in_visit_burst(
+    connection: Any,
+    *,
+    person_key: str,
+    session_id: str,
+    event_timestamp: str,
+    since_seconds: int = ACTIVE_VISIT_BURST_WINDOW_SECONDS,
+) -> bool:
+    current_timestamp = parse_iso_timestamp(event_timestamp)
+    if current_timestamp is None:
+        current_timestamp = datetime.now(timezone.utc)
+    cutoff = (current_timestamp - timedelta(seconds=since_seconds)).isoformat()
+    row = connection.execute(
+        """
+        SELECT id
+        FROM traffic_notification_events
+        WHERE status = 'delivered'
+          AND person_key = ?
+          AND session_id = ?
+          AND event_timestamp >= ?
+          AND event_timestamp <= ?
+        ORDER BY event_timestamp DESC, id DESC
+        LIMIT 1
+        """,
+        (person_key, session_id, cutoff, event_timestamp),
+    ).fetchone()
+    return row is not None
+
+
 def _suppression_reason(
     settings: dict[str, Any],
     session: dict[str, Any],
@@ -1197,6 +1228,14 @@ def _suppression_reason(
         )
         if recent_count >= per_visitor_cap:
             return "visitor_hour_cap"
+
+    if _recent_delivered_event_in_visit_burst(
+        connection,
+        person_key=session["person_key"],
+        session_id=session["session_id"],
+        event_timestamp=entry["timestamp_iso"],
+    ):
+        return "active_visit_burst"
 
     per_session_cap = policy["max_notifications_per_session"]
     if per_session_cap > 0:
