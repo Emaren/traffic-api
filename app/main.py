@@ -50,6 +50,8 @@ from app.services.traffic_core import (
     build_visits_history,
 )
 
+DEFAULT_PROJECT_DETAIL_BUCKET_MINUTES = 30
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -82,7 +84,7 @@ async def lifespan(app: FastAPI):
             signal.signal(signum, request_shutdown)
 
     notification_task = asyncio.create_task(notification_worker(app))
-    warm_cache_task = asyncio.create_task(asyncio.to_thread(warm_session_snapshots))
+    warm_cache_task = asyncio.create_task(asyncio.to_thread(warm_default_caches))
 
     try:
         yield
@@ -240,6 +242,26 @@ def clear_response_cache() -> None:
     with _response_cache_lock:
         _response_cache.clear()
         _response_cache_refreshing.clear()
+        _response_cache_events.clear()
+
+
+def warm_default_caches() -> None:
+    warm_session_snapshots()
+
+    for project in PROJECTS:
+        project_slug = project["slug"]
+        cached_response(
+            "project_detail",
+            ttl_seconds=PROJECT_DETAIL_CACHE_TTL_SECONDS,
+            builder=lambda project_slug=project_slug: build_project_detail(
+                project_slug=project_slug,
+                window_hours=24,
+                bucket_minutes=DEFAULT_PROJECT_DETAIL_BUCKET_MINUTES,
+            ),
+            project_slug=project_slug,
+            window_hours=24,
+            bucket_minutes=DEFAULT_PROJECT_DETAIL_BUCKET_MINUTES,
+        )
 
 
 async def notification_worker(app: FastAPI) -> None:
