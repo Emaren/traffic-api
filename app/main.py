@@ -110,7 +110,10 @@ LIVE_VISITORS_CACHE_TTL_SECONDS = 5.0
 VISITS_HISTORY_CACHE_TTL_SECONDS = 30.0
 PROJECT_DETAIL_CACHE_TTL_SECONDS = 30.0
 VISITOR_PROFILE_CACHE_TTL_SECONDS = 30.0
+
 _response_cache_lock = threading.Lock()
+_RESPONSE_CACHE_MAX_KEYS = 32
+_RESPONSE_CACHE_STALE_SECONDS = 300.0
 _response_cache: dict[tuple[str, tuple[tuple[str, Any], ...]], tuple[float, Any]] = {}
 _response_cache_refreshing: set[tuple[str, tuple[tuple[str, Any], ...]]] = set()
 _response_cache_events: dict[
@@ -161,6 +164,44 @@ def get_notification_loop_state(app: FastAPI) -> dict[str, object]:
     return fallback
 
 
+def _prune_response_cache(
+    now: float,
+    *,
+    keep_key: tuple[str, tuple[tuple[str, Any], ...]] | None = None,
+) -> None:
+    expired_keys = [
+        key
+        for key, (created_at, _payload) in _response_cache.items()
+        if key != keep_key and now - created_at > _RESPONSE_CACHE_STALE_SECONDS
+    ]
+    for key in expired_keys:
+        _response_cache.pop(key, None)
+        _response_cache_refreshing.discard(key)
+        event = _response_cache_events.pop(key, None)
+        if event is not None:
+            event.set()
+
+    if len(_response_cache) <= _RESPONSE_CACHE_MAX_KEYS:
+        return
+
+    removable = sorted(
+        (
+            (created_at, key)
+            for key, (created_at, _payload) in _response_cache.items()
+            if key != keep_key
+        ),
+        key=lambda item: item[0],
+    )
+
+    while len(_response_cache) > _RESPONSE_CACHE_MAX_KEYS and removable:
+        _created_at, key = removable.pop(0)
+        _response_cache.pop(key, None)
+        _response_cache_refreshing.discard(key)
+        event = _response_cache_events.pop(key, None)
+        if event is not None:
+            event.set()
+
+
 def cached_response(
     cache_name: str,
     *,
@@ -174,9 +215,11 @@ def cached_response(
     build_here = False
 
     with _response_cache_lock:
+        _prune_response_cache(now, keep_key=cache_key)
         cached = _response_cache.get(cache_key)
         if cached and now - cached[0] < ttl_seconds:
             return cached[1]
+
         if cached:
             if cache_key not in _response_cache_refreshing:
                 _response_cache_refreshing.add(cache_key)
@@ -187,7 +230,9 @@ def cached_response(
                     try:
                         payload = builder()
                         with _response_cache_lock:
-                            _response_cache[cache_key] = (monotonic(), payload)
+                            tick = monotonic()
+                            _response_cache[cache_key] = (tick, payload)
+                            _prune_response_cache(tick, keep_key=cache_key)
                     finally:
                         with _response_cache_lock:
                             _response_cache_refreshing.discard(cache_key)
@@ -195,6 +240,7 @@ def cached_response(
 
                 threading.Thread(target=refresh_in_background, daemon=True).start()
             return cached[1]
+
         if cache_key in _response_cache_refreshing:
             wait_event = _response_cache_events.get(cache_key)
         else:
@@ -206,6 +252,8 @@ def cached_response(
     if not build_here and wait_event is not None:
         wait_event.wait(timeout=max(ttl_seconds, 5.0))
         with _response_cache_lock:
+            tick = monotonic()
+            _prune_response_cache(tick, keep_key=cache_key)
             cached = _response_cache.get(cache_key)
             if cached:
                 return cached[1]
@@ -231,7 +279,9 @@ def cached_response(
         raise
 
     with _response_cache_lock:
-        _response_cache[cache_key] = (monotonic(), payload)
+        tick = monotonic()
+        _response_cache[cache_key] = (tick, payload)
+        _prune_response_cache(tick, keep_key=cache_key)
         _response_cache_refreshing.discard(cache_key)
         _response_cache_events.pop(cache_key, wait_event or threading.Event()).set()
 
@@ -749,12 +799,19 @@ def api_live_visitors_stream(
     limit: int = Query(25, ge=1, le=100),
     history_limit: int = Query(250, ge=0, le=5000),
     window_hours: int = Query(24, ge=1, le=168),
-    poll_seconds: float = Query(1.5, ge=0.5, le=10.0),
+    poll_seconds: float = Query(5.0, ge=1.0, le=15.0),
     heartbeat_seconds: int = Query(20, ge=5, le=60),
 ) -> StreamingResponse:
     return stream_json_response(
         request=request,
-        builder=lambda: build_live_visitors(
+        builder=lambda: cached_response(
+            "live_visitors",
+            ttl_seconds=LIVE_VISITORS_CACHE_TTL_SECONDS,
+            builder=lambda: build_live_visitors(
+                limit=limit,
+                history_limit=history_limit,
+                window_hours=window_hours,
+            ),
             limit=limit,
             history_limit=history_limit,
             window_hours=window_hours,
@@ -867,3 +924,4 @@ def api_visits_history(
         classification=classification,
         projects=",".join(selected_projects or ()),
     )
+    

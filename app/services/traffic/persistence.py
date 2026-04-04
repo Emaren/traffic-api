@@ -202,7 +202,9 @@ def _event_id(*, source_path: str, source_inode: int, line_offset: int, raw_line
 
 
 def _prune_old_entries(connection: sqlite3.Connection) -> None:
-    retention_cutoff = (datetime.now(timezone.utc) - timedelta(days=PERSIST_RETENTION_DAYS)).isoformat()
+    retention_cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=PERSIST_RETENTION_DAYS)
+    ).isoformat()
     connection.execute(
         "DELETE FROM traffic_entries WHERE timestamp < ?",
         (retention_cutoff,),
@@ -326,15 +328,86 @@ def sync_log_to_persistence(log_path: Path = LOG_PATH) -> dict[str, int | str]:
     return {"inserted": inserted, "offset": final_offset, "mode": "persisted"}
 
 
+def _selected_columns(include_raw_fields: bool) -> list[str]:
+    if include_raw_fields:
+        return [
+            "timestamp",
+            "line_offset",
+            "ip",
+            "request",
+            "method",
+            "raw_path",
+            "normalized_path",
+            "status",
+            "referrer",
+            "referrer_host",
+            "ua",
+            "host",
+            "raw",
+        ]
+
+    return [
+        "timestamp",
+        "line_offset",
+        "ip",
+        "raw_path",
+        "normalized_path",
+        "referrer_host",
+        "ua",
+        "host",
+    ]
+
+
+def _recent_entries_query(
+    *,
+    selected_columns: list[str],
+    window_hours: int | None,
+    hosts: list[str] | None,
+    max_rows: int | None,
+) -> tuple[str, list[str | int]]:
+    query = """
+        SELECT
+            {}
+        FROM traffic_entries
+    """.format(",\n            ".join(selected_columns))
+
+    params: list[str | int] = []
+    where_clauses: list[str] = []
+
+    if window_hours is not None:
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).isoformat()
+        where_clauses.append("timestamp >= ?")
+        params.append(cutoff)
+
+    if hosts is not None:
+        where_clauses.append(f"host IN ({', '.join('?' for _ in hosts)})")
+        params.extend(hosts)
+
+    if where_clauses:
+        query += " WHERE " + " AND ".join(where_clauses)
+
+    if max_rows is not None:
+        query += " ORDER BY timestamp DESC, line_offset DESC LIMIT ?"
+        params.append(max_rows)
+    else:
+        query += " ORDER BY timestamp ASC, line_offset ASC"
+
+    return query, params
+
+
 def load_recent_entries(
     window_hours: int | None,
     log_path: Path = LOG_PATH,
     *,
     hosts: list[str] | None = None,
     include_raw_fields: bool = True,
+    max_rows: int | None = None,
 ) -> list[dict[str, Any]] | None:
     if not persistence_enabled():
         return None
+
+    if max_rows is not None and max_rows <= 0:
+        return []
 
     try:
         sync_log_to_persistence(log_path)
@@ -344,80 +417,50 @@ def load_recent_entries(
     try:
         with _connect() as connection:
             _ensure_schema(connection)
+
             if hosts is not None and not hosts:
                 return []
 
-            selected_columns = [
-                "timestamp",
-                "line_offset",
-                "ip",
-                "raw_path",
-                "normalized_path",
-                "referrer_host",
-                "ua",
-                "host",
-            ]
-            if include_raw_fields:
-                selected_columns = [
-                    "timestamp",
-                    "line_offset",
-                    "ip",
-                    "request",
-                    "method",
-                    "raw_path",
-                    "normalized_path",
-                    "status",
-                    "referrer",
-                    "referrer_host",
-                    "ua",
-                    "host",
-                    "raw",
-                ]
-            query = """
-                SELECT
-                    {}
-                FROM traffic_entries
-            """.format(",\n                    ".join(selected_columns))
-            params: list[str] = []
-            where_clauses: list[str] = []
-            if window_hours is not None:
-                cutoff = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).isoformat()
-                where_clauses.append("timestamp >= ?")
-                params.append(cutoff)
-            if hosts is not None:
-                where_clauses.append(f"host IN ({', '.join('?' for _ in hosts)})")
-                params.extend(hosts)
-            if where_clauses:
-                query += " WHERE " + " AND ".join(where_clauses)
-            query += " ORDER BY timestamp ASC, line_offset ASC"
-            rows = connection.execute(query, tuple(params)).fetchall()
+            selected_columns = _selected_columns(include_raw_fields)
+            query, params = _recent_entries_query(
+                selected_columns=selected_columns,
+                window_hours=window_hours,
+                hosts=hosts,
+                max_rows=max_rows,
+            )
+
+            cursor = connection.execute(query, tuple(params))
+
+            entries: list[dict[str, Any]] = []
+            for row in cursor:
+                parsed_timestamp = parse_iso_timestamp(row["timestamp"])
+                if not parsed_timestamp:
+                    continue
+
+                item: dict[str, Any] = {
+                    "ip": row["ip"],
+                    "timestamp": parsed_timestamp,
+                    "timestamp_iso": row["timestamp"],
+                    "line_offset": row["line_offset"],
+                    "raw_path": row["raw_path"],
+                    "normalized_path": row["normalized_path"],
+                    "referrer_host": row["referrer_host"],
+                    "ua": row["ua"],
+                    "host": row["host"],
+                }
+
+                if include_raw_fields:
+                    item["request"] = row["request"]
+                    item["method"] = row["method"]
+                    item["status"] = row["status"]
+                    item["referrer"] = row["referrer"]
+                    item["raw"] = row["raw"]
+
+                entries.append(item)
     except Exception:
         return None
 
-    entries: list[dict[str, Any]] = []
-    for row in rows:
-        parsed_timestamp = parse_iso_timestamp(row["timestamp"])
-        if not parsed_timestamp:
-            continue
-
-        entries.append(
-            {
-                "ip": row["ip"],
-                "timestamp": parsed_timestamp,
-                "timestamp_iso": row["timestamp"],
-                "line_offset": row["line_offset"],
-                "raw_path": row["raw_path"],
-                "normalized_path": row["normalized_path"],
-                "referrer_host": row["referrer_host"],
-                "ua": row["ua"],
-                "host": row["host"],
-            }
-        )
-        if include_raw_fields:
-            entries[-1]["request"] = row["request"]
-            entries[-1]["method"] = row["method"]
-            entries[-1]["status"] = row["status"]
-            entries[-1]["referrer"] = row["referrer"]
-            entries[-1]["raw"] = row["raw"]
+    if max_rows is not None:
+        entries.reverse()
 
     return entries
