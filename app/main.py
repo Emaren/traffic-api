@@ -84,7 +84,7 @@ async def lifespan(app: FastAPI):
             signal.signal(signum, request_shutdown)
 
     notification_task = asyncio.create_task(notification_worker(app))
-    warm_cache_task = asyncio.create_task(asyncio.to_thread(warm_default_caches))
+    warm_cache_task = None
 
     try:
         yield
@@ -594,25 +594,35 @@ def api_admin_web_push_subscription_delete(
 def api_overview(
     range_key: str = Query("24h", pattern="^(24h|7d|30d|all)$"),
 ) -> dict:
-    return cached_response(
+    payload = cached_response(
         "overview",
         ttl_seconds=OVERVIEW_CACHE_TTL_SECONDS,
         builder=lambda: build_overview(range_key=range_key),
         range_key=range_key,
     )
 
+    return {
+        "ok": payload["ok"],
+        "generated_at": payload["generated_at"],
+        "range_key": payload["range_key"],
+        "range_label": payload["range_label"],
+        "window_hours": payload["window_hours"],
+        "window": payload["window"],
+        "coverage_mode": payload["coverage_mode"],
+        "coverage_started_at": payload["coverage_started_at"],
+        "coverage_started_alberta": payload["coverage_started_alberta"],
+        "note": payload["note"],
+        "totals": payload["totals"],
+        "projects": payload["projects"],
+        "alerts": payload["alerts"],
+        "notes": payload["notes"],
+    }
 
 @app.get("/api/summary")
 def api_summary(
     range_key: str = Query("24h", pattern="^(24h|7d|30d|all)$"),
 ) -> dict:
-    return cached_response(
-        "overview",
-        ttl_seconds=OVERVIEW_CACHE_TTL_SECONDS,
-        builder=lambda: build_overview(range_key=range_key),
-        range_key=range_key,
-    )
-
+    return api_overview(range_key=range_key)
 
 @app.get("/api/projects")
 def api_projects(
