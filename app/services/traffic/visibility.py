@@ -41,8 +41,15 @@ def list_visibility_rules(*, active_only: bool = False) -> list[dict[str, Any]]:
     ]
 
 
+def safe_list_visibility_rules(*, active_only: bool = False) -> list[dict[str, Any]]:
+    try:
+        return list_visibility_rules(active_only=active_only)
+    except Exception:
+        return []
+
+
 def visibility_signature() -> tuple[str, ...]:
-    active_rules = list_visibility_rules(active_only=True)
+    active_rules = safe_list_visibility_rules(active_only=True)
     return tuple(
         sorted(
             f"{rule['rule_type']}:{rule['match_value']}"
@@ -123,7 +130,7 @@ def entry_hidden_by_visibility_rules(
     *,
     rules: list[dict[str, Any]] | None = None,
 ) -> bool:
-    active_rules = rules if rules is not None else list_visibility_rules(active_only=True)
+    active_rules = rules if rules is not None else safe_list_visibility_rules(active_only=True)
     project_slug = project_for_host(entry["host"])["slug"]
 
     for rule in active_rules:

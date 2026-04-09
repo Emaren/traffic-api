@@ -11,6 +11,7 @@ from app.services.traffic.config import (
     INTERNAL_IGNORE_PATHS,
     LIVE_TILE_LIMIT,
     LOG_PATH,
+    LOG_PATHS,
     PERSIST_DB_PATH,
     SERIES_BUCKET_MINUTES,
     TAIL_LINES,
@@ -36,7 +37,7 @@ from app.services.traffic.sessions import (
 )
 from app.services.traffic.visibility import (
     entry_hidden_by_visibility_rules,
-    list_visibility_rules,
+    safe_list_visibility_rules,
     visibility_signature,
 )
 
@@ -98,7 +99,7 @@ def collect_recent_entries_with_source(
     )
     recent_entries: list[dict[str, Any]] = []
     project_hosts = _hosts_for_projects(project_slugs)
-    active_visibility_rules = list_visibility_rules(active_only=True)
+    active_visibility_rules = safe_list_visibility_rules(active_only=True)
     persisted_entries = load_recent_entries(
         window_hours=window_hours,
         hosts=project_hosts,
@@ -107,13 +108,17 @@ def collect_recent_entries_with_source(
     source_mode = "durable_store" if persisted_entries is not None else "log_tail"
 
     if persisted_entries is None:
-        lines = read_recent_log_lines(LOG_PATH, TAIL_LINES)
-
         source_entries: list[dict[str, Any]] = []
-        for line in lines:
-            parsed = parse_log_line(line)
-            if parsed:
-                source_entries.append(parsed)
+        seen_lines: set[str] = set()
+        for log_path in LOG_PATHS:
+            for line in read_recent_log_lines(log_path, TAIL_LINES):
+                if line in seen_lines:
+                    continue
+                seen_lines.add(line)
+                parsed = parse_log_line(line)
+                if parsed:
+                    source_entries.append(parsed)
+        source_entries.sort(key=lambda entry: entry["timestamp"])
     else:
         source_entries = persisted_entries
 
@@ -189,9 +194,14 @@ def _store_session_snapshot(
     project_slugs: set[str] | None = None,
     sessions: list[dict[str, Any]],
     source_mode: str,
+    earliest_entry_at: datetime | None,
 ) -> dict[str, Any]:
     cache_key = _session_snapshot_key(window_hours, project_slugs)
-    value = {"sessions": sessions, "source_mode": source_mode}
+    value = {
+        "sessions": sessions,
+        "source_mode": source_mode,
+        "earliest_entry_at": earliest_entry_at,
+    }
     now_tick = monotonic()
     fresh_ttl = (
         SESSION_SNAPSHOT_ALL_TIME_TTL_SECONDS
@@ -231,6 +241,7 @@ def _rebuild_session_snapshot(
         project_slugs=project_slugs,
         sessions=sessions,
         source_mode=source_mode,
+        earliest_entry_at=min((entry["timestamp"] for entry in entries), default=None),
     )
 
 
@@ -410,6 +421,7 @@ def build_overview(range_key: str = "24h") -> dict[str, Any]:
             window_hours,
             sessions=sessions,
             source_mode=source_mode,
+            earliest_entry_at=earliest_entry_at,
         )
     likely_human_states = {"human_confirmed", "likely_human"}
     automated_states = {"bot", "suspicious"}
@@ -586,13 +598,22 @@ def build_overview(range_key: str = "24h") -> dict[str, Any]:
                 }
             )
 
-    alerts.append(
-        {
-            "severity": "low",
-            "title": f"Reading local log file {LOG_PATH}",
-            "count": total_requests,
-        }
-    )
+    if len(LOG_PATHS) == 1:
+        alerts.append(
+            {
+                "severity": "low",
+                "title": f"Reading local log file {LOG_PATH}",
+                "count": total_requests,
+            }
+        )
+    else:
+        alerts.append(
+            {
+                "severity": "low",
+                "title": f"Reading {len(LOG_PATHS)} local log files",
+                "count": total_requests,
+            }
+        )
 
     avg_session_seconds = int(sum(session["total_seconds"] for session in sessions) / len(sessions)) if sessions else 0
     avg_page_seconds = int(sum(page["avg_seconds"] for page in top_pages) / len(top_pages)) if top_pages else 0
@@ -600,7 +621,11 @@ def build_overview(range_key: str = "24h") -> dict[str, Any]:
     notes = [
         "Traffic service has been split into focused modules.",
         "This view is built from log lines, not seeded demo data.",
-        f"Current source log: {LOG_PATH}",
+        (
+            f"Current source log: {LOG_PATH}"
+            if len(LOG_PATHS) == 1
+            else f"Current source logs: {', '.join(str(path) for path in LOG_PATHS)}"
+        ),
         f"Host allowlist live: {len(ALLOWED_HOSTS)} approved hosts.",
     ]
 
@@ -1049,16 +1074,15 @@ def _project_graph_payload(
 ) -> dict[str, Any]:
     range_config = PROJECT_GRAPH_RANGES.get(range_key, PROJECT_GRAPH_RANGES["24h"])
     window_hours = range_config["window_hours"]
-    recent_entries, source_mode = collect_recent_entries_with_source(window_hours=window_hours)
-    project_entries = [
-        entry
-        for entry in recent_entries
-        if project_for_host(entry["host"])["slug"] == project_slug
-    ]
-    sessions = build_sessions(project_entries)
+    snapshot = _build_session_snapshot(
+        window_hours=window_hours,
+        project_slugs={project_slug},
+    )
+    source_mode = snapshot["source_mode"]
+    sessions = snapshot["sessions"]
 
     now = datetime.now(timezone.utc)
-    earliest_entry_at = project_entries[0]["timestamp"] if project_entries else None
+    earliest_entry_at = snapshot.get("earliest_entry_at")
     requested_start = (
         now - timedelta(hours=window_hours) if window_hours is not None else None
     )
@@ -1139,9 +1163,11 @@ def build_project_human_series(
 ) -> dict[str, Any]:
     range_config = PROJECT_GRAPH_RANGES.get(range_key, PROJECT_GRAPH_RANGES["24h"])
     window_hours = range_config["window_hours"]
-    recent_entries, source_mode = collect_recent_entries_with_source(window_hours=window_hours)
+    snapshot = _build_session_snapshot(window_hours=window_hours)
+    source_mode = snapshot["source_mode"]
+    sessions = snapshot["sessions"]
     now = datetime.now(timezone.utc)
-    earliest_entry_at = recent_entries[0]["timestamp"] if recent_entries else None
+    earliest_entry_at = snapshot.get("earliest_entry_at")
     requested_start = (
         now - timedelta(hours=window_hours) if window_hours is not None else None
     )
@@ -1162,8 +1188,6 @@ def build_project_human_series(
     while cursor <= last_bucket:
         bucket_list.append(cursor)
         cursor += timedelta(minutes=bucket_minutes)
-
-    sessions = build_sessions(recent_entries)
 
     points_by_project: dict[str, Counter] = defaultdict(Counter)
     live_counts = Counter()
@@ -1280,6 +1304,7 @@ def build_project_detail(
     project_slug: str,
     window_hours: int = 24,
     bucket_minutes: int = SERIES_BUCKET_MINUTES,
+    include_deep: bool = True,
 ) -> dict[str, Any]:
     project = next((item for item in PROJECTS if item["slug"] == project_slug), None)
     if not project:
@@ -1295,7 +1320,10 @@ def build_project_detail(
         for entry in collect_recent_entries(window_hours=window_hours)
         if project_for_host(entry["host"])["slug"] == project_slug
     ]
-    sessions = build_sessions(recent_entries)
+    sessions = _build_session_snapshot(
+        window_hours=window_hours,
+        project_slugs={project_slug},
+    )["sessions"]
 
     likely_human_states = {"human_confirmed", "likely_human"}
     automated_states = {"bot", "suspicious"}
@@ -1391,44 +1419,87 @@ def build_project_detail(
     top_pages = build_path_stats(recent_entries)
     live_feed = _project_live_feed_sessions(sessions, limit=10)
     recent_sessions = _chronological_sessions_desc(sessions, limit=10)
+    top_humans = sorted(
+        [
+            session
+            for session in sessions
+            if session["classification_state"] in likely_human_states
+            and not session.get("known_automation")
+        ],
+        key=live_session_sort_key,
+    )[:8]
+    top_suspicious_sessions = sorted(
+        [
+            session
+            for session in sessions
+            if session["classification_state"] == "suspicious" or session["route_kind"] == "probe"
+        ],
+        key=lambda session: (
+            session["suspicious_score"],
+            1 if session["active_now"] else 0,
+            session["ended_at"],
+        ),
+        reverse=True,
+    )[:8]
     graph = _project_graph_payload(
         project_slug=project["slug"],
         range_key="24h",
         bucket_minutes_override=bucket_minutes,
     )
-
-    country_rows = [
-        {
-            "country": country,
-            "sessions": count,
-            "requests": sum(1 for entry in recent_entries if get_geo_details(entry["ip"])["country"] == country),
-        }
-        for country, count in country_sessions.most_common(TOP_LIMIT)
-    ]
-    area_rows = [
-        {"country": country, "area": area, "sessions": count}
-        for (country, area), count in area_sessions.most_common(TOP_LIMIT)
-    ]
-    city_rows = [
-        {"country": country, "area": area, "city": city, "sessions": count}
-        for (country, area, city), count in city_sessions.most_common(TOP_LIMIT)
-    ]
-
-    suspicious_top_ips: list[dict[str, Any]] = []
-    for ip, count in top_ip_counter.most_common(TOP_LIMIT):
-        category = top_ip_category.get(ip, "unknown")
-        if category not in {"suspicious", "bot"}:
-            continue
-
-        suspicious_top_ips.append(
+    if include_deep:
+        top_pages = build_path_stats(recent_entries)
+        country_rows = [
             {
-                "ip": ip,
-                "country": get_geo_details(ip)["country"],
-                "count": count,
-                "category": category,
-                "last_seen": top_ip_last_seen.get(ip),
+                "country": country,
+                "sessions": count,
+                "requests": sum(
+                    1 for entry in recent_entries if get_geo_details(entry["ip"])["country"] == country
+                ),
             }
-        )
+            for country, count in country_sessions.most_common(TOP_LIMIT)
+        ]
+        area_rows = [
+            {"country": country, "area": area, "sessions": count}
+            for (country, area), count in area_sessions.most_common(TOP_LIMIT)
+        ]
+        city_rows = [
+            {"country": country, "area": area, "city": city, "sessions": count}
+            for (country, area, city), count in city_sessions.most_common(TOP_LIMIT)
+        ]
+
+        suspicious_top_ips: list[dict[str, Any]] = []
+        for ip, count in top_ip_counter.most_common(TOP_LIMIT):
+            category = top_ip_category.get(ip, "unknown")
+            if category not in {"suspicious", "bot"}:
+                continue
+
+            suspicious_top_ips.append(
+                {
+                    "ip": ip,
+                    "country": get_geo_details(ip)["country"],
+                    "count": count,
+                    "category": category,
+                    "last_seen": top_ip_last_seen.get(ip),
+                }
+            )
+        hosts_output = hosts
+        suspicious_output = {
+            "top_paths": [
+                {"path": path, "count": count}
+                for path, count in suspicious_path_counter.most_common(TOP_LIMIT)
+            ],
+            "top_ips": suspicious_top_ips,
+        }
+    else:
+        top_pages = []
+        country_rows = []
+        area_rows = []
+        city_rows = []
+        hosts_output = []
+        suspicious_output = {
+            "top_paths": [],
+            "top_ips": [],
+        }
 
     avg_session_seconds = int(sum(session["total_seconds"] for session in sessions) / len(sessions)) if sessions else 0
 
@@ -1437,6 +1508,7 @@ def build_project_detail(
         "generated_at": iso_now(),
         "window_hours": window_hours,
         "bucket_minutes": graph["bucket_minutes"],
+        "deep_detail_included": include_deep,
         "project": {
             "slug": project["slug"],
             "name": project["name"],
@@ -1454,20 +1526,16 @@ def build_project_detail(
         "graph": graph,
         "live_feed": live_feed,
         "recent_sessions": recent_sessions,
-        "hosts": hosts,
+        "top_humans": top_humans,
+        "top_suspicious_sessions": top_suspicious_sessions,
+        "hosts": hosts_output,
         "top_pages": top_pages,
         "geo": {
             "countries": country_rows,
             "areas": area_rows,
             "cities": city_rows,
         },
-        "suspicious": {
-            "top_paths": [
-                {"path": path, "count": count}
-                for path, count in suspicious_path_counter.most_common(TOP_LIMIT)
-            ],
-            "top_ips": suspicious_top_ips,
-        },
+        "suspicious": suspicious_output,
     }
 
 
@@ -1486,12 +1554,11 @@ def build_project_live_feed(
             "project_slug": project_slug,
         }
 
-    recent_entries = [
-        entry
-        for entry in collect_recent_entries(window_hours=window_hours)
-        if project_for_host(entry["host"])["slug"] == project_slug
-    ]
-    sessions = build_sessions(recent_entries)
+    snapshot = _build_session_snapshot(
+        window_hours=window_hours,
+        project_slugs={project_slug},
+    )
+    sessions = snapshot["sessions"]
 
     live_feed = _project_live_feed_sessions(sessions, limit=limit)
 
@@ -1515,8 +1582,9 @@ def build_visitor_profile(
 ) -> dict[str, Any]:
     range_config = _range_config(range_key)
     window_hours = _window_hours_for_range(range_key)
-    recent_entries, source_mode = collect_recent_entries_with_source(window_hours=window_hours)
-    sessions = build_sessions(recent_entries)
+    snapshot = _build_session_snapshot(window_hours=window_hours)
+    source_mode = snapshot["source_mode"]
+    sessions = snapshot["sessions"]
     visitor_sessions = [
         session for session in sessions if session.get("visitor_profile_id") == visitor_id
     ]
@@ -1533,6 +1601,7 @@ def build_visitor_profile(
     newest_first = _chronological_sessions_desc(visitor_sessions)
     latest = max(visitor_sessions, key=lambda session: session["last_seen_at"])
     oldest = min(visitor_sessions, key=lambda session: session["first_seen_at"])
+    recent_entries, _ = collect_recent_entries_with_source(window_hours=window_hours)
     linked_profiles = _build_linked_visitor_profiles(
         all_sessions=sessions,
         visitor_sessions=visitor_sessions,

@@ -36,7 +36,7 @@ from app.services.traffic.persistence import (
     _connect,
     _ensure_schema,
     persistence_enabled,
-    sync_log_to_persistence,
+    sync_configured_logs_to_persistence,
 )
 from app.services.traffic.sessions import (
     build_single_session,
@@ -1632,7 +1632,7 @@ def process_notification_batch(limit: int = NOTIFICATION_BATCH_LIMIT) -> dict[st
             "last_run_at": iso_now(),
         }
 
-    sync_log_to_persistence()
+    sync_configured_logs_to_persistence()
 
     with _connect() as connection:
         _ensure_schema(connection)

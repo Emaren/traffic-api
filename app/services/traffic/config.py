@@ -4,7 +4,17 @@ import os
 import re
 from pathlib import Path
 
-LOG_PATH = Path(os.getenv("TRAFFIC_LOG_PATH", "runtime/dev_access.log"))
+def _parse_path_list(raw: str | None) -> list[Path]:
+    if not raw:
+        return []
+
+    parts = re.split(r"[\n,]+", raw)
+    return [Path(part.strip()) for part in parts if part.strip()]
+
+
+_DEFAULT_LOG_PATH = Path(os.getenv("TRAFFIC_LOG_PATH", "runtime/dev_access.log"))
+LOG_PATHS = _parse_path_list(os.getenv("TRAFFIC_LOG_PATHS")) or [_DEFAULT_LOG_PATH]
+LOG_PATH = LOG_PATHS[0]
 GEOIP_DB_PATH = Path(os.getenv("TRAFFIC_GEOIP_DB_PATH", "runtime/geoip/GeoLite2-City.mmdb"))
 PERSIST_ENABLED = os.getenv("TRAFFIC_PERSIST_ENABLED", "1").strip().lower() not in {
     "0",

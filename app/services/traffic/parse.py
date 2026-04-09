@@ -45,8 +45,11 @@ def read_recent_log_lines(path: Path, tail_lines: int) -> list[str]:
     if not path.exists():
         return []
 
-    with path.open("r", encoding="utf-8", errors="replace") as handle:
-        return list(deque(handle, maxlen=tail_lines))
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            return list(deque(handle, maxlen=tail_lines))
+    except OSError:
+        return []
 
 
 def parse_json_log_line(line: str) -> dict[str, Any] | None:

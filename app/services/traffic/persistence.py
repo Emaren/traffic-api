@@ -9,6 +9,7 @@ from typing import Any
 
 from app.services.traffic.config import (
     LOG_PATH,
+    LOG_PATHS,
     PERSIST_DB_PATH,
     PERSIST_ENABLED,
     PERSIST_RETENTION_DAYS,
@@ -328,6 +329,22 @@ def sync_log_to_persistence(log_path: Path = LOG_PATH) -> dict[str, int | str]:
     return {"inserted": inserted, "offset": final_offset, "mode": "persisted"}
 
 
+def sync_configured_logs_to_persistence(
+    log_paths: list[Path] | tuple[Path, ...] = tuple(LOG_PATHS),
+) -> list[dict[str, int | str]]:
+    results: list[dict[str, int | str]] = []
+    seen_paths: set[str] = set()
+
+    for log_path in log_paths:
+        path_key = str(log_path)
+        if path_key in seen_paths:
+            continue
+        seen_paths.add(path_key)
+        results.append(sync_log_to_persistence(log_path))
+
+    return results
+
+
 def _selected_columns(include_raw_fields: bool) -> list[str]:
     if include_raw_fields:
         return [
@@ -397,7 +414,7 @@ def _recent_entries_query(
 
 def load_recent_entries(
     window_hours: int | None,
-    log_path: Path = LOG_PATH,
+    log_paths: list[Path] | tuple[Path, ...] = tuple(LOG_PATHS),
     *,
     hosts: list[str] | None = None,
     include_raw_fields: bool = True,
@@ -410,9 +427,10 @@ def load_recent_entries(
         return []
 
     try:
-        sync_log_to_persistence(log_path)
+        sync_configured_logs_to_persistence(log_paths)
     except Exception:
-        return None
+        # Keep serving the last durable snapshot even if the live log cannot be synced right now.
+        pass
 
     try:
         with _connect() as connection:

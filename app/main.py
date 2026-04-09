@@ -51,6 +51,8 @@ from app.services.traffic_core import (
 )
 
 DEFAULT_PROJECT_DETAIL_BUCKET_MINUTES = 30
+LONG_RANGE_CACHE_TTL_SECONDS = 60.0
+MID_RANGE_CACHE_TTL_SECONDS = 40.0
 
 
 @asynccontextmanager
@@ -295,6 +297,14 @@ def clear_response_cache() -> None:
         _response_cache_events.clear()
 
 
+def range_cache_ttl(base_ttl: float, range_key: str) -> float:
+    if range_key == "all":
+        return max(base_ttl, LONG_RANGE_CACHE_TTL_SECONDS)
+    if range_key == "30d":
+        return max(base_ttl, MID_RANGE_CACHE_TTL_SECONDS)
+    return base_ttl
+
+
 def warm_default_caches() -> None:
     warm_session_snapshots()
 
@@ -307,10 +317,12 @@ def warm_default_caches() -> None:
                 project_slug=project_slug,
                 window_hours=24,
                 bucket_minutes=DEFAULT_PROJECT_DETAIL_BUCKET_MINUTES,
+                include_deep=False,
             ),
             project_slug=project_slug,
             window_hours=24,
             bucket_minutes=DEFAULT_PROJECT_DETAIL_BUCKET_MINUTES,
+            include_deep=False,
         )
 
 
@@ -596,7 +608,7 @@ def api_overview(
 ) -> dict:
     payload = cached_response(
         "overview",
-        ttl_seconds=OVERVIEW_CACHE_TTL_SECONDS,
+        ttl_seconds=range_cache_ttl(OVERVIEW_CACHE_TTL_SECONDS, range_key),
         builder=lambda: build_overview(range_key=range_key),
         range_key=range_key,
     )
@@ -630,7 +642,7 @@ def api_projects(
 ) -> list[dict]:
     return cached_response(
         "overview",
-        ttl_seconds=OVERVIEW_CACHE_TTL_SECONDS,
+        ttl_seconds=range_cache_ttl(OVERVIEW_CACHE_TTL_SECONDS, range_key),
         builder=lambda: build_overview(range_key=range_key),
         range_key=range_key,
     )["projects"]
@@ -641,6 +653,7 @@ def api_project_detail(
     project_slug: str,
     window_hours: int = Query(24, ge=1, le=168),
     bucket_minutes: int = Query(30, ge=1, le=120),
+    include_deep: bool = Query(True),
 ) -> dict:
     if not any(project["slug"] == project_slug for project in PROJECTS):
         raise HTTPException(status_code=404, detail="Unknown project")
@@ -652,10 +665,12 @@ def api_project_detail(
             project_slug=project_slug,
             window_hours=window_hours,
             bucket_minutes=bucket_minutes,
+            include_deep=include_deep,
         ),
         project_slug=project_slug,
         window_hours=window_hours,
         bucket_minutes=bucket_minutes,
+        include_deep=include_deep,
     )
 
 
@@ -669,7 +684,7 @@ def api_project_graph(
 
     return cached_response(
         "project_graph",
-        ttl_seconds=SERIES_CACHE_TTL_SECONDS,
+        ttl_seconds=range_cache_ttl(SERIES_CACHE_TTL_SECONDS, range_key),
         builder=lambda: build_project_graph(
             project_slug=project_slug,
             range_key=range_key,
@@ -838,7 +853,7 @@ def api_visitor_profile(
 ) -> dict:
     return cached_response(
         "visitor_profile",
-        ttl_seconds=VISITOR_PROFILE_CACHE_TTL_SECONDS,
+        ttl_seconds=range_cache_ttl(VISITOR_PROFILE_CACHE_TTL_SECONDS, range_key),
         builder=lambda: build_visitor_profile(
             visitor_id=visitor_id,
             range_key=range_key,
@@ -858,7 +873,7 @@ async def api_visitor_profile_stream(
 ) -> StreamingResponse:
     initial_profile = cached_response(
         "visitor_profile",
-        ttl_seconds=VISITOR_PROFILE_CACHE_TTL_SECONDS,
+        ttl_seconds=range_cache_ttl(VISITOR_PROFILE_CACHE_TTL_SECONDS, range_key),
         builder=lambda: build_visitor_profile(
             visitor_id=visitor_id,
             range_key=range_key,
@@ -873,7 +888,7 @@ async def api_visitor_profile_stream(
         request=request,
         builder=lambda: cached_response(
             "visitor_profile",
-            ttl_seconds=VISITOR_PROFILE_CACHE_TTL_SECONDS,
+            ttl_seconds=range_cache_ttl(VISITOR_PROFILE_CACHE_TTL_SECONDS, range_key),
             builder=lambda: build_visitor_profile(
                 visitor_id=visitor_id,
                 range_key=range_key,
@@ -893,7 +908,7 @@ def api_project_human_series(
 ) -> dict:
     return cached_response(
         "project_human_series",
-        ttl_seconds=SERIES_CACHE_TTL_SECONDS,
+        ttl_seconds=range_cache_ttl(SERIES_CACHE_TTL_SECONDS, range_key),
         builder=lambda: build_project_human_series(
             range_key=range_key,
             bucket_minutes_override=bucket_minutes,
@@ -920,7 +935,7 @@ def api_visits_history(
 
     return cached_response(
         "visits_history",
-        ttl_seconds=VISITS_HISTORY_CACHE_TTL_SECONDS,
+        ttl_seconds=range_cache_ttl(VISITS_HISTORY_CACHE_TTL_SECONDS, range_key),
         builder=lambda: build_visits_history(
             limit=limit,
             offset=offset,
