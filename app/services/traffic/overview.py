@@ -60,6 +60,8 @@ _SESSION_SNAPSHOT_CACHE: dict[tuple[int | None, tuple[str, ...], tuple[str, ...]
 _SESSION_SNAPSHOT_CACHE_REFRESHING: set[tuple[int | None, tuple[str, ...], tuple[str, ...]]] = set()
 _SESSION_SNAPSHOT_CACHE_EVENTS: dict[tuple[int | None, tuple[str, ...], tuple[str, ...]], Event] = {}
 LINKABLE_VISITOR_STATES = {"human_confirmed", "likely_human", "candidate"}
+HUMAN_VISIBLE_STATES = {"human_confirmed", "likely_human", "candidate"}
+AUTOMATED_OR_SCRIPT_STATES = {"browser_script", "bot", "suspicious"}
 LINKED_VISITOR_LIMIT = 6
 
 
@@ -424,7 +426,7 @@ def build_overview(range_key: str = "24h") -> dict[str, Any]:
             earliest_entry_at=earliest_entry_at,
         )
     likely_human_states = {"human_confirmed", "likely_human"}
-    automated_states = {"bot", "suspicious"}
+    automated_states = AUTOMATED_OR_SCRIPT_STATES
 
     unique_people = {session["person_key"] for session in sessions}
     real_people = {
@@ -727,7 +729,13 @@ def build_live_visitors(
     tower_candidates = [
         session
         for session in sessions
-        if session["classification_state"] not in {"bot", "suspicious"}
+        if session["classification_state"] in HUMAN_VISIBLE_STATES
+        and (session["page_count"] > 0 or session["route_kind"] == "page")
+    ]
+    browser_script_candidates = [
+        session
+        for session in sessions
+        if session["classification_state"] == "browser_script"
         and (session["page_count"] > 0 or session["route_kind"] == "page")
     ]
     automation_candidates = [
@@ -744,6 +752,7 @@ def build_live_visitors(
     ]
 
     tower = sorted(tower_candidates, key=live_session_sort_key)[:limit]
+    browser_script_preview = sorted(browser_script_candidates, key=live_session_sort_key)[:auxiliary_limit]
     automation_preview = sorted(automation_candidates, key=live_session_sort_key)[:auxiliary_limit]
     security_preview = sorted(security_candidates, key=live_session_sort_key)[:auxiliary_limit]
 
@@ -765,6 +774,7 @@ def build_live_visitors(
                 "human_confirmed": sum(1 for session in project_sessions if session["classification_state"] == "human_confirmed"),
                 "likely_human": sum(1 for session in project_sessions if session["classification_state"] == "likely_human"),
                 "candidate": sum(1 for session in project_sessions if session["classification_state"] == "candidate"),
+                "browser_script": sum(1 for session in project_sessions if session["classification_state"] == "browser_script"),
                 "active_now": sum(1 for session in project_sessions if session["active_now"]),
             }
         )
@@ -779,6 +789,8 @@ def build_live_visitors(
         "history_count": max(0, len(history_candidates) - limit),
         "stream_total": len(history_candidates),
         "stream_items": stream_items,
+        "browser_script_count": len(browser_script_candidates),
+        "browser_script_preview": browser_script_preview,
         "automation_count": len(automation_candidates),
         "automation_preview": automation_preview,
         "security_count": len(security_candidates),
@@ -939,7 +951,7 @@ def _project_live_feed_sessions(
     *,
     limit: int = 10,
 ) -> list[dict[str, Any]]:
-    automated_states = {"bot", "suspicious"}
+    automated_states = AUTOMATED_OR_SCRIPT_STATES
     visible_sessions = [
         session for session in sessions if session["classification_state"] not in automated_states
     ]
@@ -1134,7 +1146,8 @@ def _project_graph_payload(
         note = "Durable storage is unavailable, so this graph is currently reading the live log tail."
 
     return {
-        "label": "New likely-human visitors",
+        "label": "Confirmed human arrivals",
+        "series_kind": "confirmed_human_arrivals",
         "range_key": range_key,
         "range_label": range_config["label"],
         "window_hours": window_hours,
@@ -1266,7 +1279,7 @@ def build_project_human_series(
             _format_alberta_timestamp(earliest_entry_at) if earliest_entry_at else None
         ),
         "note": note,
-        "series_kind": "new_human_visitors",
+        "series_kind": "confirmed_human_arrivals",
         "projects": projects_output,
     }
 
@@ -1326,7 +1339,7 @@ def build_project_detail(
     )["sessions"]
 
     likely_human_states = {"human_confirmed", "likely_human"}
-    automated_states = {"bot", "suspicious"}
+    automated_states = AUTOMATED_OR_SCRIPT_STATES
 
     unique_people = {session["person_key"] for session in sessions}
     real_humans = {

@@ -50,8 +50,9 @@ def get_geo_details(ip: str) -> dict[str, str]:
         return _GEO_LOOKUP_CACHE[ip]
 
     if ip in DEV_GEO_OVERRIDES:
-        _GEO_LOOKUP_CACHE[ip] = DEV_GEO_OVERRIDES[ip]
-        return DEV_GEO_OVERRIDES[ip]
+        override = {**DEV_GEO_OVERRIDES[ip], "geo_resolved": True}
+        _GEO_LOOKUP_CACHE[ip] = override
+        return override
 
     reader = get_geo_reader()
     if reader is not None:
@@ -85,6 +86,7 @@ def get_geo_details(ip: str) -> dict[str, str]:
                 ),
                 "area": area,
                 "city": city,
+                "geo_resolved": True,
             }
             _GEO_LOOKUP_CACHE[ip] = result
             return result
@@ -95,6 +97,6 @@ def get_geo_details(ip: str) -> dict[str, str]:
         except Exception:
             pass
 
-    result = {"country": "??", "country_code": "", "area": "", "city": ""}
+    result = {"country": "Unknown", "country_code": "", "area": "", "city": "", "geo_resolved": False}
     _GEO_LOOKUP_CACHE[ip] = result
     return result

@@ -25,7 +25,12 @@ from app.services.traffic.config import (
     ACTIVE_GAP_CAP_SECONDS,
     ALBERTA_TZ_NAME,
     LIVE_ACTIVE_SECONDS,
+    PLAYER_PAGE_PATH_PREFIXES,
     SESSION_GAP_MINUTES,
+    THIN_DIRECT_BROWSER_MAX_ENGAGED_SECONDS,
+    THIN_DIRECT_BROWSER_MAX_EVENTS,
+    THIN_DIRECT_BROWSER_MAX_PAGES,
+    THIN_DIRECT_BROWSER_MAX_TOTAL_SECONDS,
     VISITOR_SESSION_LIMIT,
     UNKNOWN_HOST,
     UNKNOWN_REFERRER,
@@ -66,7 +71,55 @@ REASON_LABELS = {
     "bounce": "One quick hit with no follow-up",
     "ua_rotation": "One IP rapidly rotated through multiple browser fingerprints",
     "route_bundle_spam": "One IP is cycling through a synthetic framework route bundle",
+    "thin_direct_browser": "Thin direct browser session with too little depth to trust",
+    "player_page_hop": "Jumped through narrow player pages in a scraper-like pattern",
+    "geo_unknown": "Geo lookup could not resolve a trustworthy location",
+    "browser_script_pattern": "Browser-shaped session matches a script or scraper pattern",
 }
+
+
+
+
+def _path_matches_prefixes(path: str, prefixes: tuple[str, ...]) -> bool:
+    lowered = (path or "").lower()
+    return any(lowered.startswith(prefix) for prefix in prefixes)
+
+
+def _looks_like_player_page_hop(page_sequence: list[str]) -> bool:
+    return bool(page_sequence) and all(
+        _path_matches_prefixes(path, PLAYER_PAGE_PATH_PREFIXES) for path in page_sequence
+    )
+
+
+def _looks_like_browser_script_session(
+    *,
+    primary_category: str,
+    route_kind: str,
+    source: str,
+    page_sequence: list[str],
+    page_count: int,
+    event_count: int,
+    engaged_seconds: int,
+    total_seconds: int,
+    known_automation: bool,
+    active_now: bool,
+) -> bool:
+    if known_automation:
+        return False
+    if primary_category != "human" or route_kind != "page":
+        return False
+    if source != "direct":
+        return False
+    if page_count > THIN_DIRECT_BROWSER_MAX_PAGES or event_count > THIN_DIRECT_BROWSER_MAX_EVENTS:
+        return False
+    if active_now:
+        return False
+
+    thin_timing = (
+        engaged_seconds <= THIN_DIRECT_BROWSER_MAX_ENGAGED_SECONDS
+        and total_seconds <= THIN_DIRECT_BROWSER_MAX_TOTAL_SECONDS
+    )
+    return thin_timing or _looks_like_player_page_hop(page_sequence)
 
 
 def ordered_unique(values: list[str]) -> list[str]:
@@ -307,8 +360,9 @@ def humanize_reason(reason: str) -> str:
 
 def label_classification_state(state: str) -> str:
     labels = {
-        "human_confirmed": "Likely Human",
-        "likely_human": "Probably Human",
+        "human_confirmed": "Confirmed Human",
+        "likely_human": "Likely Human",
+        "browser_script": "Browser Script",
         "candidate": "Unclear",
         "bot": "Known Bot",
         "suspicious": "Suspicious",
@@ -319,11 +373,13 @@ def label_classification_state(state: str) -> str:
 
 def summarize_classification(state: str, human_confidence: int, suspicious_score: int) -> str:
     if state == "human_confirmed":
-        return f"Strong human signals with {human_confidence}% confidence from browser behavior, page flow, and dwell time."
+        return f"Traffic has strong enough depth, timing, and page-flow signals to treat this as a confirmed human session ({human_confidence}% confidence)."
     if state == "likely_human":
-        return f"Probably a real person with {human_confidence}% confidence, but the session trail is a little thinner."
+        return f"This still leans human at {human_confidence}% confidence, but the trail is not strong enough to call confirmed yet."
+    if state == "browser_script":
+        return "This looks browser-shaped, but the session is too thin or too patterned to trust as a real person. Treat it like likely scripted browsing."
     if state == "candidate":
-        return "Some human signals are present, but the evidence is mixed and needs more activity."
+        return "Some human signals are present, but the evidence is mixed and Traffic is keeping the verdict conservative."
     if state == "bot":
         return "Looks automated because the session matches known bot patterns and shows little real engagement."
     if state == "suspicious":
@@ -520,6 +576,43 @@ def build_single_session(
     idle_seconds = max(0, int((now - last["timestamp"]).total_seconds()))
     active_now = idle_seconds <= LIVE_ACTIVE_SECONDS
 
+    known_automation = bool(automation_family(first["ua"]) or "")
+    if not geo.get("geo_resolved", False):
+        if "geo_unknown" not in classification_reasons:
+            classification_reasons.append("geo_unknown")
+        human_confidence = max(0, human_confidence - 4)
+
+    looks_like_player_hop = _looks_like_player_page_hop(ordered_paths)
+    if looks_like_player_hop and "player_page_hop" not in classification_reasons:
+        classification_reasons.append("player_page_hop")
+        human_confidence = max(0, human_confidence - 24)
+
+    thin_browser_script = _looks_like_browser_script_session(
+        primary_category=primary_category,
+        route_kind=route_kind,
+        source=source,
+        page_sequence=ordered_paths,
+        page_count=len(ordered_paths),
+        event_count=len(events),
+        engaged_seconds=engaged_seconds,
+        total_seconds=total_seconds,
+        known_automation=known_automation,
+        active_now=active_now,
+    )
+    if thin_browser_script:
+        for reason in ("thin_direct_browser", "browser_script_pattern"):
+            if reason not in classification_reasons:
+                classification_reasons.append(reason)
+        human_confidence = max(0, human_confidence - 18)
+        classification_state = "browser_script"
+    else:
+        classification_state = classification_state_for_confidence(
+            primary_category=primary_category,
+            route_kind=route_kind,
+            human_confidence=human_confidence,
+            suspicious_score=suspicious_score,
+        )
+
     live_priority = compute_live_priority(
         human_confidence=human_confidence,
         engaged_seconds=engaged_seconds,
@@ -532,7 +625,6 @@ def build_single_session(
 
     ua_lower = (first["ua"] or "").lower()
     automation_label = automation_family(first["ua"]) or ""
-    known_automation = bool(automation_label)
 
     person_key = person_key_for_session(first["ip"], first["ua"])
 
@@ -557,6 +649,7 @@ def build_single_session(
         "country_code": geo.get("country_code", ""),
         "area": geo["area"],
         "city": geo["city"],
+        "geo_resolved": bool(geo.get("geo_resolved", False)),
         "device": detect_device_type(first["ua"]),
         "os": detect_os(first["ua"]),
         "browser": detect_browser(first["ua"]),
@@ -651,6 +744,16 @@ def enrich_sessions(sessions: list[dict[str, Any]]) -> None:
             session["attention_label"] = "Investigate"
             session["attention_summary"] = (
                 "This looks like coordinated scripted traffic from one source, not a person naturally browsing the site."
+            )
+        elif session["classification_state"] == "browser_script":
+            session["classification_summary"] = summarize_classification(
+                session["classification_state"],
+                session["human_confidence"],
+                session["suspicious_score"],
+            )
+            session["attention_label"] = "Watch"
+            session["attention_summary"] = (
+                "Traffic sees browser-shaped movement here, but the trail is too thin or too patterned to trust as a real visitor yet."
             )
         else:
             session["classification_summary"] = summarize_classification(
@@ -767,6 +870,8 @@ def session_bucket(session: dict[str, Any]) -> int:
         return 2
     if state == "candidate" and route_kind == "page":
         return 3
+    if state == "browser_script":
+        return 4
     if state == "bot":
         return 5
     if state == "suspicious" or route_kind == "probe":

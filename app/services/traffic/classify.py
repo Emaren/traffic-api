@@ -145,35 +145,38 @@ def compute_quality_score(
     score = 0
 
     if primary_category == "human":
-        score += 35
+        score += 24
     elif primary_category == "unknown":
-        score += 8
+        score += 6
     elif primary_category == "bot":
         score -= 18
     else:
         score -= 35
 
     if route_kind == "page":
-        score += 28
+        score += 24
     elif route_kind == "api":
-        score += 6
+        score += 4
     elif route_kind == "probe":
         score -= 40
     elif route_kind == "asset":
         score -= 25
 
-    score += min(page_count * 4, 20)
-    score += min(event_count * 2, 18)
+    score += min(page_count * 4, 18)
+    score += min(event_count * 2, 14)
     score += min(engaged_seconds // 30, 18)
-    score += min(total_seconds // 60, 12)
+    score += min(total_seconds // 60, 10)
 
     if source in {"google", "bing", "x", "facebook"}:
-        score += 6
+        score += 8
     elif medium in {"organic", "referral", "campaign", "email", "social"} and source not in {"direct", "internal"}:
-        score += 4
+        score += 5
 
     if source == "internal":
-        score -= 8
+        score -= 10
+
+    if source == "direct" and page_count <= 2 and event_count <= 3 and engaged_seconds <= 20:
+        score -= 12
 
     if page_count <= 1 and event_count <= 1 and engaged_seconds == 0:
         score -= 50
@@ -211,10 +214,10 @@ def compute_human_confidence(
     reasons: list[str] = []
 
     if primary_category == "human":
-        score += 40
+        score += 28
         reasons.append("browser_ua")
     elif primary_category == "unknown":
-        score += 8
+        score += 6
         reasons.append("unknown_ua")
     elif primary_category == "bot":
         score -= 40
@@ -224,51 +227,63 @@ def compute_human_confidence(
         reasons.append("suspicious_signal")
 
     if route_kind == "page":
-        score += 20
+        score += 18
         reasons.append("page_route")
     elif route_kind == "api":
-        score += 4
+        score += 2
         reasons.append("api_route")
     elif route_kind == "probe":
         score -= 70
         reasons.append("probe_route")
     elif route_kind == "asset":
-        score -= 15
+        score -= 18
         reasons.append("asset_only")
 
-    if page_count >= 3:
-        score += 20
+    if page_count >= 4:
+        score += 22
+        reasons.append("multi_page")
+    elif page_count == 3:
+        score += 14
         reasons.append("multi_page")
     elif page_count == 2:
-        score += 12
+        score += 8
         reasons.append("multi_page")
     elif page_count == 1:
-        score += 4
+        score += 1
         reasons.append("single_page")
 
-    if event_count >= 4:
-        score += 10
+    if event_count >= 5:
+        score += 12
+        reasons.append("repeat_activity")
+    elif event_count >= 3:
+        score += 6
         reasons.append("repeat_activity")
     elif event_count >= 2:
-        score += 4
+        score += 2
         reasons.append("repeat_activity")
 
-    if engaged_seconds >= 20:
-        score += 15
+    if engaged_seconds >= 60:
+        score += 18
+        reasons.append("engaged")
+    elif engaged_seconds >= 20:
+        score += 10
         reasons.append("engaged")
     elif engaged_seconds > 0:
-        score += 6
+        score += 4
         reasons.append("brief_engagement")
 
     if source == "internal":
         score -= 18
         reasons.append("internal_referrer")
     elif source in {"google", "bing", "x", "facebook"}:
-        score += 6
+        score += 8
         reasons.append("external_source")
     elif source == "direct":
-        score += 4
         reasons.append("direct")
+
+    if source == "direct" and page_count <= 2 and event_count <= 3 and engaged_seconds <= 20:
+        score -= 22
+        reasons.append("thin_direct_browser")
 
     if suspicious_score >= 40:
         score -= 60
@@ -278,12 +293,15 @@ def compute_human_confidence(
         reasons.append("low_suspicion")
 
     if page_count == 0 and route_kind == "api":
-        score -= 20
+        score -= 24
         reasons.append("api_only")
 
-    if total_seconds == 0 and event_count <= 1:
-        score -= 15
+    if total_seconds <= 10 and event_count <= 1:
+        score -= 18
         reasons.append("bounce")
+    elif total_seconds <= 25 and page_count <= 2 and source == "direct":
+        score -= 10
+        reasons.append("thin_direct_browser")
 
     return max(0, min(100, score)), reasons
 
@@ -299,9 +317,9 @@ def classification_state_for_confidence(
         return "suspicious"
     if primary_category == "bot":
         return "bot"
-    if human_confidence >= 75:
+    if human_confidence >= 82:
         return "human_confirmed"
-    if human_confidence >= 45:
+    if human_confidence >= 58:
         return "likely_human"
     return "candidate"
 

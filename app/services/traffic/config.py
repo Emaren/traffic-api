@@ -88,6 +88,11 @@ SUSPICIOUS_UA_TERMS = [
     "go-http-client",
     "nmap",
     "scanner",
+    "headlesschrome",
+    "playwright",
+    "puppeteer",
+    "selenium",
+    "phantomjs",
 ]
 
 BROWSER_TERMS = [
@@ -179,6 +184,25 @@ API_ROUTE_PREFIXES = (
 
 UNKNOWN_HOST = "(unknown host)"
 UNKNOWN_REFERRER = "(direct)"
+
+
+PLAYER_PAGE_PATH_PREFIXES = (
+    "/players/by-name/",
+)
+
+THIN_DIRECT_BROWSER_MAX_PAGES = int(
+    os.getenv("TRAFFIC_THIN_DIRECT_BROWSER_MAX_PAGES", "2")
+)
+THIN_DIRECT_BROWSER_MAX_EVENTS = int(
+    os.getenv("TRAFFIC_THIN_DIRECT_BROWSER_MAX_EVENTS", "3")
+)
+THIN_DIRECT_BROWSER_MAX_ENGAGED_SECONDS = int(
+    os.getenv("TRAFFIC_THIN_DIRECT_BROWSER_MAX_ENGAGED_SECONDS", "20")
+)
+THIN_DIRECT_BROWSER_MAX_TOTAL_SECONDS = int(
+    os.getenv("TRAFFIC_THIN_DIRECT_BROWSER_MAX_TOTAL_SECONDS", "25")
+)
+
 
 PROJECTS = [
     {
