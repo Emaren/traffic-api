@@ -561,6 +561,26 @@ def build_single_session(
         suspicious_score=suspicious_score,
         source=source,
     )
+
+    normalized_paths = {event["normalized_path"] for event in ordered_events}
+    has_llama_chat_flow = (
+        first["host"] == "llama-chat.tokentap.ca"
+        and primary_category == "human"
+        and suspicious_score == 0
+        and "/" in page_sequence
+        and any(
+            path == "/api/chat/agents"
+            or path == "/api/chat/send"
+            or path.startswith("/api/chat/messages/")
+            for path in normalized_paths
+        )
+    )
+    if has_llama_chat_flow and len(events) >= 4:
+        human_confidence = max(human_confidence, 82)
+        for reason in ("llama_chat_flow", "meaningful_api_activity"):
+            if reason not in classification_reasons:
+                classification_reasons.append(reason)
+
     if ip_behavior.get("route_bundle_spam"):
         for reason in ("ua_rotation", "route_bundle_spam"):
             if reason not in classification_reasons:
