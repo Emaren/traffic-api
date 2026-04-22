@@ -212,6 +212,12 @@ PROJECTS = [
         "hosts": ["aoe2hdbets.com", "www.aoe2hdbets.com"],
     },
     {
+        "slug": "aoe2dewarwagers",
+        "name": "AoE2DEWarWagers",
+        "category": "gaming",
+        "hosts": ["aoe2dewarwagers.com", "www.aoe2dewarwagers.com"],
+    },    
+    {
         "slug": "tokentap",
         "name": "TokenTap",
         "category": "loyalty",
@@ -281,6 +287,7 @@ DEFAULT_ALLOWED_HOSTS = (
 
 CANONICAL_HOST_MAP = {
     "www.aoe2hdbets.com": "aoe2hdbets.com",
+    "www.aoe2dewarwagers.com": "aoe2dewarwagers.com",    
     "www.tokentap.ca": "tokentap.ca",
     "www.wheatandstone.ca": "wheatandstone.ca",
     "www.redlinelegal.ca": "redlinelegal.ca",

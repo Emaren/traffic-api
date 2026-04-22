@@ -218,6 +218,58 @@ def sync_log_to_persistence(log_path: Path = LOG_PATH) -> dict[str, int | str]:
     if not log_path.exists():
         return {"inserted": 0, "offset": 0, "mode": "missing"}
 
+    def _read_batch(
+        target_path: Path,
+        start_offset: int,
+        *,
+        event_source_path: str,
+        event_source_inode: int,
+    ):
+        batch = []
+
+        with target_path.open("r", encoding="utf-8", errors="replace") as handle:
+            handle.seek(start_offset)
+
+            while True:
+                line_offset = handle.tell()
+                line = handle.readline()
+                if not line:
+                    break
+
+                parsed = parse_log_line(line)
+                if not parsed:
+                    continue
+
+                batch.append(
+                    (
+                        _event_id(
+                            source_path=event_source_path,
+                            source_inode=event_source_inode,
+                            line_offset=line_offset,
+                            raw_line=line.rstrip("\n"),
+                        ),
+                        event_source_path,
+                        event_source_inode,
+                        line_offset,
+                        parsed["timestamp_iso"],
+                        parsed["ip"],
+                        parsed["request"],
+                        parsed["method"],
+                        parsed["raw_path"],
+                        parsed["normalized_path"],
+                        parsed["status"],
+                        parsed["referrer"],
+                        parsed["referrer_host"],
+                        parsed["ua"],
+                        parsed["host"],
+                        parsed["raw"],
+                    )
+                )
+
+            final_offset = handle.tell()
+
+        return batch, final_offset
+
     with _SYNC_LOCK:
         stat = log_path.stat()
         inserted = 0
@@ -236,50 +288,32 @@ def sync_log_to_persistence(log_path: Path = LOG_PATH) -> dict[str, int | str]:
 
             offset = int(state["offset"]) if state else 0
             previous_inode = int(state["source_inode"]) if state else stat.st_ino
-            if previous_inode != stat.st_ino or stat.st_size < offset:
+
+            batch = []
+
+            if previous_inode != stat.st_ino:
+                rotated_path = log_path.with_name(f"{log_path.name}.1")
+                if rotated_path.exists():
+                    rotated_stat = rotated_path.stat()
+                    if rotated_stat.st_ino == previous_inode and rotated_stat.st_size > offset:
+                        rotated_batch, _ = _read_batch(
+                            rotated_path,
+                            offset,
+                            event_source_path=str(log_path),
+                            event_source_inode=previous_inode,
+                        )
+                        batch.extend(rotated_batch)
+                offset = 0
+            elif stat.st_size < offset:
                 offset = 0
 
-            batch: list[tuple[Any, ...]] = []
-            with log_path.open("r", encoding="utf-8", errors="replace") as handle:
-                handle.seek(offset)
-
-                while True:
-                    line_offset = handle.tell()
-                    line = handle.readline()
-                    if not line:
-                        break
-
-                    parsed = parse_log_line(line)
-                    if not parsed:
-                        continue
-
-                    batch.append(
-                        (
-                            _event_id(
-                                source_path=str(log_path),
-                                source_inode=stat.st_ino,
-                                line_offset=line_offset,
-                                raw_line=line.rstrip("\n"),
-                            ),
-                            str(log_path),
-                            stat.st_ino,
-                            line_offset,
-                            parsed["timestamp_iso"],
-                            parsed["ip"],
-                            parsed["request"],
-                            parsed["method"],
-                            parsed["raw_path"],
-                            parsed["normalized_path"],
-                            parsed["status"],
-                            parsed["referrer"],
-                            parsed["referrer_host"],
-                            parsed["ua"],
-                            parsed["host"],
-                            parsed["raw"],
-                        )
-                    )
-
-                final_offset = handle.tell()
+            current_batch, final_offset = _read_batch(
+                log_path,
+                offset,
+                event_source_path=str(log_path),
+                event_source_inode=stat.st_ino,
+            )
+            batch.extend(current_batch)
 
             if batch:
                 connection.executemany(
