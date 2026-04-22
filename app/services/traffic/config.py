@@ -275,7 +275,10 @@ PROJECTS = [
         "slug": "llama",
         "name": "Llama",
         "category": "ai",
-        "hosts": ["llama.tokentap.ca"],
+        "hosts": [
+            "llama.tokentap.ca",
+            "llama-dashboard.tokentap.ca",
+        ],
     },
     {
         "slug": "llama-chat",
