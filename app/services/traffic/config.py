@@ -265,6 +265,24 @@ PROJECTS = [
         "category": "legal",
         "hosts": ["redlinelegal.ca", "www.redlinelegal.ca"],
     },
+    {
+        "slug": "tokenchain",
+        "name": "TokenChain",
+        "category": "blockchain",
+        "hosts": ["tokenchain.tokentap.ca"],
+    },
+    {
+        "slug": "llama",
+        "name": "Llama",
+        "category": "ai",
+        "hosts": ["llama.tokentap.ca"],
+    },
+    {
+        "slug": "llama-chat",
+        "name": "Llama Chat",
+        "category": "ai",
+        "hosts": ["llama-chat.tokentap.ca"],
+    },    
 ]
 
 PROJECT_INDEX = {host: project for project in PROJECTS for host in project["hosts"]}
