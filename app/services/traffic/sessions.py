@@ -404,6 +404,48 @@ def _build_distributed_burst_session(group: list[dict[str, Any]]) -> dict[str, A
     }
 
 
+
+
+def _is_known_singapore_43_fanout(session: dict[str, Any]) -> bool:
+    ip = str(session.get("ip") or "")
+    if not (ip.startswith("43.172.") or ip.startswith("43.173.")):
+        return False
+    if (session.get("country_code") or session.get("country")) not in {"SG", "Singapore"}:
+        return False
+    if session.get("project_slug") != "aoe2hdbets":
+        return False
+    if session.get("device") != "desktop":
+        return False
+    if session.get("os") != "Windows":
+        return False
+    if session.get("browser") != "Chrome":
+        return False
+    if session.get("source") not in {"direct", "internal", ""}:
+        return False
+    if safe_int(session.get("event_count"), 0) > 2:
+        return False
+    if safe_int(session.get("page_count"), 0) > 1:
+        return False
+    if safe_int(session.get("visits_in_window"), 0) > 1:
+        return False
+    if safe_int(session.get("total_seconds"), 0) > 8:
+        return False
+
+    path = str(session.get("entry_page") or session.get("current_page") or "")
+    noisy_paths = (
+        "/api/",
+        "/game-stats/",
+        "/wolo",
+        "/watch",
+        "/bets",
+        "/live-games",
+        "/requests",
+        "/api/auth/session",
+    )
+    return path == "/" or any(path.startswith(prefix) for prefix in noisy_paths)
+
+
+
 def collapse_distributed_bursts(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[tuple[str, str, str, str, str, str, int, str], list[dict[str, Any]]] = defaultdict(list)
 
@@ -949,7 +991,24 @@ def enrich_sessions(sessions: list[dict[str, Any]]) -> None:
         session["classification_reason_labels"] = [
             humanize_reason(reason) for reason in session["classification_reasons"]
         ]
-        if session.get("is_burst_cluster") or session["classification_state"] == "script_burst":
+        if _is_known_singapore_43_fanout(session):
+            session["classification_state"] = "browser_script"
+            session["classification_reasons"] = ordered_unique(
+                [*session.get("classification_reasons", []), "distributed_ip_burst", "one_hit_fanout", "thin_direct_browser"]
+            )
+            session["human_confidence"] = 0
+            session["quality_score"] = min(safe_int(session.get("quality_score"), 0), 10)
+            session["quality_label"] = "weak"
+            session["primary_category"] = "suspicious"
+            session["suspicious_score"] = max(safe_int(session.get("suspicious_score"), 0), 76)
+            session["visitor_alias"] = f"Singapore43Script-{session.get('ip', '').split('.')[-1] or 'IP'}"
+            session["classification_summary"] = (
+                "This is a thin one-hit Windows Chrome session from the recurring Singapore 43.x fanout range. "
+                "Treat it as scripted browsing unless it later shows real journey depth."
+            )
+            session["attention_label"] = "Script watch"
+            session["attention_summary"] = "Known Singapore 43.x one-hit fanout pattern."
+        elif session.get("is_burst_cluster") or session["classification_state"] == "script_burst":
             ip_count = safe_int(session.get("burst_ip_count"), 0)
             path_count = safe_int(session.get("burst_path_count"), 0)
             window_seconds = safe_int(session.get("burst_window_seconds"), 0)
