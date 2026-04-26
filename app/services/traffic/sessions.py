@@ -49,9 +49,9 @@ ROTATING_UA_ROUTE_SPAM_MAX_UNIQUE_PATHS = 8
 ROTATING_UA_ROUTE_SPAM_DIRECT_RATIO = 0.9
 
 DISTRIBUTED_BURST_WINDOW_SECONDS = 60
-DISTRIBUTED_BURST_MIN_SESSIONS = 5
-DISTRIBUTED_BURST_MIN_IPS = 5
-DISTRIBUTED_BURST_MIN_PATHS = 3
+DISTRIBUTED_BURST_MIN_SESSIONS = 3
+DISTRIBUTED_BURST_MIN_IPS = 3
+DISTRIBUTED_BURST_MIN_PATHS = 2
 DISTRIBUTED_BURST_MAX_EVENTS_PER_SESSION = 2
 DISTRIBUTED_BURST_MAX_PAGES_PER_SESSION = 1
 
@@ -290,7 +290,7 @@ def _is_distributed_burst_candidate(session: dict[str, Any]) -> bool:
         return False
     if session.get("classification_state") not in {"candidate", "browser_script", "likely_human"}:
         return False
-    if session.get("route_kind") != "page":
+    if session.get("route_kind") not in {"page", "api"}:
         return False
     if session.get("source") not in {"direct", "internal", ""}:
         return False
