@@ -292,7 +292,7 @@ def _is_distributed_burst_candidate(session: dict[str, Any]) -> bool:
         return False
     if session.get("route_kind") != "page":
         return False
-    if session.get("source") not in {"direct", ""}:
+    if session.get("source") not in {"direct", "internal", ""}:
         return False
     if safe_int(session.get("event_count"), 0) > DISTRIBUTED_BURST_MAX_EVENTS_PER_SESSION:
         return False
