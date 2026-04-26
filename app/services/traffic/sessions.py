@@ -48,6 +48,13 @@ ROTATING_UA_ROUTE_SPAM_MIN_UNIQUE_PATHS = 4
 ROTATING_UA_ROUTE_SPAM_MAX_UNIQUE_PATHS = 8
 ROTATING_UA_ROUTE_SPAM_DIRECT_RATIO = 0.9
 
+DISTRIBUTED_BURST_WINDOW_SECONDS = 60
+DISTRIBUTED_BURST_MIN_SESSIONS = 5
+DISTRIBUTED_BURST_MIN_IPS = 5
+DISTRIBUTED_BURST_MIN_PATHS = 3
+DISTRIBUTED_BURST_MAX_EVENTS_PER_SESSION = 2
+DISTRIBUTED_BURST_MAX_PAGES_PER_SESSION = 1
+
 REASON_LABELS = {
     "browser_ua": "Browser fingerprint looks like a real person",
     "unknown_ua": "User agent is unfamiliar, so confidence is limited",
@@ -75,6 +82,8 @@ REASON_LABELS = {
     "player_page_hop": "Jumped through narrow player pages in a scraper-like pattern",
     "geo_unknown": "Geo lookup could not resolve a trustworthy location",
     "browser_script_pattern": "Browser-shaped session matches a script or scraper pattern",
+    "distributed_ip_burst": "Many near-identical one-hit browser sessions arrived from different IPs at the same time",
+    "one_hit_fanout": "Each member looked like a thin one-hit route probe rather than a real journey",
 }
 
 
@@ -259,6 +268,199 @@ def _is_framework_route_bundle_path(path: str) -> bool:
     return path == "/" or path == "/app" or path.startswith("/_next") or path == "/api" or path.startswith("/api/")
 
 
+def _ip_burst_family(ip: str) -> str:
+    if "." in ip:
+        parts = ip.split(".")
+        if len(parts) >= 1 and parts[0].isdigit():
+            return f"{parts[0]}.x.x.x"
+    if ":" in ip:
+        return ip.split(":", 1)[0] + "::/16"
+    return "unknown"
+
+
+def _session_burst_bucket(session: dict[str, Any]) -> int:
+    parsed = parse_iso_timestamp(session.get("started_at"))
+    if parsed is None:
+        parsed = datetime.now(timezone.utc)
+    return int(parsed.timestamp() // DISTRIBUTED_BURST_WINDOW_SECONDS)
+
+
+def _is_distributed_burst_candidate(session: dict[str, Any]) -> bool:
+    if session.get("known_automation"):
+        return False
+    if session.get("classification_state") not in {"candidate", "browser_script", "likely_human"}:
+        return False
+    if session.get("route_kind") != "page":
+        return False
+    if session.get("source") not in {"direct", ""}:
+        return False
+    if safe_int(session.get("event_count"), 0) > DISTRIBUTED_BURST_MAX_EVENTS_PER_SESSION:
+        return False
+    if safe_int(session.get("page_count"), 0) > DISTRIBUTED_BURST_MAX_PAGES_PER_SESSION:
+        return False
+    if safe_int(session.get("total_seconds"), 0) > 5:
+        return False
+    if not session.get("country") or session.get("country") == "Unknown":
+        return False
+    if session.get("browser") == "Unknown":
+        return False
+    return True
+
+
+def _build_distributed_burst_session(group: list[dict[str, Any]]) -> dict[str, Any]:
+    ordered = sorted(group, key=lambda item: item["started_at"])
+    first = ordered[0]
+    last = max(ordered, key=lambda item: item["ended_at"])
+    ips = ordered_unique([session["ip"] for session in ordered if session.get("ip")])
+    paths = ordered_unique(
+        [
+            path
+            for session in ordered
+            for path in (session.get("page_sequence") or [session.get("entry_page", "")])
+            if path
+        ]
+    )
+    families = sorted({_ip_burst_family(ip) for ip in ips})
+    starts = [parse_iso_timestamp(session["started_at"]) for session in ordered]
+    ends = [parse_iso_timestamp(session["ended_at"]) for session in ordered]
+    valid_starts = [value for value in starts if value is not None]
+    valid_ends = [value for value in ends if value is not None]
+    first_dt = min(valid_starts) if valid_starts else datetime.now(timezone.utc)
+    last_dt = max(valid_ends) if valid_ends else first_dt
+    window_seconds = max(0, int((last_dt - first_dt).total_seconds()))
+
+    country = first.get("country") or "Unknown"
+    city_counts = Counter(session.get("city") or "" for session in ordered if session.get("city"))
+    area_counts = Counter(session.get("area") or "" for session in ordered if session.get("area"))
+    city = city_counts.most_common(1)[0][0] if city_counts else first.get("city", "")
+    area = area_counts.most_common(1)[0][0] if area_counts else first.get("area", "")
+
+    signature = "|".join(
+        [
+            "script_burst",
+            first.get("project_slug", ""),
+            first.get("country_code") or country,
+            first.get("device", ""),
+            first.get("os", ""),
+            first.get("browser", ""),
+            str(_session_burst_bucket(first)),
+            ",".join(families),
+        ]
+    )
+    profile_id = visitor_profile_id_for_person(signature)
+    path_count = len(paths)
+
+    return {
+        **first,
+        "session_id": f"burst|{profile_id}|{first_dt.isoformat()}",
+        "visitor_key": signature,
+        "person_key": signature,
+        "visitor_profile_id": profile_id,
+        "ip": f"{len(ips)} IPs",
+        "started_at": first_dt.isoformat(),
+        "ended_at": last_dt.isoformat(),
+        "first_seen_at": first_dt.isoformat(),
+        "last_seen_at": last_dt.isoformat(),
+        "last_page_request_at": last_dt.isoformat(),
+        "first_seen_alberta": to_alberta_display(first_dt),
+        "last_seen_alberta": to_alberta_display(last_dt),
+        "country": country,
+        "country_code": first.get("country_code", ""),
+        "area": area,
+        "city": city,
+        "geo_resolved": True,
+        "entry_page": paths[0] if paths else first.get("entry_page", ""),
+        "current_page": paths[-1] if paths else first.get("current_page", ""),
+        "exit_page": paths[-1] if paths else first.get("exit_page", ""),
+        "next_page": paths[1] if len(paths) > 1 else "",
+        "page_sequence": paths[:20],
+        "page_count": path_count,
+        "event_count": sum(safe_int(session.get("event_count"), 0) for session in ordered),
+        "total_seconds": window_seconds,
+        "engaged_seconds": 0,
+        "idle_seconds": min(safe_int(session.get("idle_seconds"), 0) for session in ordered),
+        "active_now": any(bool(session.get("active_now")) for session in ordered),
+        "suspicious_score": 88,
+        "primary_category": "suspicious",
+        "route_kind": "page",
+        "quality_score": 8,
+        "quality_label": "weak",
+        "human_confidence": 0,
+        "classification_state": "script_burst",
+        "classification_reasons": ["distributed_ip_burst", "one_hit_fanout", "thin_direct_browser"],
+        "human_confirmed": False,
+        "live_priority": 120,
+        "is_burst_cluster": True,
+        "burst_member_count": len(ordered),
+        "burst_ip_count": len(ips),
+        "burst_path_count": path_count,
+        "burst_window_seconds": window_seconds,
+        "burst_ip_families": families,
+        "burst_sample_ips": ips[:12],
+        "burst_paths": paths[:20],
+        "network_ua_count": len({session.get("browser", "") for session in ordered}),
+        "network_path_count": path_count,
+        "route_bundle_spam": False,
+    }
+
+
+def collapse_distributed_bursts(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, str, str, str, str, int, str], list[dict[str, Any]]] = defaultdict(list)
+
+    for session in sessions:
+        if not _is_distributed_burst_candidate(session):
+            continue
+
+        key = (
+            session.get("project_slug", ""),
+            session.get("country_code") or session.get("country", ""),
+            session.get("device", ""),
+            session.get("os", ""),
+            session.get("browser", ""),
+            session.get("source", ""),
+            _session_burst_bucket(session),
+            _ip_burst_family(session.get("ip", "")),
+        )
+        grouped[key].append(session)
+
+    collapsed_session_ids: set[str] = set()
+    burst_sessions: list[dict[str, Any]] = []
+
+    for group in grouped.values():
+        if len(group) < DISTRIBUTED_BURST_MIN_SESSIONS:
+            continue
+
+        ips = {session.get("ip") for session in group if session.get("ip")}
+        paths = {
+            path
+            for session in group
+            for path in (session.get("page_sequence") or [session.get("entry_page", "")])
+            if path
+        }
+        starts = [parse_iso_timestamp(session["started_at"]) for session in group]
+        valid_starts = [value for value in starts if value is not None]
+
+        if len(ips) < DISTRIBUTED_BURST_MIN_IPS:
+            continue
+        if len(paths) < DISTRIBUTED_BURST_MIN_PATHS:
+            continue
+        if valid_starts and int((max(valid_starts) - min(valid_starts)).total_seconds()) > DISTRIBUTED_BURST_WINDOW_SECONDS:
+            continue
+
+        for session in group:
+            collapsed_session_ids.add(session["session_id"])
+        burst_sessions.append(_build_distributed_burst_session(group))
+
+    if not collapsed_session_ids:
+        return sessions
+
+    return [
+        session
+        for session in sessions
+        if session["session_id"] not in collapsed_session_ids
+    ] + burst_sessions
+
+
 def build_ip_behavior_map(recent_entries: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
 
@@ -363,6 +565,7 @@ def label_classification_state(state: str) -> str:
         "human_confirmed": "Confirmed Human",
         "likely_human": "Likely Human",
         "browser_script": "Browser Script",
+        "script_burst": "Script Burst",
         "candidate": "Unclear",
         "bot": "Known Bot",
         "suspicious": "Suspicious",
@@ -378,6 +581,8 @@ def summarize_classification(state: str, human_confidence: int, suspicious_score
         return f"This still leans human at {human_confidence}% confidence, but the trail is not strong enough to call confirmed yet."
     if state == "browser_script":
         return "This looks browser-shaped, but the session is too thin or too patterned to trust as a real person. Treat it like likely scripted browsing."
+    if state == "script_burst":
+        return "Traffic collapsed a burst of near-identical one-hit browser sessions from many IPs into one script-burst card. Treat it as scripted or proxy fan-out, not separate people."
     if state == "candidate":
         return "Some human signals are present, but the evidence is mixed and Traffic is keeping the verdict conservative."
     if state == "bot":
@@ -744,7 +949,24 @@ def enrich_sessions(sessions: list[dict[str, Any]]) -> None:
         session["classification_reason_labels"] = [
             humanize_reason(reason) for reason in session["classification_reasons"]
         ]
-        if session["known_automation"] and session["classification_state"] == "bot":
+        if session.get("is_burst_cluster") or session["classification_state"] == "script_burst":
+            ip_count = safe_int(session.get("burst_ip_count"), 0)
+            path_count = safe_int(session.get("burst_path_count"), 0)
+            window_seconds = safe_int(session.get("burst_window_seconds"), 0)
+            session["visitor_alias"] = (
+                f"{(session.get('city') or session.get('area') or session.get('country') or 'Unknown').replace(' ', '')}"
+                f"ScriptBurst-{ip_count}IPs"
+            )
+            session["classification_summary"] = (
+                f"Collapsed {ip_count} near-identical one-hit browser sessions across "
+                f"{path_count} routes inside {window_seconds}s. This is almost certainly scripted "
+                "or proxy fan-out, not separate people."
+            )
+            session["attention_label"] = "Investigate"
+            session["attention_summary"] = (
+                "Traffic collapsed this swarm so it does not inflate the people feed."
+            )
+        elif session["known_automation"] and session["classification_state"] == "bot":
             family = session["automation_family"] or "Known automation"
             session["classification_summary"] = (
                 f"Recognized {family} automation. This looks like a crawler, preview, or proxy "
@@ -802,6 +1024,7 @@ def build_sessions(recent_entries: list[dict[str, Any]], limit: int | None = Non
             )
         )
 
+    sessions = collapse_distributed_bursts(sessions)
     enrich_sessions(sessions)
     sessions.sort(key=lambda item: item["ended_at"], reverse=True)
 
@@ -890,7 +1113,7 @@ def session_bucket(session: dict[str, Any]) -> int:
         return 2
     if state == "candidate" and route_kind == "page":
         return 3
-    if state == "browser_script":
+    if state in {"browser_script", "script_burst"}:
         return 4
     if state == "bot":
         return 5

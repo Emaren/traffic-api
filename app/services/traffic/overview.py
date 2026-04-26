@@ -61,7 +61,7 @@ _SESSION_SNAPSHOT_CACHE_REFRESHING: set[tuple[int | None, tuple[str, ...], tuple
 _SESSION_SNAPSHOT_CACHE_EVENTS: dict[tuple[int | None, tuple[str, ...], tuple[str, ...]], Event] = {}
 LINKABLE_VISITOR_STATES = {"human_confirmed", "likely_human", "candidate"}
 HUMAN_VISIBLE_STATES = {"human_confirmed", "likely_human", "candidate"}
-AUTOMATED_OR_SCRIPT_STATES = {"browser_script", "bot", "suspicious"}
+AUTOMATED_OR_SCRIPT_STATES = {"browser_script", "script_burst", "bot", "suspicious"}
 LINKED_VISITOR_LIMIT = 6
 
 
@@ -735,7 +735,7 @@ def build_live_visitors(
     browser_script_candidates = [
         session
         for session in sessions
-        if session["classification_state"] == "browser_script"
+        if session["classification_state"] in {"browser_script", "script_burst"}
         and (session["page_count"] > 0 or session["route_kind"] == "page")
     ]
     automation_candidates = [
