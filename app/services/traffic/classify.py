@@ -39,6 +39,8 @@ def is_trackable_path(path: str | None) -> bool:
 
 def automation_family(ua: str | None) -> str | None:
     lowered = (ua or "").lower()
+    if "dataminr" in lowered or "help@dataminr.com" in lowered:
+        return "Dataminr"
     if "googleother" in lowered:
         return "GoogleOther"
     if "adsbot-google" in lowered:
@@ -58,7 +60,12 @@ def automation_family(ua: str | None) -> str | None:
 
 def is_known_automation_ua(ua: str | None) -> bool:
     lowered = (ua or "").lower()
-    return any(term in lowered for term in KNOWN_AUTOMATION_UA_TERMS) or "googlebot" in lowered
+    return (
+        any(term in lowered for term in KNOWN_AUTOMATION_UA_TERMS)
+        or "googlebot" in lowered
+        or "dataminr" in lowered
+        or "help@dataminr.com" in lowered
+    )
 
 
 def classify_request(ua: str | None, path: str | None) -> str:
