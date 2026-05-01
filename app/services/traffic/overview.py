@@ -769,6 +769,21 @@ def build_live_visitors(
         key=live_session_sort_key,
     )[:auxiliary_limit]
 
+    recent_page_review_candidates = sorted(
+        [
+            session
+            for session in sessions
+            if session.get("route_kind") == "page"
+            and session.get("project_slug")
+            and not (
+                session.get("primary_category") == "security"
+                or int(session.get("suspicious_score") or 0) >= 70
+            )
+        ],
+        key=lambda item: item.get("ended_at") or "",
+        reverse=True,
+    )[: max(250, limit)]
+
     project_counts: list[dict[str, Any]] = []
     for project in PROJECTS:
         slug = project["slug"]
@@ -806,6 +821,8 @@ def build_live_visitors(
         "security_preview": security_preview,
         "review_count": len(browser_script_candidates) + len(automation_candidates) + len(security_candidates),
         "review_preview": review_candidates,
+        "recent_page_review_count": len(recent_page_review_candidates),
+        "recent_page_review": recent_page_review_candidates,
         "available_projects": _project_options(),
         "project_counts": project_counts,
         "top_25": tower,
