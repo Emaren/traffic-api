@@ -800,8 +800,8 @@ def api_threats() -> dict:
 
 @app.get("/api/live-visitors")
 def api_live_visitors(
-    limit: int = Query(25, ge=1, le=100),
-    history_limit: int = Query(250, ge=0, le=5000),
+    limit: int = Query(25, ge=1, le=500),
+    history_limit: int = Query(250, ge=0, le=10000),
     window_hours: int = Query(24, ge=1, le=168),
 ) -> dict:
     return cached_response(
@@ -821,8 +821,8 @@ def api_live_visitors(
 @app.get("/api/live-visitors/stream")
 def api_live_visitors_stream(
     request: Request,
-    limit: int = Query(25, ge=1, le=100),
-    history_limit: int = Query(250, ge=0, le=5000),
+    limit: int = Query(25, ge=1, le=500),
+    history_limit: int = Query(250, ge=0, le=10000),
     window_hours: int = Query(24, ge=1, le=168),
     poll_seconds: float = Query(5.0, ge=1.0, le=15.0),
     heartbeat_seconds: int = Query(20, ge=5, le=60),

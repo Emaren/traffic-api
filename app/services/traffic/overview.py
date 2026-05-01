@@ -724,7 +724,9 @@ def build_live_visitors(
 ) -> dict[str, Any]:
     snapshot = _build_session_snapshot(window_hours=window_hours)
     sessions = snapshot["sessions"]
-    auxiliary_limit = 12
+    # Keep enough non-human/uncertain page-shaped sessions visible for operator review.
+    # A one-page cloud/browser visitor should not vanish just because the main people feed is capped.
+    auxiliary_limit = max(100, limit)
 
     tower_candidates = [
         session
@@ -757,8 +759,15 @@ def build_live_visitors(
     security_preview = sorted(security_candidates, key=live_session_sort_key)[:auxiliary_limit]
 
     history_candidates = sorted(tower_candidates, key=lambda item: item["ended_at"], reverse=True)
+    # history_candidates is sorted newest-first by ended_at.
+    # Keep that order so recent sessions stay at the top of the live stream.
     history_items = history_candidates[limit : limit + history_limit]
-    stream_items = list(reversed(history_candidates[: limit + history_limit]))
+    stream_items = history_candidates[: limit + history_limit]
+
+    review_candidates = sorted(
+        browser_script_candidates + automation_candidates + security_candidates,
+        key=live_session_sort_key,
+    )[:auxiliary_limit]
 
     project_counts: list[dict[str, Any]] = []
     for project in PROJECTS:
@@ -795,6 +804,8 @@ def build_live_visitors(
         "automation_preview": automation_preview,
         "security_count": len(security_candidates),
         "security_preview": security_preview,
+        "review_count": len(browser_script_candidates) + len(automation_candidates) + len(security_candidates),
+        "review_preview": review_candidates,
         "available_projects": _project_options(),
         "project_counts": project_counts,
         "top_25": tower,
