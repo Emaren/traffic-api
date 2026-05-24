@@ -207,15 +207,28 @@ THIN_DIRECT_BROWSER_MAX_TOTAL_SECONDS = int(
 PROJECTS = [
     {
         "slug": "aoe2hdbets",
-        "name": "AoE2HDBets",
+        "name": "AoE2 War",
         "category": "gaming",
-        "hosts": ["aoe2hdbets.com", "www.aoe2hdbets.com"],
+        # Keep legacy aliases here so durable-store queries continue to include
+        # pre-rename rows while aoe2war.com is the canonical reporting host.
+        "hosts": [
+            "aoe2war.com",
+            "www.aoe2war.com",
+            "api-prodn.aoe2war.com",
+            "aoe2hdbets.com",
+            "www.aoe2hdbets.com",
+            "api-prodn.aoe2hdbets.com",
+        ],
     },
     {
         "slug": "aoe2dewarwagers",
         "name": "AoE2DEWarWagers",
         "category": "gaming",
-        "hosts": ["aoe2dewarwagers.com", "www.aoe2dewarwagers.com"],
+        "hosts": [
+            "aoe2dewarwagers.com",
+            "www.aoe2dewarwagers.com",
+            "api-prodn.aoe2dewarwagers.com",
+        ],
     },    
     {
         "slug": "tokentap",
@@ -290,24 +303,13 @@ PROJECTS = [
 
 PROJECT_INDEX = {host: project for project in PROJECTS for host in project["hosts"]}
 
-DEFAULT_ALLOWED_HOSTS = (
-    "traffic.tokentap.ca",
-    "tokentap.ca",
-    "www.tokentap.ca",
-    "aoe2hdbets.com",
-    "www.aoe2hdbets.com",
-    "wheatandstone.ca",
-    "www.wheatandstone.ca",
-    "vps-sentry.tokentap.ca",
-    "pulse.tokentap.ca",
-    "tmail.tokentap.ca",
-    "wallyverse.tokentap.ca",
-    "redlinelegal.ca",
-    "www.redlinelegal.ca",
-)
+DEFAULT_ALLOWED_HOSTS = tuple(host for project in PROJECTS for host in project["hosts"])
 
 CANONICAL_HOST_MAP = {
-    "www.aoe2hdbets.com": "aoe2hdbets.com",
+    "www.aoe2war.com": "aoe2war.com",
+    "aoe2hdbets.com": "aoe2war.com",
+    "www.aoe2hdbets.com": "aoe2war.com",
+    "api-prodn.aoe2hdbets.com": "api-prodn.aoe2war.com",
     "www.aoe2dewarwagers.com": "aoe2dewarwagers.com",    
     "www.tokentap.ca": "tokentap.ca",
     "www.wheatandstone.ca": "wheatandstone.ca",

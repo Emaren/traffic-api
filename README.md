@@ -41,6 +41,13 @@ Traffic notifications follow this pipeline:
 - durable history currently lives in the Traffic sqlite store unless deployment config says otherwise
 - allowed-host coverage must stay aligned with project config or reporting and notification scope will drift
 
+## AoE2 War reporting contract
+
+- `aoe2hdbets` remains the stable Traffic project slug and join key for the HD AoE2 product
+- `aoe2war.com` is the canonical public reporting host for that project
+- `aoe2hdbets.com` and `api-prodn.aoe2hdbets.com` stay as legacy aliases so historical durable-store rows continue to appear in the same project
+- default allowed hosts are derived from `PROJECTS`; if production sets `TRAFFIC_ALLOWED_HOSTS`, keep `aoe2war.com`, `www.aoe2war.com`, `api-prodn.aoe2war.com`, and the legacy aliases in that env value
+
 ## Development
 
 ```bash
@@ -52,7 +59,7 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 3345
 
 ```bash
 python -m compileall app
-pytest
+python -m unittest discover -s tests
 ```
 
 Run the narrowest relevant test or smoke path available for the stage you changed:

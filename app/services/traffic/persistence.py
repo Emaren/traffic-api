@@ -14,6 +14,7 @@ from app.services.traffic.config import (
     PERSIST_ENABLED,
     PERSIST_RETENTION_DAYS,
 )
+from app.services.traffic.normalize import normalize_host, normalize_referrer
 from app.services.traffic.parse import parse_iso_timestamp, parse_log_line
 
 _SYNC_LOCK = Lock()
@@ -496,9 +497,9 @@ def load_recent_entries(
                     "line_offset": row["line_offset"],
                     "raw_path": row["raw_path"],
                     "normalized_path": row["normalized_path"],
-                    "referrer_host": row["referrer_host"],
+                    "referrer_host": normalize_referrer(row["referrer_host"]),
                     "ua": row["ua"],
-                    "host": row["host"],
+                    "host": normalize_host(row["host"]),
                 }
 
                 if include_raw_fields:
