@@ -237,6 +237,36 @@ PROJECTS = [
         "hosts": ["tokentap.ca", "www.tokentap.ca"],
     },
     {
+        "slug": "usetab",
+        "name": "UseTab",
+        "category": "credit",
+        "hosts": ["usetab.ca", "www.usetab.ca"],
+    },
+    {
+        "slug": "creditchain",
+        "name": "CreditChain",
+        "category": "blockchain",
+        "hosts": ["chain.usetab.ca"],
+    },
+    {
+        "slug": "ascendai",
+        "name": "AscendAI",
+        "category": "ai",
+        "hosts": ["ascendai.one", "www.ascendai.one"],
+    },
+    {
+        "slug": "ascendchain",
+        "name": "AscendChain",
+        "category": "blockchain",
+        "hosts": ["chain.ascendai.one"],
+    },
+    {
+        "slug": "ascend-chains",
+        "name": "Ascend Chains",
+        "category": "blockchain",
+        "hosts": ["chains.ascendai.one"],
+    },
+    {
         "slug": "wheatandstone",
         "name": "Wheat & Stone",
         "category": "content",
@@ -312,6 +342,8 @@ CANONICAL_HOST_MAP = {
     "api-prodn.aoe2hdbets.com": "api-prodn.aoe2war.com",
     "www.aoe2dewarwagers.com": "aoe2dewarwagers.com",    
     "www.tokentap.ca": "tokentap.ca",
+    "www.usetab.ca": "usetab.ca",
+    "www.ascendai.one": "ascendai.one",
     "www.wheatandstone.ca": "wheatandstone.ca",
     "www.redlinelegal.ca": "redlinelegal.ca",
 }

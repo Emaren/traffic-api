@@ -70,6 +70,9 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             CREATE INDEX IF NOT EXISTS idx_traffic_entries_timestamp
                 ON traffic_entries(timestamp);
 
+            CREATE INDEX IF NOT EXISTS idx_traffic_entries_timestamp_line_offset
+                ON traffic_entries(timestamp, line_offset);
+
             CREATE INDEX IF NOT EXISTS idx_traffic_entries_host_timestamp
                 ON traffic_entries(host, timestamp);
 

@@ -282,7 +282,7 @@ def _wait_for_session_snapshot_refresh(
     project_slugs: set[str] | None = None,
 ) -> dict[str, Any] | None:
     cache_key = _session_snapshot_key(window_hours, project_slugs)
-    timeout_seconds = 8.0 if window_hours is None else 4.0
+    timeout_seconds = 90.0 if window_hours is None else 60.0
 
     with _SESSION_SNAPSHOT_CACHE_LOCK:
         if cache_key not in _SESSION_SNAPSHOT_CACHE_REFRESHING:

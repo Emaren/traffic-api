@@ -251,7 +251,10 @@ def cached_response(
             _response_cache_events[cache_key] = wait_event
             build_here = True
 
-    if not build_here and wait_event is not None:
+    wait_started = monotonic()
+    wait_budget = max(45.0, ttl_seconds * 3.0)
+
+    while not build_here and wait_event is not None:
         wait_event.wait(timeout=max(ttl_seconds, 5.0))
         with _response_cache_lock:
             tick = monotonic()
@@ -259,18 +262,23 @@ def cached_response(
             cached = _response_cache.get(cache_key)
             if cached:
                 return cached[1]
-            if cache_key not in _response_cache_refreshing:
-                _response_cache_refreshing.add(cache_key)
-                wait_event = threading.Event()
-                _response_cache_events[cache_key] = wait_event
-                build_here = True
 
-    if not build_here:
-        with _response_cache_lock:
+            if cache_key in _response_cache_refreshing:
+                if tick - wait_started >= wait_budget:
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Traffic cache is still warming",
+                    )
+                wait_event = _response_cache_events.get(cache_key)
+                if wait_event is None:
+                    wait_event = threading.Event()
+                    _response_cache_events[cache_key] = wait_event
+                continue
+
             _response_cache_refreshing.add(cache_key)
             wait_event = threading.Event()
             _response_cache_events[cache_key] = wait_event
-        build_here = True
+            build_here = True
 
     try:
         payload = builder()
@@ -436,6 +444,11 @@ def healthz() -> dict[str, str | bool | int]:
         "active_streams": get_active_streams(app),
         "generated_at": iso_now(),
     }
+
+
+@app.get("/api/healthz")
+def api_healthz() -> dict[str, str | bool | int]:
+    return healthz()
 
 
 @app.get("/api/admin/notifications/dashboard")

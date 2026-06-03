@@ -48,6 +48,20 @@ Traffic notifications follow this pipeline:
 - `aoe2hdbets.com` and `api-prodn.aoe2hdbets.com` stay as legacy aliases so historical durable-store rows continue to appear in the same project
 - default allowed hosts are derived from `PROJECTS`; if production sets `TRAFFIC_ALLOWED_HOSTS`, keep `aoe2war.com`, `www.aoe2war.com`, `api-prodn.aoe2war.com`, and the legacy aliases in that env value
 
+## UseTab / AscendAI reporting contract
+
+- `usetab` is the Traffic project slug for `usetab.ca` and `www.usetab.ca`
+- `creditchain` is the Traffic project slug for the future CreditChain surface at `chain.usetab.ca`
+- `ascendai` is the Traffic project slug for `ascendai.one` and `www.ascendai.one`
+- `ascendchain` is the Traffic project slug for the future AscendChain surface at `chain.ascendai.one`
+- `ascend-chains` is the Traffic project slug for the planned blockchain directory at `chains.ascendai.one`
+- these mappings are analytics/reporting joins only; Traffic does not own the app, chain, wallet, or settlement services behind those hosts
+
+## Availability checks
+
+- `/healthz` is the direct FastAPI health check
+- `/api/healthz` mirrors it through the API namespace so nginx `/api/*` proxy checks do not depend on heavy dashboard aggregation
+
 ## Development
 
 ```bash
