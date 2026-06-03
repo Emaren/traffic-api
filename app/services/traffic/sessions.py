@@ -676,10 +676,22 @@ def attention_profile(
     return "Low", "Useful for context, but this session is not drawing strong attention yet."
 
 
+UNKNOWN_LOCATION_TOKENS = {"unknown", "unknown city", "unknown location", "geo unresolved"}
+
+
+def alias_location_prefix(country: str | None, area: str | None, city: str | None, fallback: str = "Visitor") -> str:
+    for value in (city, area, country):
+        cleaned_value = (value or "").strip()
+        if cleaned_value and cleaned_value.lower() not in UNKNOWN_LOCATION_TOKENS:
+            cleaned = re.sub(r"[^A-Za-z0-9]+", " ", cleaned_value).strip()
+            prefix = "".join(part.capitalize() for part in cleaned.split())
+            if prefix:
+                return prefix
+    return fallback
+
+
 def visitor_alias(person_key: str, country: str, area: str, city: str) -> str:
-    anchor = city or area or country or "Unknown"
-    cleaned = re.sub(r"[^A-Za-z0-9]+", " ", anchor).strip()
-    prefix = "".join(part.capitalize() for part in cleaned.split()) or "Unknown"
+    prefix = alias_location_prefix(country, area, city)
     ip = person_key.split("|", 1)[0]
     if "." in ip:
         parts = ip.split(".")
@@ -1013,7 +1025,7 @@ def enrich_sessions(sessions: list[dict[str, Any]]) -> None:
             path_count = safe_int(session.get("burst_path_count"), 0)
             window_seconds = safe_int(session.get("burst_window_seconds"), 0)
             session["visitor_alias"] = (
-                f"{(session.get('city') or session.get('area') or session.get('country') or 'Unknown').replace(' ', '')}"
+                f"{alias_location_prefix(session.get('country'), session.get('area'), session.get('city'), fallback='Network')}"
                 f"ScriptBurst-{ip_count}IPs"
             )
             session["classification_summary"] = (

@@ -1294,11 +1294,17 @@ def _notification_title(session: dict[str, Any]) -> str:
 
 def _notification_body(session: dict[str, Any], entry: dict[str, Any]) -> str:
     visitor_state = "Returning" if session["returning_visitor"] else "New"
+    location_parts = [
+        value
+        for value in (session.get("city"), session.get("area"), session.get("country"))
+        if value and value != "Unknown"
+    ]
+    location = ", ".join(location_parts) or "Location pending"
     return "\n".join(
         [
             f"{session['verdict_label']} hit {entry['normalized_path']}",
             f"IP {session['ip']} · {visitor_state} · Project visits {session['total_project_visits']}",
-            f"{session['city'] or 'Unknown city'}{', ' + session['area'] if session['area'] else ''}{', ' + session['country'] if session['country'] else ''}",
+            location,
         ]
     )
 

@@ -40,6 +40,7 @@ Traffic notifications follow this pipeline:
 - production commonly runs behind nginx and systemd
 - durable history currently lives in the Traffic sqlite store unless deployment config says otherwise
 - allowed-host coverage must stay aligned with project config or reporting and notification scope will drift
+- GeoIP enrichment needs both the `geoip2` package and `TRAFFIC_GEOIP_DB_PATH` pointing at the GeoLite City database; a present database file alone is not enough
 
 ## AoE2 War reporting contract
 

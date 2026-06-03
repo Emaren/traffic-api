@@ -45,6 +45,37 @@ def get_geo_reader() -> Any | None:
         return None
 
 
+def geoip_status() -> dict[str, Any]:
+    db_exists = GEOIP_DB_PATH.exists()
+    if GeoIPReader is None:
+        return {
+            "available": False,
+            "db_exists": db_exists,
+            "path": str(GEOIP_DB_PATH),
+            "reason": "geoip2 package is not installed",
+        }
+    if not db_exists:
+        return {
+            "available": False,
+            "db_exists": False,
+            "path": str(GEOIP_DB_PATH),
+            "reason": "GeoIP database is missing",
+        }
+    if get_geo_reader() is None:
+        return {
+            "available": False,
+            "db_exists": True,
+            "path": str(GEOIP_DB_PATH),
+            "reason": "GeoIP database could not be opened",
+        }
+    return {
+        "available": True,
+        "db_exists": True,
+        "path": str(GEOIP_DB_PATH),
+        "reason": "GeoIP reader available",
+    }
+
+
 def get_geo_details(ip: str) -> dict[str, str]:
     if ip in _GEO_LOOKUP_CACHE:
         return _GEO_LOOKUP_CACHE[ip]

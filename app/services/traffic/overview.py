@@ -631,12 +631,13 @@ def build_overview(range_key: str = "24h") -> dict[str, Any]:
         f"Host allowlist live: {len(ALLOWED_HOSTS)} approved hosts.",
     ]
 
-    from app.services.traffic.config import GEOIP_DB_PATH
+    from app.services.traffic.geo import geoip_status
 
-    if GEOIP_DB_PATH.exists():
-        notes.append(f"GeoIP DB loaded: {GEOIP_DB_PATH}")
+    geo_status = geoip_status()
+    if geo_status["available"]:
+        notes.append(f"GeoIP reader loaded: {geo_status['path']}")
     else:
-        notes.append(f"GeoIP DB missing: {GEOIP_DB_PATH}")
+        notes.append(f"GeoIP unavailable: {geo_status['reason']} ({geo_status['path']})")
 
     if persistence_enabled():
         notes.append(f"Durable traffic store active: {PERSIST_DB_PATH}")
