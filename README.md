@@ -61,6 +61,7 @@ Traffic notifications follow this pipeline:
 
 - `/healthz` is the direct FastAPI health check
 - `/api/healthz` mirrors it through the API namespace so nginx `/api/*` proxy checks do not depend on heavy dashboard aggregation
+- live visitor endpoints cap their session-rebuild window at 24h; use archive/history endpoints for longer-range review instead of live polling
 
 ## Development
 

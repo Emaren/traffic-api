@@ -112,6 +112,7 @@ LIVE_VISITORS_CACHE_TTL_SECONDS = 5.0
 VISITS_HISTORY_CACHE_TTL_SECONDS = 30.0
 PROJECT_DETAIL_CACHE_TTL_SECONDS = 30.0
 VISITOR_PROFILE_CACHE_TTL_SECONDS = 30.0
+LIVE_VISITORS_MAX_WINDOW_HOURS = 24
 
 _response_cache_lock = threading.Lock()
 _RESPONSE_CACHE_MAX_KEYS = 32
@@ -311,6 +312,10 @@ def range_cache_ttl(base_ttl: float, range_key: str) -> float:
     if range_key == "30d":
         return max(base_ttl, MID_RANGE_CACHE_TTL_SECONDS)
     return base_ttl
+
+
+def live_visitors_window_hours(window_hours: int) -> int:
+    return min(window_hours, LIVE_VISITORS_MAX_WINDOW_HOURS)
 
 
 def warm_default_caches() -> None:
@@ -817,17 +822,18 @@ def api_live_visitors(
     history_limit: int = Query(250, ge=0, le=10000),
     window_hours: int = Query(24, ge=1, le=168),
 ) -> dict:
+    effective_window_hours = live_visitors_window_hours(window_hours)
     return cached_response(
         "live_visitors",
         ttl_seconds=LIVE_VISITORS_CACHE_TTL_SECONDS,
         builder=lambda: build_live_visitors(
             limit=limit,
             history_limit=history_limit,
-            window_hours=window_hours,
+            window_hours=effective_window_hours,
         ),
         limit=limit,
         history_limit=history_limit,
-        window_hours=window_hours,
+        window_hours=effective_window_hours,
     )
 
 
@@ -840,6 +846,7 @@ def api_live_visitors_stream(
     poll_seconds: float = Query(5.0, ge=1.0, le=15.0),
     heartbeat_seconds: int = Query(20, ge=5, le=60),
 ) -> StreamingResponse:
+    effective_window_hours = live_visitors_window_hours(window_hours)
     return stream_json_response(
         request=request,
         builder=lambda: cached_response(
@@ -848,11 +855,11 @@ def api_live_visitors_stream(
             builder=lambda: build_live_visitors(
                 limit=limit,
                 history_limit=history_limit,
-                window_hours=window_hours,
+                window_hours=effective_window_hours,
             ),
             limit=limit,
             history_limit=history_limit,
-            window_hours=window_hours,
+            window_hours=effective_window_hours,
         ),
         poll_seconds=poll_seconds,
         heartbeat_seconds=heartbeat_seconds,
