@@ -55,6 +55,20 @@ DISTRIBUTED_BURST_MIN_PATHS = 2
 DISTRIBUTED_BURST_MAX_EVENTS_PER_SESSION = 2
 DISTRIBUTED_BURST_MAX_PAGES_PER_SESSION = 1
 
+CHAIN_API_ROUTE_PREFIXES = (
+    "/rpc",
+    "/rpc-mainnet",
+    "/rpc-testnet",
+    "/rpc-local",
+    "/rest",
+    "/rest-mainnet",
+    "/rest-testnet",
+    "/rest-local",
+)
+CHAIN_POLLER_WINDOW_SECONDS = 20 * 60
+CHAIN_POLLER_MIN_SESSIONS = 2
+CHAIN_POLLER_MAX_TOTAL_SECONDS = 20
+
 REASON_LABELS = {
     "browser_ua": "Browser fingerprint looks like a real person",
     "unknown_ua": "User agent is unfamiliar, so confidence is limited",
@@ -84,6 +98,8 @@ REASON_LABELS = {
     "browser_script_pattern": "Browser-shaped session matches a script or scraper pattern",
     "distributed_ip_burst": "Many near-identical one-hit browser sessions arrived from different IPs at the same time",
     "one_hit_fanout": "Each member looked like a thin one-hit route probe rather than a real journey",
+    "chain_rpc_poll": "Hit chain RPC/REST endpoints instead of human-facing pages",
+    "same_ip_chain_poller": "Same IP repeatedly polled chain infrastructure inside a short window",
 }
 
 
@@ -278,6 +294,31 @@ def _ip_burst_family(ip: str) -> str:
     return "unknown"
 
 
+def _is_chain_api_path(path: str | None) -> bool:
+    lowered = (path or "").lower()
+    return any(lowered == prefix or lowered.startswith(prefix + "/") for prefix in CHAIN_API_ROUTE_PREFIXES)
+
+
+def _session_chain_paths(session: dict[str, Any]) -> list[str]:
+    paths = session.get("page_sequence") or []
+    if not paths:
+        fallback = session.get("entry_page") or session.get("current_page") or ""
+        paths = [fallback] if fallback else []
+    return [str(path) for path in paths if path]
+
+
+def _is_chain_api_session(session: dict[str, Any]) -> bool:
+    paths = _session_chain_paths(session)
+    return bool(paths) and all(_is_chain_api_path(path) for path in paths)
+
+
+def _chain_poller_bucket(session: dict[str, Any]) -> int:
+    parsed = parse_iso_timestamp(session.get("started_at"))
+    if parsed is None:
+        parsed = datetime.now(timezone.utc)
+    return int(parsed.timestamp() // CHAIN_POLLER_WINDOW_SECONDS)
+
+
 def _session_burst_bucket(session: dict[str, Any]) -> int:
     parsed = parse_iso_timestamp(session.get("started_at"))
     if parsed is None:
@@ -444,6 +485,137 @@ def _is_known_singapore_43_fanout(session: dict[str, Any]) -> bool:
     )
     return path == "/" or any(path.startswith(prefix) for prefix in noisy_paths)
 
+
+
+def _is_chain_poller_candidate(session: dict[str, Any]) -> bool:
+    if session.get("known_automation"):
+        return False
+    if not _is_chain_api_session(session):
+        return False
+    if session.get("source") not in {"direct", "internal", ""}:
+        return False
+    if session.get("route_kind") != "api":
+        return False
+    if safe_int(session.get("event_count"), 0) > 4:
+        return False
+    if safe_int(session.get("total_seconds"), 0) > CHAIN_POLLER_MAX_TOTAL_SECONDS:
+        return False
+    return True
+
+
+def _build_chain_poller_session(group: list[dict[str, Any]]) -> dict[str, Any]:
+    ordered = sorted(group, key=lambda item: item["started_at"])
+    first = ordered[0]
+    starts = [parse_iso_timestamp(session["started_at"]) for session in ordered]
+    ends = [parse_iso_timestamp(session["ended_at"]) for session in ordered]
+    valid_starts = [value for value in starts if value is not None]
+    valid_ends = [value for value in ends if value is not None]
+    first_dt = min(valid_starts) if valid_starts else datetime.now(timezone.utc)
+    last_dt = max(valid_ends) if valid_ends else first_dt
+    window_seconds = max(0, int((last_dt - first_dt).total_seconds()))
+    paths = ordered_unique([path for session in ordered for path in _session_chain_paths(session)])
+    signature = "|".join(
+        [
+            "chain_poller",
+            first.get("project_slug", ""),
+            first.get("ip", ""),
+            first.get("country_code") or first.get("country", ""),
+            first.get("device", ""),
+            first.get("os", ""),
+            first.get("browser", ""),
+            str(_chain_poller_bucket(first)),
+        ]
+    )
+    profile_id = visitor_profile_id_for_person(signature)
+    alias_prefix = alias_location_prefix(
+        first.get("country"),
+        first.get("area"),
+        first.get("city"),
+        fallback="Chain",
+    )
+    ip_suffix = str(first.get("ip", "IP")).split(".")[-1] if first.get("ip") else "IP"
+
+    return {
+        **first,
+        "session_id": f"chainpoll|{profile_id}|{first_dt.isoformat()}",
+        "visitor_key": signature,
+        "person_key": signature,
+        "visitor_profile_id": profile_id,
+        "started_at": first_dt.isoformat(),
+        "ended_at": last_dt.isoformat(),
+        "first_seen_at": first_dt.isoformat(),
+        "last_seen_at": last_dt.isoformat(),
+        "last_page_request_at": last_dt.isoformat(),
+        "first_seen_alberta": to_alberta_display(first_dt),
+        "last_seen_alberta": to_alberta_display(last_dt),
+        "entry_page": paths[0] if paths else first.get("entry_page", ""),
+        "current_page": paths[-1] if paths else first.get("current_page", ""),
+        "exit_page": paths[-1] if paths else first.get("exit_page", ""),
+        "next_page": paths[1] if len(paths) > 1 else "",
+        "page_sequence": paths[:20],
+        "page_count": len(paths),
+        "event_count": sum(safe_int(session.get("event_count"), 0) for session in ordered),
+        "total_seconds": window_seconds,
+        "engaged_seconds": 0,
+        "idle_seconds": min(safe_int(session.get("idle_seconds"), 0) for session in ordered),
+        "active_now": any(bool(session.get("active_now")) for session in ordered),
+        "suspicious_score": 64,
+        "primary_category": "suspicious",
+        "route_kind": "api",
+        "quality_score": 6,
+        "quality_label": "weak",
+        "human_confidence": 0,
+        "classification_state": "browser_script",
+        "classification_reasons": ["chain_rpc_poll", "same_ip_chain_poller", "api_only", "browser_script_pattern"],
+        "human_confirmed": False,
+        "live_priority": 90,
+        "visitor_alias": f"{alias_prefix}ChainPoller-{ip_suffix}",
+        "is_chain_poll_cluster": True,
+        "chain_poll_member_count": len(ordered),
+        "chain_poll_window_seconds": window_seconds,
+        "burst_member_count": len(ordered),
+        "burst_ip_count": 1,
+        "burst_path_count": len(paths),
+        "burst_window_seconds": window_seconds,
+        "burst_paths": paths[:20],
+    }
+
+
+def collapse_chain_api_pollers(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, str, str, str, str, int], list[dict[str, Any]]] = defaultdict(list)
+
+    for session in sessions:
+        if not _is_chain_poller_candidate(session):
+            continue
+        key = (
+            session.get("project_slug", ""),
+            session.get("ip", ""),
+            session.get("country_code") or session.get("country", ""),
+            session.get("device", ""),
+            session.get("os", ""),
+            session.get("browser", ""),
+            _chain_poller_bucket(session),
+        )
+        grouped[key].append(session)
+
+    collapsed_session_ids: set[str] = set()
+    chain_poller_sessions: list[dict[str, Any]] = []
+
+    for group in grouped.values():
+        if len(group) < CHAIN_POLLER_MIN_SESSIONS:
+            continue
+        for session in group:
+            collapsed_session_ids.add(session["session_id"])
+        chain_poller_sessions.append(_build_chain_poller_session(group))
+
+    if not collapsed_session_ids:
+        return sessions
+
+    return [
+        session
+        for session in sessions
+        if session["session_id"] not in collapsed_session_ids
+    ] + chain_poller_sessions
 
 
 def collapse_distributed_bursts(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -852,6 +1024,16 @@ def build_single_session(
         suspicious_score=suspicious_score,
     )
 
+    chain_api_session = bool(route_kind == "api" and ordered_paths and all(_is_chain_api_path(path) for path in ordered_paths))
+    if chain_api_session:
+        for reason in ("chain_rpc_poll", "api_only", "browser_script_pattern"):
+            if reason not in classification_reasons:
+                classification_reasons.append(reason)
+        human_confidence = 0
+        suspicious_score = max(suspicious_score, 64)
+        quality_score = min(quality_score, 12)
+        classification_state = "browser_script"
+
     idle_seconds = max(0, int((now - last["timestamp"]).total_seconds()))
     active_now = idle_seconds <= LIVE_ACTIVE_SECONDS
 
@@ -884,7 +1066,7 @@ def build_single_session(
                 classification_reasons.append(reason)
         human_confidence = max(0, human_confidence - 18)
         classification_state = "browser_script"
-    else:
+    elif not chain_api_session:
         classification_state = classification_state_for_confidence(
             primary_category=primary_category,
             route_kind=route_kind,
@@ -1003,7 +1185,38 @@ def enrich_sessions(sessions: list[dict[str, Any]]) -> None:
         session["classification_reason_labels"] = [
             humanize_reason(reason) for reason in session["classification_reasons"]
         ]
-        if _is_known_singapore_43_fanout(session):
+        if session.get("is_chain_poll_cluster") or "chain_rpc_poll" in session.get("classification_reasons", []):
+            member_count = safe_int(session.get("chain_poll_member_count"), 1)
+            path_count = safe_int(session.get("burst_path_count"), session.get("page_count", 0))
+            window_seconds = safe_int(session.get("chain_poll_window_seconds"), session.get("total_seconds", 0))
+            if not session.get("visitor_alias") or session.get("visitor_alias", "").startswith("Visitor-"):
+                ip_suffix = str(session.get("ip", "IP")).split(".")[-1] if session.get("ip") else "IP"
+                session["visitor_alias"] = (
+                    f"{alias_location_prefix(session.get('country'), session.get('area'), session.get('city'), fallback='Chain')}"
+                    f"ChainPoller-{ip_suffix}"
+                )
+            session["classification_state"] = "browser_script"
+            session["classification_reasons"] = ordered_unique(
+                [*session.get("classification_reasons", []), "chain_rpc_poll", "api_only", "browser_script_pattern"]
+            )
+            session["human_confidence"] = 0
+            session["quality_score"] = min(safe_int(session.get("quality_score"), 0), 12)
+            session["quality_label"] = "weak"
+            session["primary_category"] = "suspicious"
+            session["suspicious_score"] = max(safe_int(session.get("suspicious_score"), 0), 64)
+            if member_count > 1:
+                session["classification_summary"] = (
+                    f"Collapsed {member_count} same-IP chain RPC/REST polls across {path_count} endpoints "
+                    f"inside {window_seconds}s. This is chain infrastructure polling, not a normal human page visit."
+                )
+            else:
+                session["classification_summary"] = (
+                    "This visitor hit WOLO/Cosmos chain RPC or REST infrastructure instead of human-facing pages. "
+                    "Treat it as wallet, explorer, or script polling unless it later touches real pages."
+                )
+            session["attention_label"] = "Chain poller"
+            session["attention_summary"] = "Not a normal human visitor journey; separated from the people feed."
+        elif _is_known_singapore_43_fanout(session):
             session["classification_state"] = "browser_script"
             session["classification_reasons"] = ordered_unique(
                 [*session.get("classification_reasons", []), "distributed_ip_burst", "one_hit_fanout", "thin_direct_browser"]
@@ -1078,6 +1291,10 @@ def enrich_sessions(sessions: list[dict[str, Any]]) -> None:
             session["attention_summary"] = attention_summary
         session["data_confidence_label"] = data_label
         session["data_confidence_summary"] = data_summary
+        session["verdict_label"] = label_classification_state(session["classification_state"])
+        session["classification_reason_labels"] = [
+            humanize_reason(reason) for reason in session["classification_reasons"]
+        ]
 
 
 def build_sessions(recent_entries: list[dict[str, Any]], limit: int | None = None) -> list[dict[str, Any]]:
@@ -1096,6 +1313,7 @@ def build_sessions(recent_entries: list[dict[str, Any]], limit: int | None = Non
         )
 
     sessions = collapse_distributed_bursts(sessions)
+    sessions = collapse_chain_api_pollers(sessions)
     enrich_sessions(sessions)
     sessions.sort(key=lambda item: item["ended_at"], reverse=True)
 

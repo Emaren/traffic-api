@@ -178,7 +178,13 @@ API_ROUTE_PREFIXES = (
     "/api/",
     "/graphql",
     "/rpc",
+    "/rpc-mainnet",
+    "/rpc-testnet",
+    "/rpc-local",
     "/rest",
+    "/rest-mainnet",
+    "/rest-testnet",
+    "/rest-local",
     "/_next/data/",
 )
 

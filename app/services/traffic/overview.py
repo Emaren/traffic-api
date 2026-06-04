@@ -331,8 +331,9 @@ def _build_session_snapshot(
 
 
 def warm_session_snapshots() -> None:
+    # Keep boot memory bounded. A 24h warm cache makes the live cockpit fast,
+    # while all-time snapshots can be rebuilt lazily only when an operator asks for them.
     _refresh_session_snapshot_async(window_hours=24)
-    _refresh_session_snapshot_async(window_hours=None)
 
 
 def clear_session_snapshot_cache() -> None:
@@ -733,7 +734,7 @@ def build_live_visitors(
         session
         for session in sessions
         if session["classification_state"] in HUMAN_VISIBLE_STATES
-        and (session["page_count"] > 0 or session["route_kind"] == "page")
+        and session["route_kind"] == "page"
     ]
     browser_script_candidates = [
         session
