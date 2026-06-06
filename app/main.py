@@ -1002,6 +1002,12 @@ def api_visits_history(
     elif project:
         selected_projects = [project]
 
+    if range_key == "all":
+        raise HTTPException(
+            status_code=400,
+            detail="All Time visits history is temporarily disabled because it is too expensive. Use 24h, 7d, or 30d.",
+        )
+
     return cached_response(
         "visits_history",
         ttl_seconds=range_cache_ttl(VISITS_HISTORY_CACHE_TTL_SECONDS, range_key),
