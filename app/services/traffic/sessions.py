@@ -36,6 +36,7 @@ from app.services.traffic.config import (
     UNKNOWN_REFERRER,
 )
 from app.services.traffic.geo import get_geo_details
+from app.services.traffic.known_visitors import apply_known_visitor_confirmation
 from app.services.traffic.normalize import is_internal_referrer, project_for_host
 from app.services.traffic.parse import parse_iso_timestamp, safe_int
 
@@ -1291,6 +1292,7 @@ def enrich_sessions(sessions: list[dict[str, Any]]) -> None:
             session["attention_summary"] = attention_summary
         session["data_confidence_label"] = data_label
         session["data_confidence_summary"] = data_summary
+        apply_known_visitor_confirmation(session)
         session["verdict_label"] = label_classification_state(session["classification_state"])
         session["classification_reason_labels"] = [
             humanize_reason(reason) for reason in session["classification_reasons"]
