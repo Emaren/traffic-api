@@ -1142,19 +1142,45 @@ def _project_graph_all_time_rollup_payload(*, project_slug: str) -> dict[str, An
             "points": [],
         }
 
-    placeholders = ",".join("?" for _ in hosts)
+    def empty_payload(note: str) -> dict[str, Any]:
+        return {
+            "label": "All-time human-shaped arrivals",
+            "series_kind": "all_time_human_shaped_arrivals",
+            "range_key": "all",
+            "range_label": "All Time",
+            "window_hours": None,
+            "bucket_minutes": 1440,
+            "coverage_mode": "durable_store",
+            "coverage_started_at": None,
+            "coverage_started_alberta": None,
+            "note": note,
+            "points": [],
+        }
 
-    # This deliberately avoids the expensive all-time session rebuild.
-    # It is a durable raw-log rollup: browser-shaped, human-facing page arrivals by day.
-    # Later, traffic_hourly_project_rollups can replace this with exact classifier rollups.
-    query = f"""
+    placeholders = ",".join("?" for _ in hosts)
+    now = iso_now()
+
+    # Materialize daily rollups. This is intentionally broader and faster than the full
+    # live classifier: distinct IPs hitting browser-shaped, human-facing page routes per day.
+    # The all-time endpoint then reads the compact rollup table instead of scanning raw logs.
+    rebuild_query = f"""
+        INSERT OR REPLACE INTO traffic_project_daily_rollups (
+            project_slug,
+            bucket_day,
+            visitors,
+            events,
+            updated_at
+        )
         SELECT
+            ? AS project_slug,
             substr(timestamp, 1, 10) AS bucket_day,
-            MIN(timestamp) AS first_seen,
-            COUNT(DISTINCT ip) AS visitors
+            COUNT(DISTINCT ip) AS visitors,
+            COUNT(*) AS events,
+            ? AS updated_at
         FROM traffic_entries
         WHERE host IN ({placeholders})
           AND status BETWEEN 200 AND 399
+          AND method = 'GET'
           AND ua LIKE '%Mozilla%'
           AND normalized_path NOT LIKE '/api/%'
           AND normalized_path NOT LIKE '/rpc-%'
@@ -1168,8 +1194,7 @@ def _project_graph_all_time_rollup_payload(*, project_slug: str) -> dict[str, An
             '/manifest.webmanifest',
             '/admin-manifest.webmanifest'
           )
-        GROUP BY bucket_day
-        ORDER BY bucket_day ASC
+        GROUP BY substr(timestamp, 1, 10)
     """
 
     earliest_query = f"""
@@ -1178,29 +1203,37 @@ def _project_graph_all_time_rollup_payload(*, project_slug: str) -> dict[str, An
         WHERE host IN ({placeholders})
     """
 
-    rows = []
-    earliest_seen: str | None = None
-
     try:
         with _connect() as connection:
             _ensure_schema(connection)
+
+            existing_count = connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM traffic_project_daily_rollups
+                WHERE project_slug = ?
+                """,
+                (project_slug,),
+            ).fetchone()["count"]
+
+            if not existing_count:
+                connection.execute(rebuild_query, [project_slug, now, *hosts])
+                connection.commit()
+
             earliest_row = connection.execute(earliest_query, hosts).fetchone()
             earliest_seen = earliest_row["earliest_seen"] if earliest_row else None
-            rows = connection.execute(query, hosts).fetchall()
+
+            rows = connection.execute(
+                """
+                SELECT bucket_day, visitors, events
+                FROM traffic_project_daily_rollups
+                WHERE project_slug = ?
+                ORDER BY bucket_day ASC
+                """,
+                (project_slug,),
+            ).fetchall()
     except Exception as exc:
-        return {
-            "label": "All-time human-shaped arrivals",
-            "series_kind": "all_time_human_shaped_arrivals",
-            "range_key": "all",
-            "range_label": "All Time",
-            "window_hours": None,
-            "bucket_minutes": 1440,
-            "coverage_mode": "durable_store",
-            "coverage_started_at": None,
-            "coverage_started_alberta": None,
-            "note": f"All-time rollup failed: {exc}",
-            "points": [],
-        }
+        return empty_payload(f"All-time rollup failed: {exc}")
 
     earliest_dt: datetime | None = None
     if earliest_seen:
@@ -1225,11 +1258,12 @@ def _project_graph_all_time_rollup_payload(*, project_slug: str) -> dict[str, An
                 "bucket_start": bucket.isoformat(),
                 "label": bucket.astimezone(ALBERTA_ZONE).strftime("%b %d"),
                 "visitors": int(row["visitors"] or 0),
+                "events": int(row["events"] or 0),
             }
         )
 
     note = (
-        "All Time uses a fast durable SQL rollup of browser-shaped, human-facing page arrivals. "
+        "All Time uses a materialized daily rollup of browser-shaped, human-facing page arrivals. "
         "It avoids chain RPC, REST, API, assets, WordPress probes, and obvious non-page noise. "
         "This is intentionally lighter than the live classifier so the graph loads safely."
     )
@@ -1249,6 +1283,7 @@ def _project_graph_all_time_rollup_payload(*, project_slug: str) -> dict[str, An
         "note": note,
         "points": points,
     }
+
 
 def _project_graph_payload(
     *,

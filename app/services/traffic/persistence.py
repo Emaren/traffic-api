@@ -119,6 +119,18 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             CREATE INDEX IF NOT EXISTS idx_traffic_operator_identities_active
                 ON traffic_operator_identities(active, updated_at DESC);
 
+            CREATE TABLE IF NOT EXISTS traffic_project_daily_rollups (
+                project_slug TEXT NOT NULL,
+                bucket_day TEXT NOT NULL,
+                visitors INTEGER NOT NULL DEFAULT 0,
+                events INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (project_slug, bucket_day)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_traffic_project_daily_rollups_project_day
+                ON traffic_project_daily_rollups(project_slug, bucket_day);
+
             CREATE TABLE IF NOT EXISTS traffic_known_identities (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 rule_type TEXT NOT NULL,
