@@ -119,6 +119,26 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             CREATE INDEX IF NOT EXISTS idx_traffic_operator_identities_active
                 ON traffic_operator_identities(active, updated_at DESC);
 
+            CREATE TABLE IF NOT EXISTS traffic_known_identities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_type TEXT NOT NULL,
+                match_value TEXT NOT NULL,
+                label TEXT NOT NULL,
+                detail TEXT NOT NULL DEFAULT '',
+                identity_kind TEXT NOT NULL DEFAULT 'known_human',
+                confidence TEXT NOT NULL DEFAULT 'confirmed',
+                notes TEXT NOT NULL DEFAULT '',
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_traffic_known_identities_match
+                ON traffic_known_identities(rule_type, match_value);
+
+            CREATE INDEX IF NOT EXISTS idx_traffic_known_identities_active
+                ON traffic_known_identities(active, updated_at DESC);
+
             CREATE TABLE IF NOT EXISTS traffic_visibility_rules (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 rule_type TEXT NOT NULL,

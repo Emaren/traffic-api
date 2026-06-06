@@ -20,6 +20,11 @@ from app.services.traffic.config import (
     NOTIFICATION_LOOP_SECONDS,
     PROJECTS,
 )
+from app.services.traffic.known_visitors import (
+    create_known_identity,
+    delete_known_identity,
+    list_known_identities,
+)
 from app.services.traffic.notifications import (
     admin_api_configured,
     build_notification_dashboard,
@@ -520,6 +525,50 @@ def api_admin_visibility_rules_create(
         "ok": True,
         "generated_at": iso_now(),
         "rule": rule,
+    }
+
+
+@app.get("/api/admin/known-identities")
+def api_admin_known_identities(
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    return {
+        "ok": True,
+        "generated_at": iso_now(),
+        "identities": list_known_identities(),
+    }
+
+
+@app.post("/api/admin/known-identities")
+def api_admin_known_identities_create(
+    payload: dict = Body(...),
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    try:
+        identity = create_known_identity(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    clear_session_snapshot_cache()
+    clear_response_cache()
+    return {
+        "ok": True,
+        "generated_at": iso_now(),
+        "identity": identity,
+    }
+
+
+@app.delete("/api/admin/known-identities/{identity_id}")
+def api_admin_known_identity_delete(
+    identity_id: int,
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    delete_known_identity(identity_id)
+    clear_session_snapshot_cache()
+    clear_response_cache()
+    return {
+        "ok": True,
+        "generated_at": iso_now(),
     }
 
 
