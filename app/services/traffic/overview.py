@@ -24,7 +24,7 @@ from app.services.traffic.config import (
 from app.services.traffic.geo import get_geo_details
 from app.services.traffic.normalize import ALLOWED_HOSTS, is_allowed_host, project_for_host
 from app.services.traffic.parse import iso_now, parse_log_line, read_recent_log_lines
-from app.services.traffic.persistence import load_recent_entries, persistence_enabled
+from app.services.traffic.persistence import _connect, _ensure_schema, load_recent_entries, persistence_enabled
 from app.services.traffic.sessions import (
     activity_sequence_for_events,
     build_path_stats,
@@ -1108,12 +1108,157 @@ def _bucket_label(bucket: datetime, bucket_minutes: int) -> str:
     return local_bucket.strftime("%I:%M %p")
 
 
+
+def _project_graph_all_time_rollup_payload(*, project_slug: str) -> dict[str, Any]:
+    project = next((item for item in PROJECTS if item["slug"] == project_slug), None)
+    if not project:
+        return {
+            "label": "All-time human-shaped arrivals",
+            "series_kind": "all_time_human_shaped_arrivals",
+            "range_key": "all",
+            "range_label": "All Time",
+            "window_hours": None,
+            "bucket_minutes": 1440,
+            "coverage_mode": "durable_store",
+            "coverage_started_at": None,
+            "coverage_started_alberta": None,
+            "note": "Unknown project.",
+            "points": [],
+        }
+
+    hosts = [str(host) for host in project.get("hosts", []) if host]
+    if not hosts:
+        return {
+            "label": "All-time human-shaped arrivals",
+            "series_kind": "all_time_human_shaped_arrivals",
+            "range_key": "all",
+            "range_label": "All Time",
+            "window_hours": None,
+            "bucket_minutes": 1440,
+            "coverage_mode": "durable_store",
+            "coverage_started_at": None,
+            "coverage_started_alberta": None,
+            "note": "This project has no configured hosts.",
+            "points": [],
+        }
+
+    placeholders = ",".join("?" for _ in hosts)
+
+    # This deliberately avoids the expensive all-time session rebuild.
+    # It is a durable raw-log rollup: browser-shaped, human-facing page arrivals by day.
+    # Later, traffic_hourly_project_rollups can replace this with exact classifier rollups.
+    query = f"""
+        SELECT
+            substr(timestamp, 1, 10) AS bucket_day,
+            MIN(timestamp) AS first_seen,
+            COUNT(DISTINCT ip) AS visitors
+        FROM traffic_entries
+        WHERE host IN ({placeholders})
+          AND status BETWEEN 200 AND 399
+          AND ua LIKE '%Mozilla%'
+          AND normalized_path NOT LIKE '/api/%'
+          AND normalized_path NOT LIKE '/rpc-%'
+          AND normalized_path NOT LIKE '/rest-%'
+          AND normalized_path NOT LIKE '/_next/%'
+          AND normalized_path NOT LIKE '/wp-%'
+          AND normalized_path NOT LIKE '/wp/%'
+          AND normalized_path NOT IN (
+            '/robots.txt',
+            '/favicon.ico',
+            '/manifest.webmanifest',
+            '/admin-manifest.webmanifest'
+          )
+        GROUP BY bucket_day
+        ORDER BY bucket_day ASC
+    """
+
+    earliest_query = f"""
+        SELECT MIN(timestamp) AS earliest_seen
+        FROM traffic_entries
+        WHERE host IN ({placeholders})
+    """
+
+    rows = []
+    earliest_seen: str | None = None
+
+    try:
+        with _connect() as connection:
+            _ensure_schema(connection)
+            earliest_row = connection.execute(earliest_query, hosts).fetchone()
+            earliest_seen = earliest_row["earliest_seen"] if earliest_row else None
+            rows = connection.execute(query, hosts).fetchall()
+    except Exception as exc:
+        return {
+            "label": "All-time human-shaped arrivals",
+            "series_kind": "all_time_human_shaped_arrivals",
+            "range_key": "all",
+            "range_label": "All Time",
+            "window_hours": None,
+            "bucket_minutes": 1440,
+            "coverage_mode": "durable_store",
+            "coverage_started_at": None,
+            "coverage_started_alberta": None,
+            "note": f"All-time rollup failed: {exc}",
+            "points": [],
+        }
+
+    earliest_dt: datetime | None = None
+    if earliest_seen:
+        try:
+            earliest_dt = datetime.fromisoformat(str(earliest_seen).replace("Z", "+00:00"))
+            if earliest_dt.tzinfo is None:
+                earliest_dt = earliest_dt.replace(tzinfo=timezone.utc)
+            earliest_dt = earliest_dt.astimezone(timezone.utc)
+        except Exception:
+            earliest_dt = None
+
+    points = []
+    for row in rows:
+        day = str(row["bucket_day"])
+        try:
+            bucket = datetime.fromisoformat(f"{day}T00:00:00+00:00")
+        except Exception:
+            continue
+
+        points.append(
+            {
+                "bucket_start": bucket.isoformat(),
+                "label": bucket.astimezone(ALBERTA_ZONE).strftime("%b %d"),
+                "visitors": int(row["visitors"] or 0),
+            }
+        )
+
+    note = (
+        "All Time uses a fast durable SQL rollup of browser-shaped, human-facing page arrivals. "
+        "It avoids chain RPC, REST, API, assets, WordPress probes, and obvious non-page noise. "
+        "This is intentionally lighter than the live classifier so the graph loads safely."
+    )
+
+    return {
+        "label": "All-time human-shaped arrivals",
+        "series_kind": "all_time_human_shaped_arrivals",
+        "range_key": "all",
+        "range_label": "All Time",
+        "window_hours": None,
+        "bucket_minutes": 1440,
+        "coverage_mode": "durable_store",
+        "coverage_started_at": earliest_dt.isoformat() if earliest_dt else None,
+        "coverage_started_alberta": (
+            _format_alberta_timestamp(earliest_dt) if earliest_dt else None
+        ),
+        "note": note,
+        "points": points,
+    }
+
 def _project_graph_payload(
     *,
     project_slug: str,
     range_key: str = "24h",
     bucket_minutes_override: int | None = None,
 ) -> dict[str, Any]:
+    if range_key == "all":
+        return _project_graph_all_time_rollup_payload(project_slug=project_slug)
+
     range_config = PROJECT_GRAPH_RANGES.get(range_key, PROJECT_GRAPH_RANGES["24h"])
     window_hours = range_config["window_hours"]
     snapshot = _build_session_snapshot(
