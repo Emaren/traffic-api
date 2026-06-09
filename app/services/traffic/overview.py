@@ -732,6 +732,102 @@ def build_overview(range_key: str = "24h") -> dict[str, Any]:
 SECURITY_PREVIEW_CLUSTER_MIN_SESSIONS = 3
 
 
+LIVE_SESSION_RESPONSE_KEYS = {
+    "session_id",
+    "visitor_profile_id",
+    "visitor_alias",
+    "project_slug",
+    "project_name",
+    "project_category",
+    "host",
+    "ip",
+    "started_at",
+    "ended_at",
+    "first_seen_at",
+    "last_seen_at",
+    "last_page_request_at",
+    "first_seen_alberta",
+    "last_seen_alberta",
+    "country",
+    "country_code",
+    "area",
+    "city",
+    "geo_resolved",
+    "device",
+    "os",
+    "browser",
+    "known_automation",
+    "automation_family",
+    "known_visitor_label",
+    "known_visitor_detail",
+    "known_visitor_kind",
+    "known_visitor_confirmed",
+    "route_bundle_spam",
+    "is_burst_cluster",
+    "burst_member_count",
+    "burst_ip_count",
+    "burst_path_count",
+    "burst_window_seconds",
+    "referrer",
+    "source",
+    "entry_page",
+    "current_page",
+    "exit_page",
+    "next_page",
+    "page_sequence",
+    "page_count",
+    "event_count",
+    "total_seconds",
+    "engaged_seconds",
+    "active_now",
+    "suspicious_score",
+    "primary_category",
+    "route_kind",
+    "classification_state",
+    "verdict_label",
+    "classification_summary",
+    "classification_reasons",
+    "classification_reason_labels",
+    "human_confirmed",
+    "visits_in_window",
+    "project_visits_in_window",
+    "total_project_visits",
+    "times_returned_in_project",
+    "projects_visited_in_window",
+    "returning_visitor",
+    "live_priority",
+}
+
+LIVE_SESSION_ARRAY_LIMITS = {
+    "page_sequence": 6,
+    "classification_reasons": 5,
+    "classification_reason_labels": 5,
+}
+
+
+def _compact_live_session(session: dict[str, Any]) -> dict[str, Any]:
+    compact = {
+        key: session.get(key)
+        for key in LIVE_SESSION_RESPONSE_KEYS
+        if key in session
+    }
+
+    for key, limit in LIVE_SESSION_ARRAY_LIMITS.items():
+        value = compact.get(key)
+        if isinstance(value, list):
+            compact[key] = value[:limit]
+
+    if "page_sequence" not in compact or compact["page_sequence"] is None:
+        compact["page_sequence"] = []
+
+    summary = compact.get("classification_summary")
+    if isinstance(summary, str) and len(summary) > 420:
+        compact["classification_summary"] = summary[:417].rstrip() + "..."
+
+    return compact
+
+
+
 def _security_preview_paths(session: dict[str, Any]) -> list[str]:
     values = [
         *(session.get("page_sequence") or []),
@@ -869,11 +965,16 @@ def build_live_visitors(
     history_limit: int = VISITS_HISTORY_LIMIT,
     window_hours: int = 24,
 ) -> dict[str, Any]:
+    # Hard cap live dashboard payloads. The browser may ask for a huge feed while
+    # reconnecting, but the API must stay small enough to keep nginx and uvicorn alive.
+    limit = max(1, min(int(limit or LIVE_TILE_LIMIT), 24))
+    history_limit = 0
+
     snapshot = _build_session_snapshot(window_hours=window_hours)
     sessions = snapshot["sessions"]
-    # Keep enough non-human/uncertain page-shaped sessions visible for operator review.
-    # A one-page cloud/browser visitor should not vanish just because the main people feed is capped.
-    auxiliary_limit = max(100, limit)
+    # Keep enough non-human/uncertain page-shaped sessions visible for operator review
+    # without shipping a megabyte-scale JSON payload on every live refresh.
+    auxiliary_limit = 12
 
     tower_candidates = [
         session
@@ -929,7 +1030,7 @@ def build_live_visitors(
         ],
         key=lambda item: item.get("ended_at") or "",
         reverse=True,
-    )[: max(250, limit)]
+    )[:auxiliary_limit]
 
     project_counts: list[dict[str, Any]] = []
     for project in PROJECTS:
@@ -959,21 +1060,21 @@ def build_live_visitors(
         "tower_limit": limit,
         "history_count": max(0, len(history_candidates) - limit),
         "stream_total": len(history_candidates),
-        "stream_items": stream_items,
+        "stream_items": [_compact_live_session(session) for session in stream_items],
         "browser_script_count": len(browser_script_candidates),
-        "browser_script_preview": browser_script_preview,
+        "browser_script_preview": [_compact_live_session(session) for session in browser_script_preview],
         "automation_count": len(automation_candidates),
-        "automation_preview": automation_preview,
+        "automation_preview": [_compact_live_session(session) for session in automation_preview],
         "security_count": len(security_candidates),
-        "security_preview": security_preview,
+        "security_preview": [_compact_live_session(session) for session in security_preview],
         "review_count": len(browser_script_candidates) + len(automation_candidates) + len(security_candidates),
-        "review_preview": review_candidates,
+        "review_preview": [],
         "recent_page_review_count": len(recent_page_review_candidates),
-        "recent_page_review": recent_page_review_candidates,
+        "recent_page_review": [_compact_live_session(session) for session in recent_page_review_candidates],
         "available_projects": _project_options(),
         "project_counts": project_counts,
-        "top_25": tower,
-        "history_preview": history_items,
+        "top_25": [],
+        "history_preview": [],
     }
 
 
