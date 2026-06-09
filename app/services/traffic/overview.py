@@ -768,6 +768,7 @@ LIVE_SESSION_RESPONSE_KEYS = {
     "burst_ip_count",
     "burst_path_count",
     "burst_window_seconds",
+    "burst_ip_prefix",
     "referrer",
     "source",
     "entry_page",
@@ -825,6 +826,200 @@ def _compact_live_session(session: dict[str, Any]) -> dict[str, Any]:
         compact["classification_summary"] = summary[:417].rstrip() + "..."
 
     return compact
+
+
+
+PAGE_BURST_MIN_SESSIONS = 4
+PAGE_BURST_MAX_WINDOW_SECONDS = 20 * 60
+
+
+def _parse_session_time(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _ipv4_24_prefix(ip: Any) -> str:
+    value = str(ip or "").strip()
+    parts = value.split(".")
+    if len(parts) == 4 and all(part.isdigit() for part in parts):
+        return ".".join(parts[:3]) + ".*"
+    if ":" in value:
+        # Rough IPv6 grouping. Good enough for burst display containment.
+        return ":".join(value.split(":")[:4]) + "::/64"
+    return value or "unknown"
+
+
+def _page_burst_bucket(session: dict[str, Any], minutes: int = 20) -> str:
+    value = (
+        _parse_session_time(session.get("started_at"))
+        or _parse_session_time(session.get("first_seen_at"))
+        or _parse_session_time(session.get("ended_at"))
+        or _parse_session_time(session.get("last_seen_at"))
+    )
+    if not value:
+        return "unknown"
+    minute = (value.minute // minutes) * minutes
+    bucket = value.replace(minute=minute, second=0, microsecond=0)
+    return bucket.isoformat()
+
+
+def _page_burst_paths(session: dict[str, Any]) -> list[str]:
+    values = [
+        *(session.get("page_sequence") or []),
+        session.get("entry_page") or "",
+        session.get("current_page") or "",
+        session.get("exit_page") or "",
+        session.get("next_page") or "",
+    ]
+    seen: set[str] = set()
+    paths: list[str] = []
+    for value in values:
+        route = str(value or "").strip()
+        if route and route not in seen:
+            seen.add(route)
+            paths.append(route)
+    return paths
+
+
+def _is_page_burst_candidate(session: dict[str, Any]) -> bool:
+    # Never collapse operator-confirmed people. False negatives are acceptable;
+    # hiding a real human is not.
+    if session.get("classification_state") == "human_confirmed":
+        return False
+    if session.get("known_visitor_confirmed"):
+        return False
+    if session.get("human_confirmed"):
+        return False
+
+    # Active or returning people deserve visibility until proven otherwise.
+    if session.get("active_now"):
+        return False
+    if session.get("returning_visitor") or int(session.get("total_project_visits") or 0) > 1:
+        return False
+
+    if session.get("known_automation"):
+        return False
+    if session.get("is_burst_cluster"):
+        return False
+    if session.get("route_kind") != "page":
+        return False
+    if not session.get("project_slug"):
+        return False
+
+    # Long, engaged, multi-page sessions are more likely worth showing individually.
+    page_count = int(session.get("page_count") or 0)
+    total_seconds = int(session.get("total_seconds") or 0)
+    if page_count >= 3 and total_seconds >= 90:
+        return False
+
+    return True
+
+
+def _collapse_page_burst_sessions(
+    sessions: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], set[str]]:
+    groups: dict[tuple[str, str, str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
+
+    for session in sessions:
+        if not _is_page_burst_candidate(session):
+            continue
+
+        key = (
+            str(session.get("project_slug") or ""),
+            str(session.get("country_code") or session.get("country") or ""),
+            str(session.get("area") or ""),
+            str(session.get("city") or ""),
+            _ipv4_24_prefix(session.get("ip")),
+            _page_burst_bucket(session),
+        )
+        groups[key].append(session)
+
+    clusters: list[dict[str, Any]] = []
+    suppressed_ids: set[str] = set()
+
+    for key, group in groups.items():
+        if len(group) < PAGE_BURST_MIN_SESSIONS:
+            continue
+
+        ordered = sorted(group, key=lambda item: item.get("ended_at") or item.get("last_seen_at") or "")
+        first = ordered[0]
+        latest = ordered[-1]
+
+        first_at = _parse_session_time(first.get("started_at") or first.get("first_seen_at") or first.get("ended_at"))
+        latest_at = _parse_session_time(latest.get("ended_at") or latest.get("last_seen_at") or latest.get("started_at"))
+        if first_at and latest_at:
+            span_seconds = abs(int((latest_at - first_at).total_seconds()))
+            if span_seconds > PAGE_BURST_MAX_WINDOW_SECONDS:
+                continue
+        else:
+            span_seconds = 0
+
+        ips = sorted({str(item.get("ip") or "") for item in group if item.get("ip")})
+        paths = [path for item in group for path in _page_burst_paths(item)]
+        path_counts = Counter(paths)
+        top_paths = [path for path, _count in path_counts.most_common(8)]
+
+        # Require either IP fanout or route fanout. This avoids crushing ordinary visitors.
+        if len(ips) < 4 and len(top_paths) < 3:
+            continue
+
+        for item in group:
+            sid = str(item.get("session_id") or "")
+            if sid:
+                suppressed_ids.add(sid)
+
+        primary_path = top_paths[0] if top_paths else latest.get("entry_page") or latest.get("current_page") or "(unknown)"
+        project_slug, country, area, city, prefix, bucket = key
+
+        cluster = dict(latest)
+        cluster.update(
+            {
+                "session_id": "page-burst-cluster|"
+                + "|".join(
+                    str(part).replace("|", "-")
+                    for part in (project_slug, country, area, city, prefix, bucket)
+                ),
+                "visitor_alias": f"{city or area or country or 'Unknown'} page burst",
+                "ip": f"{len(ips)} IPs",
+                "entry_page": primary_path,
+                "current_page": primary_path,
+                "exit_page": primary_path,
+                "next_page": "",
+                "page_sequence": top_paths,
+                "classification_state": "browser_script",
+                "verdict_label": "Page Burst",
+                "human_confidence": 15,
+                "suspicious_score": max(55, max(int(item.get("suspicious_score") or 0) for item in group)),
+                "classification_reasons": ["same_city_ip_prefix_route_burst", "operator_safe_collapse"],
+                "classification_reason_labels": [
+                    "Same-city page burst",
+                    f"{len(group)} sessions",
+                    f"{len(ips)} IPs",
+                    f"{len(top_paths)} routes",
+                ],
+                "classification_summary": (
+                    f"Traffic collapsed {len(group)} short one-off page sessions from "
+                    f"{len(ips)} IPs in {city or area or country or 'one area'} into one burst. "
+                    "Confirmed humans, known identities, active visitors, and returning visitors are protected."
+                ),
+                "known_automation": False,
+                "is_burst_cluster": True,
+                "burst_member_count": len(group),
+                "burst_ip_count": len(ips),
+                "burst_path_count": len(top_paths),
+                "burst_window_seconds": span_seconds,
+                "burst_ip_prefix": prefix,
+                "burst_paths": top_paths,
+                "burst_sample_ips": ips[:8],
+            }
+        )
+        clusters.append(cluster)
+
+    return sorted(clusters, key=live_session_sort_key), suppressed_ids
 
 
 
@@ -972,6 +1167,59 @@ def build_live_visitors(
 
     snapshot = _build_session_snapshot(window_hours=window_hours)
     sessions = snapshot["sessions"]
+
+    page_burst_clusters, page_burst_member_ids = _collapse_page_burst_sessions(sessions)
+
+    page_burst_neighborhood_keys = {
+        (
+            str(cluster.get("project_slug") or ""),
+            str(cluster.get("country_code") or cluster.get("country") or ""),
+            str(cluster.get("area") or ""),
+            str(cluster.get("city") or ""),
+            str(cluster.get("burst_ip_prefix") or ""),
+        )
+        for cluster in page_burst_clusters
+    }
+
+    def protected_from_page_burst_quarantine(session: dict[str, Any]) -> bool:
+        # Tony rule: do not hide real humans. Confirmed/known/active/returning/engaged
+        # sessions stay visible even if they share a noisy neighborhood.
+        if session.get("classification_state") == "human_confirmed":
+            return True
+        if session.get("known_visitor_confirmed") or session.get("human_confirmed"):
+            return True
+        if session.get("active_now"):
+            return True
+        if session.get("returning_visitor") or int(session.get("total_project_visits") or 0) > 1:
+            return True
+
+        engaged_seconds = int(session.get("engaged_seconds") or 0)
+
+        # In a burst neighborhood, route count and total_seconds can be fake depth
+        # caused by scripted URL fanout. Only real browser engagement gets protected.
+        return engaged_seconds >= 45
+
+    def in_page_burst_neighborhood(session: dict[str, Any]) -> bool:
+        if protected_from_page_burst_quarantine(session):
+            return False
+        if session.get("route_kind") != "page":
+            return False
+
+        key = (
+            str(session.get("project_slug") or ""),
+            str(session.get("country_code") or session.get("country") or ""),
+            str(session.get("area") or ""),
+            str(session.get("city") or ""),
+            _ipv4_24_prefix(session.get("ip")),
+        )
+        return key in page_burst_neighborhood_keys
+
+    def not_page_burst_member(session: dict[str, Any]) -> bool:
+        return (
+            session.get("session_id") not in page_burst_member_ids
+            and not in_page_burst_neighborhood(session)
+        )
+
     # Keep enough non-human/uncertain page-shaped sessions visible for operator review
     # without shipping a megabyte-scale JSON payload on every live refresh.
     auxiliary_limit = 12
@@ -981,12 +1229,17 @@ def build_live_visitors(
         for session in sessions
         if session["classification_state"] in HUMAN_VISIBLE_STATES
         and session["route_kind"] == "page"
+        and session.get("session_id") not in page_burst_member_ids
     ]
     browser_script_candidates = [
-        session
-        for session in sessions
-        if session["classification_state"] in {"browser_script", "script_burst"}
-        and (session["page_count"] > 0 or session["route_kind"] == "page")
+        *page_burst_clusters,
+        *[
+            session
+            for session in sessions
+            if session["classification_state"] in {"browser_script", "script_burst"}
+            and session.get("session_id") not in page_burst_member_ids
+            and (session["page_count"] > 0 or session["route_kind"] == "page")
+        ],
     ]
     automation_candidates = [
         session
@@ -1000,6 +1253,10 @@ def build_live_visitors(
         if session["classification_state"] == "suspicious"
         and (session["page_count"] > 0 or session["route_kind"] == "page")
     ]
+
+    tower_candidates = [session for session in tower_candidates if not_page_burst_member(session)]
+    automation_candidates = [session for session in automation_candidates if not_page_burst_member(session)]
+    security_candidates = [session for session in security_candidates if not_page_burst_member(session)]
 
     tower = sorted(tower_candidates, key=live_session_sort_key)[:limit]
     browser_script_preview = sorted(browser_script_candidates, key=live_session_sort_key)[:auxiliary_limit]
@@ -1023,6 +1280,7 @@ def build_live_visitors(
             for session in sessions
             if session.get("route_kind") == "page"
             and session.get("project_slug")
+            and session.get("session_id") not in page_burst_member_ids
             and not (
                 session.get("primary_category") == "security"
                 or int(session.get("suspicious_score") or 0) >= 70
@@ -1060,7 +1318,7 @@ def build_live_visitors(
         "tower_limit": limit,
         "history_count": max(0, len(history_candidates) - limit),
         "stream_total": len(history_candidates),
-        "stream_items": [_compact_live_session(session) for session in stream_items],
+        "stream_items": [_compact_live_session(session) for session in stream_items if not_page_burst_member(session)],
         "browser_script_count": len(browser_script_candidates),
         "browser_script_preview": [_compact_live_session(session) for session in browser_script_preview],
         "automation_count": len(automation_candidates),
@@ -1070,7 +1328,7 @@ def build_live_visitors(
         "review_count": len(browser_script_candidates) + len(automation_candidates) + len(security_candidates),
         "review_preview": [],
         "recent_page_review_count": len(recent_page_review_candidates),
-        "recent_page_review": [_compact_live_session(session) for session in recent_page_review_candidates],
+        "recent_page_review": [_compact_live_session(session) for session in recent_page_review_candidates if not_page_burst_member(session)],
         "available_projects": _project_options(),
         "project_counts": project_counts,
         "top_25": [],
