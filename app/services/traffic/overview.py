@@ -63,6 +63,15 @@ LINKABLE_VISITOR_STATES = {"human_confirmed", "likely_human", "candidate"}
 HUMAN_VISIBLE_STATES = {"human_confirmed", "likely_human", "candidate"}
 AUTOMATED_OR_SCRIPT_STATES = {"browser_script", "script_burst", "bot", "suspicious"}
 LINKED_VISITOR_LIMIT = 6
+HOT_SESSION_SOURCE_MAX_ROWS = 120_000
+
+
+def _hot_session_source_max_rows(window_hours: int | None) -> int | None:
+    # The durable SQLite store can contain millions of rows in 24h during scanner floods.
+    # Live dashboards need recent operator intelligence, not a full-table rebuild.
+    # Exact long-range totals should come from rollups, not this hot session builder.
+    return HOT_SESSION_SOURCE_MAX_ROWS
+
 
 
 def should_ignore_entry(entry: dict[str, Any]) -> bool:
@@ -106,6 +115,7 @@ def collect_recent_entries_with_source(
         window_hours=window_hours,
         hosts=project_hosts,
         include_raw_fields=False,
+        max_rows=_hot_session_source_max_rows(window_hours),
     )
     source_mode = "durable_store" if persisted_entries is not None else "log_tail"
 
@@ -718,6 +728,141 @@ def build_overview(range_key: str = "24h") -> dict[str, Any]:
     }
 
 
+
+SECURITY_PREVIEW_CLUSTER_MIN_SESSIONS = 3
+
+
+def _security_preview_paths(session: dict[str, Any]) -> list[str]:
+    values = [
+        *(session.get("page_sequence") or []),
+        session.get("entry_page") or "",
+        session.get("current_page") or "",
+        session.get("exit_page") or "",
+        *(session.get("burst_paths") or []),
+    ]
+    seen: set[str] = set()
+    paths: list[str] = []
+    for value in values:
+        path = str(value or "").strip()
+        if path and path not in seen:
+            seen.add(path)
+            paths.append(path)
+    return paths
+
+
+def _security_preview_family(session: dict[str, Any]) -> str:
+    joined = " ".join(path.lower() for path in _security_preview_paths(session))
+
+    if "wp-admin" in joined or "wp-login" in joined or "wp-config" in joined or "xmlrpc" in joined:
+        return "WordPress probe"
+    if "phpinfo" in joined or "pinfo.php" in joined or "php_info" in joined or "server_info" in joined:
+        return "PHP info probe"
+    if ".env" in joined or "credentials" in joined or "serviceaccount" in joined or "service-account" in joined:
+        return "secret-file probe"
+    if ".git" in joined:
+        return "Git metadata probe"
+    if (
+        "web.config" in joined
+        or "database.php" in joined
+        or "settings.php" in joined
+        or "functions.php" in joined
+        or "parameters.yml" in joined
+        or "application.yml" in joined
+        or "config.php" in joined
+        or "/index.php" in joined
+        or "/test.php" in joined
+        or "/db.php" in joined
+        or "docker-compose" in joined
+    ):
+        return "config-file probe"
+
+    return "probe swarm"
+
+
+def _collapse_security_preview(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    singles: list[dict[str, Any]] = []
+
+    for session in sessions:
+        if session.get("route_kind") != "probe" and session.get("classification_state") != "suspicious":
+            singles.append(session)
+            continue
+
+        family = _security_preview_family(session)
+        key = (
+            session.get("country_code") or session.get("country") or "",
+            session.get("area") or "",
+            session.get("city") or "",
+            family,
+        )
+        groups[key].append(session)
+
+    collapsed: list[dict[str, Any]] = []
+
+    for (_country, _area, _city, family), group in groups.items():
+        ips = sorted({str(item.get("ip") or "") for item in group if item.get("ip")})
+        hosts = sorted({str(item.get("host") or "") for item in group if item.get("host")})
+
+        if len(group) < SECURITY_PREVIEW_CLUSTER_MIN_SESSIONS and len(ips) < 3:
+            singles.extend(group)
+            continue
+
+        ordered = sorted(group, key=lambda item: item.get("ended_at") or "")
+        first = ordered[0]
+        latest = ordered[-1]
+
+        path_counts = Counter(path for item in group for path in _security_preview_paths(item))
+        top_paths = [path for path, _count in path_counts.most_common(12)]
+        primary_path = top_paths[0] if top_paths else latest.get("entry_page") or latest.get("current_page") or "(unknown)"
+
+        cluster = dict(latest)
+        cluster.update(
+            {
+                "session_id": "security-preview-cluster|"
+                + "|".join(
+                    str(part).replace("|", "-")
+                    for part in (
+                        latest.get("country_code") or latest.get("country") or "unknown",
+                        latest.get("area") or "unknown",
+                        latest.get("city") or "unknown",
+                        family,
+                    )
+                ),
+                "visitor_alias": f"{latest.get('city') or latest.get('country') or 'Unknown'} {family}",
+                "entry_page": primary_path,
+                "current_page": primary_path,
+                "exit_page": primary_path,
+                "page_sequence": top_paths,
+                "route_kind": "probe",
+                "classification_state": "suspicious",
+                "verdict_label": "Suspicious",
+                "human_confidence": 0,
+                "suspicious_score": max(90, max(int(item.get("suspicious_score") or 0) for item in group)),
+                "classification_reasons": ["probe_route", "security_probe_swarm"],
+                "classification_reason_labels": [
+                    "Security probe swarm",
+                    f"{len(group)} sessions",
+                    f"{len(ips)} IPs",
+                    f"{len(hosts)} hosts",
+                ],
+                "classification_summary": (
+                    f"Traffic collapsed {len(group)} suspicious {family.lower()} sessions "
+                    f"from {len(ips)} IPs across {len(hosts)} hosts. "
+                    "Treat this as scanner traffic, not separate people."
+                ),
+                "is_burst_cluster": True,
+                "burst_member_count": len(group),
+                "burst_ip_count": len(ips),
+                "burst_path_count": len(top_paths),
+                "burst_paths": top_paths,
+                "burst_sample_ips": ips[:12],
+            }
+        )
+        collapsed.append(cluster)
+
+    return sorted(singles + collapsed, key=live_session_sort_key)[:len(sessions)]
+
+
 def build_live_visitors(
     *,
     limit: int = LIVE_TILE_LIMIT,
@@ -758,7 +903,7 @@ def build_live_visitors(
     tower = sorted(tower_candidates, key=live_session_sort_key)[:limit]
     browser_script_preview = sorted(browser_script_candidates, key=live_session_sort_key)[:auxiliary_limit]
     automation_preview = sorted(automation_candidates, key=live_session_sort_key)[:auxiliary_limit]
-    security_preview = sorted(security_candidates, key=live_session_sort_key)[:auxiliary_limit]
+    security_preview = _collapse_security_preview(sorted(security_candidates, key=live_session_sort_key)[:auxiliary_limit])
 
     history_candidates = sorted(tower_candidates, key=lambda item: item["ended_at"], reverse=True)
     # history_candidates is sorted newest-first by ended_at.

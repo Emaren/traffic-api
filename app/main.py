@@ -414,7 +414,35 @@ def stream_json_response(
                 if await request.is_disconnected():
                     break
 
-                payload = builder()
+                try:
+                    payload = builder()
+                except HTTPException as exc:
+                    payload = {
+                        "ok": False,
+                        "warming": True,
+                        "detail": exc.detail,
+                        "generated_at": iso_now(),
+                    }
+                    yield sse_payload(payload)
+                    try:
+                        await asyncio.wait_for(shutdown_event.wait(), timeout=poll_seconds)
+                        break
+                    except asyncio.TimeoutError:
+                        continue
+                except Exception as exc:
+                    payload = {
+                        "ok": False,
+                        "error": "stream_builder_failed",
+                        "detail": str(exc),
+                        "generated_at": iso_now(),
+                    }
+                    yield sse_payload(payload)
+                    try:
+                        await asyncio.wait_for(shutdown_event.wait(), timeout=poll_seconds)
+                        break
+                    except asyncio.TimeoutError:
+                        continue
+
                 signature = json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
                 if signature != last_signature:
