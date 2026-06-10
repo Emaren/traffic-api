@@ -515,6 +515,29 @@ def _selected_columns(include_raw_fields: bool) -> list[str]:
     ]
 
 
+def _non_browser_chain_firehose_sql() -> str:
+    # Hot human/session views must not let old unsampled RPC/REST/GRPC firehose rows
+    # consume the newest-row safety cap. Browser-looking chain visits are preserved.
+    return """NOT (
+        (
+            host LIKE 'rpc-%'
+            OR host LIKE 'rest-%'
+            OR host LIKE 'grpc.%'
+            OR normalized_path LIKE '/rpc%'
+            OR normalized_path LIKE '/rest%'
+        )
+        AND NOT (
+            lower(ua) LIKE '%mozilla%'
+            OR lower(ua) LIKE '%chrome%'
+            OR lower(ua) LIKE '%safari%'
+            OR lower(ua) LIKE '%firefox%'
+            OR lower(ua) LIKE '%edg/%'
+            OR lower(ua) LIKE '%edge%'
+            OR lower(ua) LIKE '%opera%'
+        )
+    )"""
+
+
 def _recent_entries_query(
     *,
     selected_columns: list[str],
@@ -539,6 +562,9 @@ def _recent_entries_query(
     if hosts is not None:
         where_clauses.append(f"host IN ({', '.join('?' for _ in hosts)})")
         params.extend(hosts)
+
+    if max_rows is not None:
+        where_clauses.append(_non_browser_chain_firehose_sql())
 
     if where_clauses:
         query += " WHERE " + " AND ".join(where_clauses)

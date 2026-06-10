@@ -1702,7 +1702,15 @@ def build_visits_history(
     sessions = snapshot["sessions"]
 
     filtered = sessions
-    if classification == "known_automation":
+    if classification == "human_visible":
+        filtered = [
+            session
+            for session in filtered
+            if session["classification_state"] in {"human_confirmed", "likely_human"}
+            and session.get("route_kind") == "page"
+            and session.get("suspicious_score", 0) < 35
+        ]
+    elif classification == "known_automation":
         filtered = [session for session in filtered if session.get("known_automation")]
     elif classification == "other_bot":
         filtered = [
