@@ -1578,6 +1578,90 @@ def _align_bucket(value: datetime, bucket_minutes: int) -> datetime:
     return datetime.fromtimestamp(aligned_timestamp, tz=value.tzinfo or timezone.utc)
 
 
+def _is_human_signal_session(session: dict[str, Any]) -> bool:
+    state = session.get("classification_state")
+
+    if session.get("known_automation"):
+        return False
+    if session.get("is_burst_cluster"):
+        return False
+    if session.get("route_kind") != "page":
+        return False
+    if state in AUTOMATED_OR_SCRIPT_STATES or state in {"bot", "browser_script", "script_burst", "suspicious"}:
+        return False
+
+    if state == "human_confirmed" or session.get("human_confirmed"):
+        return True
+    if session.get("known_visitor_confirmed"):
+        return True
+    if session.get("active_now"):
+        return True
+    if session.get("returning_visitor") or int(session.get("total_project_visits") or 0) > 1:
+        return True
+
+    engaged_seconds = int(session.get("engaged_seconds") or 0)
+    total_seconds = int(session.get("total_seconds") or 0)
+    page_count = int(session.get("page_count") or 0)
+
+    if state == "likely_human":
+        return engaged_seconds > 0 or page_count <= 6 or total_seconds >= 30
+
+    if state == "candidate":
+        return engaged_seconds >= 10 or (page_count <= 4 and total_seconds >= 20)
+
+    return False
+
+
+def _human_signal_graph_sessions(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    page_burst_clusters, page_burst_member_ids = _collapse_page_burst_sessions(sessions)
+
+    neighborhood_keys = {
+        (
+            str(cluster.get("project_slug") or ""),
+            str(cluster.get("country_code") or cluster.get("country") or ""),
+            str(cluster.get("area") or ""),
+            str(cluster.get("city") or ""),
+            str(cluster.get("burst_ip_prefix") or ""),
+        )
+        for cluster in page_burst_clusters
+    }
+
+    output: list[dict[str, Any]] = []
+
+    for session in sessions:
+        if not _is_human_signal_session(session):
+            continue
+
+        if session.get("session_id") in page_burst_member_ids:
+            continue
+
+        protected = (
+            session.get("classification_state") == "human_confirmed"
+            or session.get("known_visitor_confirmed")
+            or session.get("human_confirmed")
+            or session.get("active_now")
+            or session.get("returning_visitor")
+            or int(session.get("total_project_visits") or 0) > 1
+            or int(session.get("engaged_seconds") or 0) >= 45
+        )
+
+        neighborhood_key = (
+            str(session.get("project_slug") or ""),
+            str(session.get("country_code") or session.get("country") or ""),
+            str(session.get("area") or ""),
+            str(session.get("city") or ""),
+            _ipv4_24_prefix(session.get("ip")),
+        )
+
+        if not protected and neighborhood_key in neighborhood_keys:
+            continue
+
+        output.append(session)
+
+    return output
+
+
+
 def _range_config(range_key: str) -> dict[str, Any]:
     return PROJECT_GRAPH_RANGES.get(range_key, PROJECT_GRAPH_RANGES["24h"])
 
@@ -1721,8 +1805,10 @@ def _project_graph_all_time_rollup_payload(*, project_slug: str) -> dict[str, An
             ).fetchone()["count"]
 
             if not existing_count:
-                connection.execute(rebuild_query, [project_slug, now, *hosts])
-                connection.commit()
+                return empty_payload(
+                    "All-time strict human-signal rollup has not been materialized yet. "
+                    "Run scripts/rebuild_project_daily_rollups.py to rebuild historical graph data."
+                )
 
             earliest_row = connection.execute(earliest_query, hosts).fetchone()
             earliest_seen = earliest_row["earliest_seen"] if earliest_row else None
@@ -1767,9 +1853,9 @@ def _project_graph_all_time_rollup_payload(*, project_slug: str) -> dict[str, An
         )
 
     note = (
-        "All Time uses a materialized daily rollup of browser-shaped, human-facing page arrivals. "
-        "It avoids chain RPC, REST, API, assets, WordPress probes, and obvious non-page noise. "
-        "This is intentionally lighter than the live classifier so the graph loads safely."
+        "All Time uses a materialized strict historical human-signal rollup. "
+        "It suppresses proxy fanout, route sweeps, chain RPC, REST, API, assets, WordPress probes, "
+        "and obvious non-page noise so the graph does not inflate bot swarms as audience."
     )
 
     return {
@@ -1831,10 +1917,7 @@ def _project_graph_payload(
         cursor += timedelta(minutes=bucket_minutes)
 
     series_counter = Counter()
-    for session in sessions:
-        if session["classification_state"] != "human_confirmed":
-            continue
-
+    for session in _human_signal_graph_sessions(sessions):
         started_at = datetime.fromisoformat(session["started_at"])
         bucket = _align_bucket(started_at, bucket_minutes)
         if first_bucket <= bucket <= last_bucket:
@@ -1860,8 +1943,8 @@ def _project_graph_payload(
         note = "Durable storage is unavailable, so this graph is currently reading the live log tail."
 
     return {
-        "label": "Confirmed human arrivals",
-        "series_kind": "confirmed_human_arrivals",
+        "label": "Human-signal arrivals",
+        "series_kind": "human_signal_arrivals",
         "range_key": range_key,
         "range_label": range_config["label"],
         "window_hours": window_hours,
@@ -1919,10 +2002,7 @@ def build_project_human_series(
     points_by_project: dict[str, Counter] = defaultdict(Counter)
     live_counts = Counter()
 
-    for session in sessions:
-        if session["classification_state"] != "human_confirmed":
-            continue
-
+    for session in _human_signal_graph_sessions(sessions):
         started_at = datetime.fromisoformat(session["started_at"])
         bucket = _align_bucket(started_at, bucket_minutes)
         if bucket < first_bucket or bucket > last_bucket:
@@ -1993,7 +2073,7 @@ def build_project_human_series(
             _format_alberta_timestamp(earliest_entry_at) if earliest_entry_at else None
         ),
         "note": note,
-        "series_kind": "confirmed_human_arrivals",
+        "series_kind": "human_signal_arrivals",
         "projects": projects_output,
     }
 
