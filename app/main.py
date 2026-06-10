@@ -1031,10 +1031,20 @@ def api_visits_history(
         selected_projects = [project]
 
     if range_key == "all":
-        raise HTTPException(
-            status_code=400,
-            detail="All Time visits history is temporarily disabled because it is too expensive. Use 24h, 7d, or 30d.",
+        targeted_human_project_history = (
+            classification == "human_visible"
+            and bool(selected_projects)
+            and len(selected_projects) <= 3
+            and limit <= 100
         )
+        if not targeted_human_project_history:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "All Time visits history is only enabled for targeted human project history. "
+                    "Use classification=human_visible, one or more projects, and limit <= 100."
+                ),
+            )
 
     return cached_response(
         "visits_history",
