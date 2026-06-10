@@ -2217,10 +2217,7 @@ def build_project_human_series(
 ) -> dict[str, Any]:
     range_config = PROJECT_GRAPH_RANGES.get(range_key, PROJECT_GRAPH_RANGES["24h"])
     window_hours = range_config["window_hours"]
-    snapshot = _build_session_snapshot(
-        window_hours=window_hours,
-        project_slugs=selected_project_slugs,
-    )
+    snapshot = _build_session_snapshot(window_hours=window_hours)
     source_mode = snapshot["source_mode"]
     sessions = snapshot["sessions"]
     now = datetime.now(timezone.utc)
@@ -2636,10 +2633,7 @@ def build_visitor_profile(
 ) -> dict[str, Any]:
     range_config = _range_config(range_key)
     window_hours = _window_hours_for_range(range_key)
-    snapshot = _build_session_snapshot(
-        window_hours=window_hours,
-        project_slugs=selected_project_slugs,
-    )
+    snapshot = _build_session_snapshot(window_hours=window_hours)
     source_mode = snapshot["source_mode"]
     sessions = snapshot["sessions"]
     visitor_sessions = [
