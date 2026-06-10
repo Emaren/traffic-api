@@ -1702,14 +1702,53 @@ def build_visits_history(
     sessions = snapshot["sessions"]
 
     filtered = sessions
-    if classification == "human_visible":
-        filtered = [
-            session
-            for session in filtered
-            if session["classification_state"] in {"human_confirmed", "likely_human"}
-            and session.get("route_kind") == "page"
-            and session.get("suspicious_score", 0) < 35
+    def _safe_human_history_session(session):
+        if session["classification_state"] not in {"human_confirmed", "likely_human"}:
+            return False
+        if session.get("route_kind") != "page":
+            return False
+        if session.get("suspicious_score", 0) >= 35:
+            return False
+
+        pages = [
+            session.get("entry_page") or "",
+            session.get("exit_page") or "",
+            session.get("current_page") or "",
         ]
+        pages.extend(session.get("page_sequence") or [])
+        haystack = " ".join(str(page).lower() for page in pages)
+
+        probe_fragments = (
+            "/wp-",
+            "wp-json",
+            "wp-admin",
+            "gravitysmtp",
+            "debug",
+            "console",
+            "server.log",
+            ".env",
+            ".git",
+            ".svn",
+            "docker-compose",
+            ".drone",
+            ".buildkite",
+            "kubernetes.yml",
+            "database.ini",
+            "composer.",
+            "phpinfo",
+            "phpunit",
+            "login.action",
+            "/nodesync",
+            "/exec",
+            "/shell",
+            "/cgi-bin",
+            ".yarnrc",
+        )
+
+        return not any(fragment in haystack for fragment in probe_fragments)
+
+    if classification == "human_visible":
+        filtered = [session for session in filtered if _safe_human_history_session(session)]
     elif classification == "known_automation":
         filtered = [session for session in filtered if session.get("known_automation")]
     elif classification == "other_bot":
