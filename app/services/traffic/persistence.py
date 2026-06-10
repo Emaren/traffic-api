@@ -238,6 +238,71 @@ def _event_id(*, source_path: str, source_inode: int, line_offset: int, raw_line
     return digest[:24]
 
 
+def _browser_like_ua(ua: str) -> bool:
+    ua_lower = (ua or "").lower()
+    return any(
+        token in ua_lower
+        for token in (
+            "mozilla",
+            "chrome",
+            "safari",
+            "firefox",
+            "edg/",
+            "edge",
+            "opera",
+        )
+    )
+
+
+def _is_chain_firehose_entry(parsed: dict[str, Any]) -> bool:
+    host = normalize_host(str(parsed.get("host") or ""))
+    path = str(parsed.get("normalized_path") or "")
+    ua = str(parsed.get("ua") or "")
+
+    chain_host = host.startswith(("rpc-", "rest-", "grpc."))
+    chain_path = path.startswith(
+        (
+            "/rpc",
+            "/rpc-mainnet",
+            "/rpc-testnet",
+            "/rpc-local",
+            "/rest",
+            "/rest-mainnet",
+            "/rest-testnet",
+            "/rest-local",
+        )
+    )
+
+    if not (chain_host or chain_path):
+        return False
+
+    # Keep actual browser visits to chain surfaces; collapse node/client firehose only.
+    if _browser_like_ua(ua):
+        return False
+
+    return True
+
+
+def _chain_firehose_event_id(parsed: dict[str, Any]) -> str:
+    parsed_timestamp = parse_iso_timestamp(str(parsed.get("timestamp_iso") or ""))
+    if parsed_timestamp:
+        bucket = parsed_timestamp.strftime("%Y-%m-%dT%H:%MZ")
+    else:
+        bucket = "unknown-minute"
+
+    key = "|".join(
+        (
+            "chain-firehose-sample",
+            normalize_host(str(parsed.get("host") or "")),
+            str(parsed.get("ip") or ""),
+            str(parsed.get("ua") or ""),
+            str(parsed.get("normalized_path") or ""),
+            bucket,
+        )
+    )
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:24]
+
+
 def _prune_old_entries(connection: sqlite3.Connection) -> None:
     retention_cutoff = (
         datetime.now(timezone.utc) - timedelta(days=PERSIST_RETENTION_DAYS)
@@ -276,14 +341,19 @@ def sync_log_to_persistence(log_path: Path = LOG_PATH) -> dict[str, int | str]:
                 if not parsed:
                     continue
 
+                if _is_chain_firehose_entry(parsed):
+                    event_identifier = _chain_firehose_event_id(parsed)
+                else:
+                    event_identifier = _event_id(
+                        source_path=event_source_path,
+                        source_inode=event_source_inode,
+                        line_offset=line_offset,
+                        raw_line=line.rstrip("\n"),
+                    )
+
                 batch.append(
                     (
-                        _event_id(
-                            source_path=event_source_path,
-                            source_inode=event_source_inode,
-                            line_offset=line_offset,
-                            raw_line=line.rstrip("\n"),
-                        ),
+                        event_identifier,
                         event_source_path,
                         event_source_inode,
                         line_offset,

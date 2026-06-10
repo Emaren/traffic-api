@@ -91,7 +91,7 @@ async def lifespan(app: FastAPI):
             signal.signal(signum, request_shutdown)
 
     notification_task = asyncio.create_task(notification_worker(app))
-    warm_cache_task = None
+    warm_cache_task = asyncio.create_task(asyncio.to_thread(warm_session_snapshots))
 
     try:
         yield
