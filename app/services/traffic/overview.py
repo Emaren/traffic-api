@@ -1023,6 +1023,150 @@ def _collapse_page_burst_sessions(
 
 
 
+
+def _session_path_values(session: dict[str, Any]) -> list[str]:
+    values = [
+        *(session.get("page_sequence") or []),
+        session.get("entry_page") or "",
+        session.get("current_page") or "",
+        session.get("exit_page") or "",
+        *(session.get("burst_paths") or []),
+    ]
+    seen: set[str] = set()
+    paths: list[str] = []
+    for value in values:
+        path = str(value or "").strip()
+        if path and path not in seen:
+            seen.add(path)
+            paths.append(path)
+    return paths
+
+
+def _is_chain_signal_session(session: dict[str, Any]) -> bool:
+    joined = " ".join(path.lower() for path in _session_path_values(session))
+    return (
+        "/rest-mainnet" in joined
+        or "/rpc-mainnet" in joined
+        or "/cosmos/" in joined
+        or "/tendermint/" in joined
+        or "/blocks/latest" in joined
+        or "/node_info" in joined
+        or "/tx_search" in joined
+        or "/txs/" in joined
+        or "valoper" in joined
+        or "validators" in joined
+    )
+
+
+def _is_user_app_activity_session(session: dict[str, Any]) -> bool:
+    joined = " ".join(path.lower() for path in _session_path_values(session))
+
+    if _is_chain_signal_session(session):
+        return False
+    if session.get("known_automation"):
+        return False
+    if session.get("primary_category") == "security":
+        return False
+    if session.get("classification_state") in {"bot", "suspicious"}:
+        return False
+
+    has_staking_page = "/staking" in joined
+    has_staking_api = "/api/staking/" in joined
+    has_strong_staking_action = (
+        "/api/staking/stake" in joined
+        or "/api/staking/me" in joined
+        or "/api/staking/config" in joined
+        or "/api/staking/activity" in joined
+    )
+
+    # AoE2WAR logged-in/browser app activity often lands as API-only sessions.
+    # Treat user pings, contact-emaren, requests, and live-games polling as app
+    # activity when they are not known automation/security/chain sessions.
+    has_aoe2_identity_api = (
+        "/api/user/ping" in joined
+        or "/api/contact-emaren" in joined
+    )
+    has_aoe2_app_api = (
+        "/api/live-games" in joined
+        or "/api/requests" in joined
+        or "/api/contact-emaren" in joined
+        or "/api/user/ping" in joined
+    )
+    aoe2_app_api_count = sum(
+        1
+        for marker in (
+            "/api/live-games",
+            "/api/requests",
+            "/api/contact-emaren",
+            "/api/user/ping",
+        )
+        if marker in joined
+    )
+
+    return (
+        has_staking_page
+        or has_staking_api
+        or has_strong_staking_action
+        or has_aoe2_identity_api
+        or aoe2_app_api_count >= 2
+        or (has_aoe2_app_api and session.get("active_now"))
+    )
+
+
+def _promote_chain_signal(session: dict[str, Any]) -> dict[str, Any]:
+    promoted = dict(session)
+    promoted["verdict_label"] = "Chain Signal"
+    promoted["classification_reason_labels"] = [
+        "Chain infrastructure signal",
+        *(promoted.get("classification_reason_labels") or []),
+    ][:8]
+    promoted["classification_summary"] = (
+        "Traffic separated this as chain infrastructure/API activity. "
+        "Treat as validator, explorer, wallet, indexer, or node-client signal — not audience."
+    )
+    return promoted
+
+
+def _promote_user_app_activity(session: dict[str, Any]) -> dict[str, Any]:
+    promoted = dict(session)
+    promoted["classification_state"] = (
+        "human_confirmed"
+        if session.get("human_confirmed") or session.get("known_visitor_confirmed")
+        else "likely_human"
+    )
+    promoted["verdict_label"] = "App Activity"
+    promoted["human_confidence"] = max(70, int(session.get("human_confidence") or 0))
+    promoted["suspicious_score"] = min(35, int(session.get("suspicious_score") or 0))
+
+    joined = " ".join(path.lower() for path in _session_path_values(session))
+    activity_label = (
+        "Staking app activity"
+        if "/staking" in joined or "/api/staking/" in joined
+        else "AoE2 app activity"
+    )
+    activity_reason = (
+        "staking_app_activity"
+        if activity_label == "Staking app activity"
+        else "aoe2_app_activity"
+    )
+
+    labels = list(promoted.get("classification_reason_labels") or [])
+    labels = [label for label in labels if label not in {"Staking app activity", "AoE2 app activity"}]
+    labels.insert(0, activity_label)
+    promoted["classification_reason_labels"] = labels[:8]
+
+    reasons = list(promoted.get("classification_reasons") or [])
+    reasons = [reason for reason in reasons if reason not in {"staking_app_activity", "aoe2_app_activity"}]
+    reasons.insert(0, activity_reason)
+    promoted["classification_reasons"] = reasons[:8]
+
+    promoted["classification_summary"] = (
+        "Traffic promoted this session because it touched user-facing app routes "
+        "instead of raw chain infrastructure. Treat as app/user activity, not chain polling."
+    )
+    return promoted
+
+
 def _security_preview_paths(session: dict[str, Any]) -> list[str]:
     values = [
         *(session.get("page_sequence") or []),
@@ -1222,7 +1366,7 @@ def build_live_visitors(
 
     # Keep enough non-human/uncertain page-shaped sessions visible for operator review
     # without shipping a megabyte-scale JSON payload on every live refresh.
-    auxiliary_limit = 12
+    auxiliary_limit = 8
 
     tower_candidates = [
         session
@@ -1230,7 +1374,22 @@ def build_live_visitors(
         if session["classification_state"] in HUMAN_VISIBLE_STATES
         and session["route_kind"] == "page"
         and session.get("session_id") not in page_burst_member_ids
+        and not _is_chain_signal_session(session)
     ]
+
+    app_activity_candidates = [
+        _promote_user_app_activity(session)
+        for session in sessions
+        if _is_user_app_activity_session(session)
+        and session.get("session_id") not in page_burst_member_ids
+    ]
+
+    existing_tower_ids = {session.get("session_id") for session in tower_candidates}
+    tower_candidates.extend(
+        session
+        for session in app_activity_candidates
+        if session.get("session_id") not in existing_tower_ids
+    )
     browser_script_candidates = [
         *page_burst_clusters,
         *[
@@ -1245,23 +1404,44 @@ def build_live_visitors(
         session
         for session in sessions
         if session.get("known_automation")
+        and not _is_chain_signal_session(session)
+        and not _is_user_app_activity_session(session)
         and (session["page_count"] > 0 or session["route_kind"] == "page")
     ]
     security_candidates = [
         session
         for session in sessions
         if session["classification_state"] == "suspicious"
+        and not _is_chain_signal_session(session)
+        and not _is_user_app_activity_session(session)
         and (session["page_count"] > 0 or session["route_kind"] == "page")
     ]
 
+    chain_signal_candidates = [
+        _promote_chain_signal(session)
+        for session in sessions
+        if _is_chain_signal_session(session)
+        and session.get("session_id") not in page_burst_member_ids
+    ]
+
     tower_candidates = [session for session in tower_candidates if not_page_burst_member(session)]
+    browser_script_candidates = [
+        session
+        for session in browser_script_candidates
+        if not _is_chain_signal_session(session)
+        and not _is_user_app_activity_session(session)
+        and not_page_burst_member(session)
+    ]
     automation_candidates = [session for session in automation_candidates if not_page_burst_member(session)]
     security_candidates = [session for session in security_candidates if not_page_burst_member(session)]
+    chain_signal_candidates = [session for session in chain_signal_candidates if not_page_burst_member(session)]
 
     tower = sorted(tower_candidates, key=live_session_sort_key)[:limit]
     browser_script_preview = sorted(browser_script_candidates, key=live_session_sort_key)[:auxiliary_limit]
     automation_preview = sorted(automation_candidates, key=live_session_sort_key)[:auxiliary_limit]
     security_preview = _collapse_security_preview(sorted(security_candidates, key=live_session_sort_key)[:auxiliary_limit])
+    chain_signal_preview = sorted(chain_signal_candidates, key=live_session_sort_key)[:auxiliary_limit]
+    app_activity_preview = sorted(app_activity_candidates, key=live_session_sort_key)[:auxiliary_limit]
 
     history_candidates = sorted(tower_candidates, key=lambda item: item["ended_at"], reverse=True)
     # history_candidates is sorted newest-first by ended_at.
@@ -1289,6 +1469,16 @@ def build_live_visitors(
         key=lambda item: item.get("ended_at") or "",
         reverse=True,
     )[:auxiliary_limit]
+
+    recent_page_review_candidates = [
+        session
+        for session in recent_page_review_candidates
+        if not session.get("known_automation")
+        and session.get("classification_state") in HUMAN_VISIBLE_STATES
+        and not _is_chain_signal_session(session)
+        and not _is_user_app_activity_session(session)
+        and session.get("classification_state") not in {"bot", "browser_script", "script_burst", "suspicious"}
+    ]
 
     project_counts: list[dict[str, Any]] = []
     for project in PROJECTS:
@@ -1325,6 +1515,10 @@ def build_live_visitors(
         "automation_preview": [_compact_live_session(session) for session in automation_preview],
         "security_count": len(security_candidates),
         "security_preview": [_compact_live_session(session) for session in security_preview],
+        "chain_signal_count": len(chain_signal_candidates),
+        "chain_signal_preview": [_compact_live_session(session) for session in chain_signal_preview],
+        "app_activity_count": len(app_activity_candidates),
+        "app_activity_preview": [_compact_live_session(session) for session in app_activity_preview],
         "review_count": len(browser_script_candidates) + len(automation_candidates) + len(security_candidates),
         "review_preview": [],
         "recent_page_review_count": len(recent_page_review_candidates),
