@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Traffic watchdog every 2 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=30s
+Persistent=true
+Unit=traffic-watchdog.service
+
+[Install]
+WantedBy=timers.target

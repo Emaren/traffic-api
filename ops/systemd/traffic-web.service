@@ -1,0 +1,16 @@
+[Unit]
+Description=Traffic Web (Next.js)
+After=network.target traffic-api.service
+Requires=traffic-api.service
+
+[Service]
+User=tony
+Group=tony
+WorkingDirectory=/var/www/Traffic/traffic-app
+EnvironmentFile=/etc/traffic-web.env
+ExecStart=/usr/bin/npm run start -- --hostname 127.0.0.1 --port 3045
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

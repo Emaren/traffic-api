@@ -1,0 +1,16 @@
+[Unit]
+Description=Traffic API (FastAPI)
+After=network.target
+
+[Service]
+User=tony
+Group=tony
+WorkingDirectory=/var/www/Traffic/traffic-api
+EnvironmentFile=/etc/traffic-api.env
+ExecStart=/var/www/Traffic/traffic-api/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 3345 --timeout-keep-alive 5 --timeout-graceful-shutdown 15
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

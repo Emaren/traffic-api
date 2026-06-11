@@ -1,0 +1,8 @@
+[Unit]
+Description=Traffic public health watchdog
+After=network-online.target traffic-api.service traffic-web.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/var/www/Traffic/ops/traffic-watchdog.sh

@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh Traffic session archive for AoE2 War every 30 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=30min
+RandomizedDelaySec=2min
+AccuracySec=1min
+Persistent=true
+Unit=traffic-session-archive-aoe2hdbets.service
+
+[Install]
+WantedBy=timers.target

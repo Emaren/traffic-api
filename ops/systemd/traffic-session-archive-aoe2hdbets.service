@@ -1,0 +1,14 @@
+[Unit]
+Description=Refresh Traffic session archive for AoE2 War
+Wants=traffic-api.service
+After=traffic-api.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/var/www/Traffic/traffic-api
+Environment=PYTHONUNBUFFERED=1
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TimeoutStartSec=240
+ExecStart=/usr/bin/flock -n /run/traffic-session-archive-aoe2hdbets.lock /var/www/Traffic/traffic-api/.venv/bin/python3 scripts/rebuild_session_archive.py --project aoe2hdbets --replace
