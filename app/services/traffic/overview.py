@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from threading import Event, Lock, Thread
@@ -1674,6 +1675,124 @@ def _build_linked_visitor_profiles(
     return linked_profiles[:LINKED_VISITOR_LIMIT]
 
 
+def _load_session_archive_history(
+    *,
+    limit: int,
+    offset: int,
+    range_key: str,
+    range_config: dict[str, Any],
+    selected_project_slugs: set[str] | None,
+) -> dict[str, Any] | None:
+    if range_key != "all":
+        return None
+    if selected_project_slugs is None:
+        return None
+    if not selected_project_slugs:
+        return None
+    if not persistence_enabled():
+        return None
+
+    placeholders = ",".join("?" for _ in selected_project_slugs)
+    project_params = tuple(sorted(selected_project_slugs))
+
+    base_where = f"""
+        project_slug IN ({placeholders})
+        AND classification_state IN ('human_confirmed', 'likely_human')
+        AND route_kind = 'page'
+        AND suspicious_score < 35
+        AND known_automation = 0
+    """
+
+    try:
+        with _connect() as connection:
+            _ensure_schema(connection)
+
+            table_exists = connection.execute(
+                """
+                SELECT 1
+                FROM sqlite_master
+                WHERE type = 'table'
+                  AND name = 'traffic_session_archive'
+                """
+            ).fetchone()
+            if not table_exists:
+                return None
+
+            total_row = connection.execute(
+                f"SELECT COUNT(*) AS total FROM traffic_session_archive WHERE {base_where}",
+                project_params,
+            ).fetchone()
+            total = int(total_row["total"] if total_row else 0)
+            if total <= 0:
+                return None
+
+            oldest_row = connection.execute(
+                f"""
+                SELECT payload_json
+                FROM traffic_session_archive
+                WHERE {base_where}
+                ORDER BY first_seen_at ASC
+                LIMIT 1
+                """,
+                project_params,
+            ).fetchone()
+
+            rows = connection.execute(
+                f"""
+                SELECT payload_json
+                FROM traffic_session_archive
+                WHERE {base_where}
+                ORDER BY ended_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                project_params + (limit, offset),
+            ).fetchall()
+    except Exception:
+        return None
+
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"])
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            items.append(payload)
+
+    oldest_payload: dict[str, Any] | None = None
+    if oldest_row:
+        try:
+            loaded = json.loads(oldest_row["payload_json"])
+            if isinstance(loaded, dict):
+                oldest_payload = loaded
+        except Exception:
+            oldest_payload = None
+
+    note = "All-time is reading Traffic's persisted session archive for these matching sessions."
+    if oldest_payload:
+        note = (
+            "All-time is reading Traffic's persisted session archive for these matching sessions since "
+            f"{oldest_payload.get('first_seen_alberta')}."
+        )
+
+    return {
+        "ok": True,
+        "generated_at": iso_now(),
+        "window_hours": None,
+        "range_key": range_key,
+        "range_label": range_config["label"],
+        "coverage_mode": "session_archive",
+        "coverage_started_at": oldest_payload.get("first_seen_at") if oldest_payload else None,
+        "coverage_started_alberta": oldest_payload.get("first_seen_alberta") if oldest_payload else None,
+        "note": note,
+        "offset": offset,
+        "limit": limit,
+        "total": total,
+        "available_projects": _project_options(),
+        "items": items,
+    }
+
+
 def _project_live_feed_sessions(
     sessions: list[dict[str, Any]],
     *,
@@ -1697,6 +1816,18 @@ def build_visits_history(
     range_config = _range_config(range_key)
     window_hours = _window_hours_for_range(range_key)
     selected_project_slugs = set(project_slugs) if project_slugs is not None else None
+
+    if classification == "human_visible":
+        archived_history = _load_session_archive_history(
+            limit=limit,
+            offset=offset,
+            range_key=range_key,
+            range_config=range_config,
+            selected_project_slugs=selected_project_slugs,
+        )
+        if archived_history is not None:
+            return archived_history
+
     snapshot = _build_session_snapshot(
         window_hours=window_hours,
         project_slugs=selected_project_slugs,

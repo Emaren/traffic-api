@@ -131,6 +131,31 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             CREATE INDEX IF NOT EXISTS idx_traffic_project_daily_rollups_project_day
                 ON traffic_project_daily_rollups(project_slug, bucket_day);
 
+            CREATE TABLE IF NOT EXISTS traffic_session_archive (
+                session_id TEXT PRIMARY KEY,
+                project_slug TEXT NOT NULL,
+                project_name TEXT NOT NULL,
+                person_key TEXT NOT NULL,
+                visitor_profile_id TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                ended_at TEXT NOT NULL,
+                classification_state TEXT NOT NULL,
+                route_kind TEXT NOT NULL,
+                suspicious_score INTEGER NOT NULL DEFAULT 0,
+                known_automation INTEGER NOT NULL DEFAULT 0,
+                payload_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_traffic_session_archive_project_ended
+                ON traffic_session_archive(project_slug, ended_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_traffic_session_archive_project_class_route_ended
+                ON traffic_session_archive(project_slug, classification_state, route_kind, ended_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_traffic_session_archive_person_project_ended
+                ON traffic_session_archive(person_key, project_slug, ended_at DESC);
+
             CREATE TABLE IF NOT EXISTS traffic_known_identities (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 rule_type TEXT NOT NULL,
