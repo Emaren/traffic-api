@@ -1062,4 +1062,243 @@ def api_visits_history(
         classification=classification,
         projects=",".join(selected_projects or ()),
     )
-    
+
+
+def _ops_run(command: list[str], *, timeout: float = 2.0) -> tuple[bool, str]:
+    import subprocess
+
+    try:
+        output = subprocess.check_output(
+            command,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout,
+        )
+        return True, output.strip()
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _ops_git_status(repo_path: str) -> dict[str, object]:
+    from pathlib import Path
+
+    path = Path(repo_path)
+    if not path.exists():
+        return {
+            "path": str(path),
+            "exists": False,
+            "ok": False,
+            "error": "repo_path_missing",
+        }
+
+    def git(*args: str) -> str:
+        ok, output = _ops_run(["git", "-C", str(path), *args])
+        return output if ok else ""
+
+    status = git("status", "--porcelain")
+    commit = git("rev-parse", "--short", "HEAD")
+    branch = git("branch", "--show-current")
+    upstream = git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+
+    ahead = 0
+    behind = 0
+    if upstream:
+        counts = git("rev-list", "--left-right", "--count", f"{upstream}...HEAD")
+        parts = counts.split()
+        if len(parts) == 2 and all(part.isdigit() for part in parts):
+            behind = int(parts[0])
+            ahead = int(parts[1])
+
+    return {
+        "path": str(path),
+        "exists": True,
+        "ok": bool(commit),
+        "branch": branch,
+        "commit": commit,
+        "upstream": upstream,
+        "dirty": bool(status),
+        "dirty_count": len([line for line in status.splitlines() if line.strip()]),
+        "ahead": ahead,
+        "behind": behind,
+    }
+
+
+def _ops_systemd_status(unit: str) -> dict[str, object]:
+    ok, output = _ops_run(
+        [
+            "systemctl",
+            "show",
+            unit,
+            "--property=ActiveState,SubState,Result,ExecMainStatus,ExecMainPID,MemoryCurrent",
+            "--no-pager",
+        ]
+    )
+    if not ok:
+        return {
+            "unit": unit,
+            "ok": False,
+            "available": False,
+            "error": output,
+        }
+
+    fields: dict[str, str] = {}
+    for line in output.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            fields[key] = value
+
+    active_state = fields.get("ActiveState", "")
+    result = fields.get("Result", "")
+    return {
+        "unit": unit,
+        "ok": active_state in {"active", "activating"} and result in {"", "success"},
+        "available": True,
+        "active_state": active_state,
+        "sub_state": fields.get("SubState", ""),
+        "result": result,
+        "exec_main_status": fields.get("ExecMainStatus", ""),
+        "exec_main_pid": fields.get("ExecMainPID", ""),
+        "memory_current_bytes": int(fields["MemoryCurrent"]) if fields.get("MemoryCurrent", "").isdigit() else None,
+    }
+
+
+def _ops_archive_status(project_slug: str) -> dict[str, object]:
+    import sqlite3
+    from datetime import datetime, timezone
+
+    from app.services.traffic.config import PERSIST_DB_PATH
+
+    db_path = PERSIST_DB_PATH
+    database = {
+        "path": str(db_path),
+        "exists": db_path.exists(),
+        "size_bytes": db_path.stat().st_size if db_path.exists() else 0,
+        "size_mb": round(db_path.stat().st_size / 1024 / 1024, 2) if db_path.exists() else 0,
+    }
+
+    if not db_path.exists():
+        return {
+            "ok": False,
+            "database": database,
+            "project_slug": project_slug,
+            "error": "database_missing",
+        }
+
+    try:
+        with sqlite3.connect(db_path, timeout=5) as connection:
+            connection.row_factory = sqlite3.Row
+            table = connection.execute(
+                "SELECT name "
+                "FROM sqlite_master "
+                "WHERE type = 'table' "
+                "AND name = 'traffic_session_archive'"
+            ).fetchone()
+
+            if table is None:
+                return {
+                    "ok": False,
+                    "database": database,
+                    "project_slug": project_slug,
+                    "error": "archive_table_missing",
+                }
+
+            row = connection.execute(
+                "SELECT "
+                "COUNT(*) AS session_count, "
+                "MIN(first_seen_at) AS earliest_first_seen_at, "
+                "MAX(ended_at) AS latest_ended_at, "
+                "MAX(updated_at) AS latest_updated_at, "
+                "COUNT(DISTINCT visitor_profile_id) AS visitor_profile_count, "
+                "COUNT(DISTINCT person_key) AS person_count "
+                "FROM traffic_session_archive "
+                "WHERE project_slug = ?",
+                (project_slug,),
+            ).fetchone()
+
+            by_class = connection.execute(
+                "SELECT classification_state, COUNT(*) AS total "
+                "FROM traffic_session_archive "
+                "WHERE project_slug = ? "
+                "GROUP BY classification_state "
+                "ORDER BY total DESC",
+                (project_slug,),
+            ).fetchall()
+    except Exception as exc:
+        return {
+            "ok": False,
+            "database": database,
+            "project_slug": project_slug,
+            "error": str(exc),
+        }
+
+    latest_updated_at = row["latest_updated_at"] if row else None
+    freshness_seconds = None
+    if latest_updated_at:
+        try:
+            parsed = datetime.fromisoformat(str(latest_updated_at).replace("Z", "+00:00"))
+            freshness_seconds = max(
+                0,
+                int((datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()),
+            )
+        except Exception:
+            freshness_seconds = None
+
+    return {
+        "ok": True,
+        "database": database,
+        "project_slug": project_slug,
+        "coverage_mode": "session_archive",
+        "session_count": int(row["session_count"] or 0) if row else 0,
+        "visitor_profile_count": int(row["visitor_profile_count"] or 0) if row else 0,
+        "person_count": int(row["person_count"] or 0) if row else 0,
+        "earliest_first_seen_at": row["earliest_first_seen_at"] if row else None,
+        "latest_ended_at": row["latest_ended_at"] if row else None,
+        "latest_updated_at": latest_updated_at,
+        "freshness_seconds": freshness_seconds,
+        "classification_counts": {
+            item["classification_state"] or "unknown": int(item["total"] or 0)
+            for item in by_class
+        },
+    }
+
+
+@app.get("/api/ops/status")
+def api_ops_status(
+    project_slug: str = Query("aoe2hdbets", min_length=1, max_length=80),
+) -> dict[str, object]:
+    from pathlib import Path
+    import os
+
+    repo_root = Path(__file__).resolve().parents[1]
+    traffic_root = repo_root.parent
+    web_repo = Path(os.getenv("TRAFFIC_WEB_REPO_PATH", str(traffic_root / "traffic-app")))
+
+    archive = _ops_archive_status(project_slug)
+    units = {
+        unit: _ops_systemd_status(unit)
+        for unit in [
+            "traffic-api.service",
+            "traffic-web.service",
+            "traffic-watchdog.timer",
+            "traffic-session-archive-aoe2hdbets.timer",
+        ]
+    }
+
+    overall_ok = bool(archive.get("ok")) and all(
+        unit_status.get("ok") or unit_status.get("available") is False
+        for unit_status in units.values()
+    )
+
+    return {
+        "ok": overall_ok,
+        "generated_at": iso_now(),
+        "service": "traffic-api",
+        "version": app.version,
+        "api": _ops_git_status(str(repo_root)),
+        "web": _ops_git_status(str(web_repo)),
+        "archive": archive,
+        "units": units,
+        "shutdown_requested": get_shutdown_event(app).is_set(),
+        "active_streams": get_active_streams(app),
+    }
+
