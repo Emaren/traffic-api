@@ -1757,7 +1757,7 @@ def _load_session_archive_history(
         except Exception:
             continue
         if isinstance(payload, dict):
-            items.append(payload)
+            items.append(_compact_live_session(payload))
 
     oldest_payload: dict[str, Any] | None = None
     if oldest_row:
