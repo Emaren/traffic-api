@@ -76,7 +76,7 @@ print("bytes:", p.stat().st_size)
 if not d.get("ok"):
     raise SystemExit("archive smoke failed: ok=false")
 if d.get("coverage_mode") != "session_archive":
-    raise SystemExit(f"archive smoke failed: coverage_mode={d.get(\"coverage_mode\")}")
+    raise SystemExit("archive smoke failed: coverage_mode=" + str(d.get("coverage_mode")))
 '
 
 echo
