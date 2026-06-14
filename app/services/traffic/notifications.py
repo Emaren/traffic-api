@@ -45,6 +45,7 @@ from app.services.traffic.sessions import (
     split_session_events,
 )
 from app.services.traffic.normalize import ALLOWED_HOSTS, is_allowed_host
+from app.services.traffic.known_visitors import known_visitor_for_ip
 from app.services.traffic.visibility import list_visibility_rules
 
 ALBERTA_ZONE = ZoneInfo(ALBERTA_TZ_NAME)
@@ -1606,6 +1607,236 @@ def _record_notification_event(
     )
 
 
+
+def _load_unprocessed_browser_notification_candidates(
+    connection: Any,
+    *,
+    limit: int,
+    armed_at: str | None,
+) -> list[Any]:
+    params: list[Any] = []
+    query = """
+        SELECT
+            id,
+            received_at,
+            occurred_at,
+            host,
+            project_slug,
+            project_name,
+            path,
+            title,
+            visitor_id,
+            session_id,
+            page_view_id,
+            event_type,
+            click_label,
+            click_href,
+            ip,
+            country_code,
+            country,
+            area,
+            city,
+            max_scroll_depth_pct,
+            visible_ms
+        FROM traffic_browser_events
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM traffic_notification_events
+            WHERE traffic_notification_events.traffic_event_id = 'browser:' || traffic_browser_events.id
+        )
+          AND event_type IN ('page_view', 'click', 'outbound_click')
+    """
+    if armed_at:
+        query += " AND received_at >= ?"
+        params.append(armed_at)
+    query += " ORDER BY received_at ASC, id ASC LIMIT ?"
+    params.append(limit)
+
+    try:
+        return connection.execute(query, tuple(params)).fetchall()
+    except Exception:
+        return []
+
+
+def _browser_event_to_entry(row: Any) -> dict[str, Any]:
+    path = str(row["path"] or "/")
+    return {
+        "event_id": f"browser:{row['id']}",
+        "timestamp_iso": row["received_at"] or row["occurred_at"],
+        "normalized_path": path,
+        "route_kind": detect_route_kind(path),
+        "host": row["host"] or "",
+        "ua": "",
+    }
+
+
+def _browser_event_to_session(row: Any) -> dict[str, Any]:
+    ip = str(row["ip"] or "").strip()
+    known = known_visitor_for_ip(ip) if ip else None
+    label = str((known or {}).get("label") or "").strip()
+    detail = str((known or {}).get("detail") or "").strip()
+
+    city = str(row["city"] or "").strip()
+    area = str(row["area"] or "").strip()
+    country = str(row["country"] or "").strip()
+    country_code = str(row["country_code"] or "").strip()
+
+    visitor_alias = label or city or country or "Browser visitor"
+    person_key = f"known:{label.lower()}:{ip}" if label else f"browser:{ip or row['session_id'] or row['visitor_id'] or row['id']}"
+    visitor_profile_id = f"browser-{str(row['visitor_id'] or row['session_id'] or row['id']).replace(':', '-')}"
+
+    return {
+        "session_id": f"browser:{row['session_id'] or row['id']}",
+        "project_slug": row["project_slug"] or "unknown",
+        "project_name": row["project_name"] or "Unknown",
+        "host": row["host"] or "",
+        "person_key": person_key,
+        "visitor_profile_id": visitor_profile_id,
+        "visitor_alias": visitor_alias,
+        "ip": ip,
+        "country_code": country_code,
+        "country": country,
+        "area": area,
+        "city": city,
+        "classification_state": "human_confirmed" if label else "likely_human",
+        "verdict_label": "Confirmed Human" if label else "Likely Human",
+        "returning_visitor": False,
+        "total_project_visits": 1,
+        "projects_visited_in_window": 1,
+    }
+
+
+def _browser_notification_body(session: dict[str, Any], row: Any) -> str:
+    event_type = str(row["event_type"] or "event").replace("_", " ")
+    label = str(row["click_label"] or "").strip()
+    action = f"{event_type}: {label}" if label else event_type
+    location = ", ".join(
+        value for value in (session.get("city"), session.get("area"), session.get("country")) if value
+    ) or "Location pending"
+    return "\n".join(
+        [
+            f"{session['verdict_label']} browser signal on {row['path']}",
+            f"{action} · IP {session['ip']}",
+            location,
+        ]
+    )
+
+
+def _process_browser_notification_candidates(
+    connection: Any,
+    *,
+    settings: dict[str, Any],
+    operators: list[dict[str, Any]],
+    mutes: list[dict[str, Any]],
+    limit: int,
+) -> dict[str, int]:
+    rows = _load_unprocessed_browser_notification_candidates(
+        connection,
+        limit=limit,
+        armed_at=settings.get("armed_at"),
+    )
+
+    checked = 0
+    delivered = 0
+    suppressed = 0
+    errors = 0
+
+    for row in rows:
+        checked += 1
+        entry = _browser_event_to_entry(row)
+        session = _browser_event_to_session(row)
+
+        suppression_reason = _suppression_reason(
+            settings,
+            session,
+            entry,
+            True,
+            operators,
+            mutes,
+            connection,
+        )
+
+        title = _notification_title(session)
+        body = _browser_notification_body(session, row)
+        url = _notification_url(settings, session)
+
+        if suppression_reason:
+            _record_notification_event(
+                connection,
+                entry=entry,
+                session=session,
+                status="suppressed",
+                suppression_reason=suppression_reason,
+                notification_title=title,
+                notification_body=body,
+                destination_url=url,
+                details={
+                    "reason": suppression_reason,
+                    "source": "browser_event",
+                    "browser_event_id": int(row["id"]),
+                    "browser_event_type": row["event_type"],
+                },
+            )
+            connection.commit()
+            suppressed += 1
+            continue
+
+        try:
+            delivered_payload = _deliver_notification(
+                settings,
+                title=title,
+                body=body,
+                url=url,
+                connection=connection,
+            )
+            _record_notification_event(
+                connection,
+                entry=entry,
+                session=session,
+                status="delivered",
+                provider=delivered_payload["provider"],
+                provider_message_id=delivered_payload.get("provider_message_id", ""),
+                notification_title=title,
+                notification_body=body,
+                destination_url=url,
+                details={
+                    **delivered_payload.get("details", {}),
+                    "source": "browser_event",
+                    "browser_event_id": int(row["id"]),
+                    "browser_event_type": row["event_type"],
+                },
+            )
+            connection.commit()
+            delivered += 1
+        except Exception as exc:
+            _record_notification_event(
+                connection,
+                entry=entry,
+                session=session,
+                status="error",
+                provider=settings.get("provider", ""),
+                delivery_error=str(exc),
+                notification_title=title,
+                notification_body=body,
+                destination_url=url,
+                details={
+                    "error": str(exc),
+                    "source": "browser_event",
+                    "browser_event_id": int(row["id"]),
+                    "browser_event_type": row["event_type"],
+                },
+            )
+            connection.commit()
+            errors += 1
+
+    return {
+        "checked": checked,
+        "delivered": delivered,
+        "suppressed": suppressed,
+        "errors": errors,
+    }
+
+
 def process_notification_batch(limit: int = NOTIFICATION_BATCH_LIMIT) -> dict[str, Any]:
     if not persistence_enabled():
         return {
@@ -1733,6 +1964,18 @@ def process_notification_batch(limit: int = NOTIFICATION_BATCH_LIMIT) -> dict[st
                 )
                 connection.commit()
                 errors += 1
+
+        browser_result = _process_browser_notification_candidates(
+            connection,
+            settings=settings,
+            operators=operators,
+            mutes=mutes,
+            limit=max(25, limit),
+        )
+        checked += browser_result["checked"]
+        delivered += browser_result["delivered"]
+        suppressed += browser_result["suppressed"]
+        errors += browser_result["errors"]
 
     return {
         "mode": "running",
