@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 from app.services.traffic.config import PERSIST_DB_PATH, PERSIST_ENABLED
 from app.services.traffic.geo import get_geo_details
+from app.services.traffic.known_visitors import known_visitor_for_ip
 from app.services.traffic.normalize import is_allowed_host, normalize_host, normalize_path, project_for_host
 from app.services.traffic.parse import iso_now
 
@@ -276,12 +277,24 @@ def record_browser_event(
 def _enrich_browser_event_row(row: sqlite3.Row) -> dict[str, Any]:
     event = dict(row)
     ip = str(event.get("ip") or "").strip()
+
     if ip and not event.get("country"):
         geo = get_geo_details(ip)
         event["country_code"] = _clean_text(geo.get("country_code"), 8)
         event["country"] = _clean_text(geo.get("country"), 120)
         event["area"] = _clean_text(geo.get("area"), 120)
         event["city"] = _clean_text(geo.get("city"), 120)
+
+    known_visitor = known_visitor_for_ip(ip)
+    if known_visitor:
+        event["known_visitor_label"] = _clean_text(known_visitor.get("label"), 120)
+        event["known_visitor_detail"] = _clean_text(known_visitor.get("detail"), 120)
+        event["known_visitor_kind"] = _clean_text(known_visitor.get("identity_kind"), 40)
+    else:
+        event["known_visitor_label"] = ""
+        event["known_visitor_detail"] = ""
+        event["known_visitor_kind"] = ""
+
     return event
 
 
