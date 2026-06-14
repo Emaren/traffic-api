@@ -138,11 +138,15 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://traffic.tokentap.ca",
+        "https://aoe2war.com",
+        "https://www.aoe2war.com",
+        "https://aoe2hdbets.com",
+        "https://www.aoe2hdbets.com",
     ],
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=False,
-    allow_methods=["GET"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "X-Admin-Key"],
 )
 
 
