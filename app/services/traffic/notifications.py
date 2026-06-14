@@ -1608,6 +1608,44 @@ def _record_notification_event(
 
 
 
+
+def _is_browser_notification_worthy(row: Any) -> bool:
+    event_type = str(row["event_type"] or "").strip()
+    if event_type != "page_view":
+        return False
+
+    ip = str(row["ip"] or "").strip()
+    if not ip:
+        return False
+
+    # Keep the phone quiet for search crawler/browser-ish beacon noise.
+    # Real humans we care about will either be known identities or normal consumer IPs.
+    if ip.startswith("66.249."):
+        return False
+
+    path = str(row["path"] or "/").strip()
+    if not path or path.startswith("/api/") or path.startswith("/_next/"):
+        return False
+
+    return True
+
+
+def _browser_session_already_processed(connection: Any, row: Any) -> bool:
+    session_id = f"browser:{row['session_id'] or row['id']}"
+    existing = connection.execute(
+        """
+        SELECT id
+        FROM traffic_notification_events
+        WHERE session_id = ?
+          AND json_extract(details_json, '$.source') = 'browser_event'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (session_id,),
+    ).fetchone()
+    return existing is not None
+
+
 def _load_unprocessed_browser_notification_candidates(
     connection: Any,
     *,
@@ -1644,7 +1682,8 @@ def _load_unprocessed_browser_notification_candidates(
             FROM traffic_notification_events
             WHERE traffic_notification_events.traffic_event_id = 'browser:' || traffic_browser_events.id
         )
-          AND event_type IN ('page_view', 'click', 'outbound_click')
+          AND event_type = 'page_view'
+          AND datetime(received_at) >= datetime('now', '-15 minutes')
     """
     if armed_at:
         query += " AND received_at >= ?"
@@ -1743,6 +1782,13 @@ def _process_browser_notification_candidates(
 
     for row in rows:
         checked += 1
+
+        if not _is_browser_notification_worthy(row):
+            continue
+
+        if _browser_session_already_processed(connection, row):
+            continue
+
         entry = _browser_event_to_entry(row)
         session = _browser_event_to_session(row)
 
@@ -1809,6 +1855,13 @@ def _process_browser_notification_candidates(
             connection.commit()
             delivered += 1
         except Exception as exc:
+            # If the delivery succeeded but row recording collided, do not crash the loop
+            # and do not attempt to write the same traffic_event_id again.
+            if "UNIQUE constraint failed: traffic_notification_events.traffic_event_id" in str(exc):
+                connection.rollback()
+                suppressed += 1
+                continue
+
             _record_notification_event(
                 connection,
                 entry=entry,
