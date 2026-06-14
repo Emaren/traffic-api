@@ -11,9 +11,14 @@ from typing import Any
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from app.services.traffic.overview import clear_session_snapshot_cache, warm_session_snapshots
+from app.services.traffic.browser_events import (
+    build_beacon_javascript,
+    list_recent_browser_events,
+    record_browser_event,
+)
 from app.services.traffic.config import (
     ADMIN_API_KEY,
     NOTIFICATION_BATCH_LIMIT,
@@ -487,6 +492,43 @@ def healthz() -> dict[str, str | bool | int]:
 @app.get("/api/healthz")
 def api_healthz() -> dict[str, str | bool | int]:
     return healthz()
+
+
+@app.get("/api/beacon.js")
+def api_beacon_javascript() -> Response:
+    return Response(
+        content=build_beacon_javascript(),
+        media_type="application/javascript; charset=utf-8",
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
+@app.post("/api/ingest/browser-event")
+async def api_ingest_browser_event(
+    request: Request,
+    payload: dict = Body(...),
+) -> dict:
+    try:
+        return record_browser_event(
+            payload,
+            headers=request.headers,
+            client_host=request.client.host if request.client else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/admin/browser-events/recent")
+def api_admin_browser_events_recent(
+    limit: int = Query(default=50, ge=1, le=200),
+    project_slug: str | None = Query(default=None),
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    return {
+        "ok": True,
+        "generated_at": iso_now(),
+        "events": list_recent_browser_events(limit=limit, project_slug=project_slug),
+    }
 
 
 @app.get("/api/admin/notifications/dashboard")
