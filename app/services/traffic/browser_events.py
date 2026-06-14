@@ -7,6 +7,7 @@ from typing import Any, Mapping
 from urllib.parse import urlparse
 
 from app.services.traffic.config import PERSIST_DB_PATH, PERSIST_ENABLED
+from app.services.traffic.geo import get_geo_details
 from app.services.traffic.normalize import is_allowed_host, normalize_host, normalize_path, project_for_host
 from app.services.traffic.parse import iso_now
 
@@ -70,6 +71,10 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             dwell_ms INTEGER,
             user_agent TEXT NOT NULL DEFAULT '',
             ip TEXT NOT NULL DEFAULT '',
+            country_code TEXT NOT NULL DEFAULT '',
+            country TEXT NOT NULL DEFAULT '',
+            area TEXT NOT NULL DEFAULT '',
+            city TEXT NOT NULL DEFAULT '',
             payload_json TEXT NOT NULL DEFAULT '{}'
         );
 
@@ -86,6 +91,16 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             ON traffic_browser_events(visitor_id, received_at DESC);
         """
     )
+
+    existing_columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(traffic_browser_events)").fetchall()
+    }
+    for column_name in ("country_code", "country", "area", "city"):
+        if column_name not in existing_columns:
+            connection.execute(
+                f"ALTER TABLE traffic_browser_events ADD COLUMN {column_name} TEXT NOT NULL DEFAULT ''"
+            )
 
 
 def _clean_text(value: Any, max_len: int = _MAX_TEXT) -> str:
@@ -184,6 +199,8 @@ def record_browser_event(
     received_at = iso_now()
     occurred_at = _clean_text(payload.get("occurred_at"), 80) or received_at
     path = normalize_path(_clean_text(payload.get("path"), 500) or "/")
+    ip = _client_ip(headers, client_host)
+    geo = get_geo_details(ip)
 
     row = {
         "received_at": received_at,
@@ -215,7 +232,11 @@ def record_browser_event(
         "visible_ms": _int_or_none(payload.get("visible_ms"), minimum=0, maximum=86_400_000),
         "dwell_ms": _int_or_none(payload.get("dwell_ms"), minimum=0, maximum=86_400_000),
         "user_agent": _clean_text(headers.get("user-agent") or headers.get("User-Agent"), 500),
-        "ip": _client_ip(headers, client_host),
+        "ip": ip,
+        "country_code": _clean_text(geo.get("country_code"), 8),
+        "country": _clean_text(geo.get("country"), 120),
+        "area": _clean_text(geo.get("area"), 120),
+        "city": _clean_text(geo.get("city"), 120),
         "payload_json": _compact_payload(payload),
     }
 
@@ -228,13 +249,13 @@ def record_browser_event(
                 visitor_id, session_id, page_view_id, event_type, viewport_width, viewport_height,
                 document_height, scroll_y, scroll_depth_pct, max_scroll_depth_pct, click_x, click_y,
                 click_text, click_label, click_href, click_selector, element_role, element_tag,
-                visible_ms, dwell_ms, user_agent, ip, payload_json
+                visible_ms, dwell_ms, user_agent, ip, country_code, country, area, city, payload_json
             ) VALUES (
                 :received_at, :occurred_at, :host, :project_slug, :project_name, :path, :title, :referrer,
                 :visitor_id, :session_id, :page_view_id, :event_type, :viewport_width, :viewport_height,
                 :document_height, :scroll_y, :scroll_depth_pct, :max_scroll_depth_pct, :click_x, :click_y,
                 :click_text, :click_label, :click_href, :click_selector, :element_role, :element_tag,
-                :visible_ms, :dwell_ms, :user_agent, :ip, :payload_json
+                :visible_ms, :dwell_ms, :user_agent, :ip, :country_code, :country, :area, :city, :payload_json
             )
             """,
             row,
@@ -250,6 +271,18 @@ def record_browser_event(
         "project_slug": row["project_slug"],
         "generated_at": received_at,
     }
+
+
+def _enrich_browser_event_row(row: sqlite3.Row) -> dict[str, Any]:
+    event = dict(row)
+    ip = str(event.get("ip") or "").strip()
+    if ip and not event.get("country"):
+        geo = get_geo_details(ip)
+        event["country_code"] = _clean_text(geo.get("country_code"), 8)
+        event["country"] = _clean_text(geo.get("country"), 120)
+        event["area"] = _clean_text(geo.get("area"), 120)
+        event["city"] = _clean_text(geo.get("city"), 120)
+    return event
 
 
 def list_recent_browser_events(limit: int = 50, project_slug: str | None = None) -> list[dict[str, Any]]:
@@ -277,7 +310,7 @@ def list_recent_browser_events(limit: int = 50, project_slug: str | None = None)
                 """,
                 (limit,),
             ).fetchall()
-    return [dict(row) for row in rows]
+    return [_enrich_browser_event_row(row) for row in rows]
 
 
 def build_beacon_javascript() -> str:
