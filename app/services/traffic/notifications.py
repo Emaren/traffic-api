@@ -129,6 +129,7 @@ EXPLOIT_PATH_SNIPPETS = (
 )
 
 ACTIVE_VISIT_BURST_WINDOW_SECONDS = 75
+RECENT_NOTIFICATION_CANDIDATE_MINUTES = 120
 
 
 def admin_api_configured() -> bool:
@@ -1054,10 +1055,19 @@ def _load_unprocessed_candidates(
     """
     params.extend(sorted(ALLOWED_HOSTS))
     params.extend(sorted(INTERNAL_IGNORE_PATHS))
+    recent_cutoff = (
+        datetime.now(timezone.utc) - timedelta(minutes=RECENT_NOTIFICATION_CANDIDATE_MINUTES)
+    ).isoformat()
+    query += " AND timestamp >= ?"
+    params.append(recent_cutoff)
+
     if armed_at:
         query += " AND timestamp >= ?"
         params.append(armed_at)
-    query += " ORDER BY timestamp ASC LIMIT ?"
+
+    # Notifications are a live bell, not an archaeological dig.
+    # Process the newest candidate first so fresh humans do not sit behind old backlog.
+    query += " ORDER BY timestamp DESC LIMIT ?"
     params.append(limit)
 
     rows = connection.execute(query, tuple(params)).fetchall()

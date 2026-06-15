@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import datetime as _traffic_dt
+import hashlib
 import re
 import sqlite3
 from typing import Any, Mapping
@@ -298,6 +300,143 @@ def _enrich_browser_event_row(row: sqlite3.Row) -> dict[str, Any]:
     return event
 
 
+
+AOE2WAR_STORY_HOSTS = (
+    "aoe2war.com",
+    "www.aoe2war.com",
+    "aoe2hdbets.com",
+    "www.aoe2hdbets.com",
+)
+
+
+def _stable_negative_id(value: str) -> int:
+    digest = hashlib.sha1(value.encode("utf-8")).hexdigest()[:12]
+    return -int(digest, 16)
+
+
+def _synthetic_server_story_events(
+    connection: sqlite3.Connection,
+    *,
+    limit: int,
+    project_slug: str | None,
+    before_received_at: str | None,
+    since_hours: int,
+) -> list[dict[str, Any]]:
+    # Browser beacons are ideal, but some real users only appear in access logs.
+    # These synthetic page_view rows let the Visitor Stories tile show those humans too.
+    if project_slug and project_slug != "aoe2hdbets":
+        return []
+
+    cutoff = (
+        _traffic_dt.datetime.now(_traffic_dt.timezone.utc)
+        - _traffic_dt.timedelta(hours=since_hours)
+    ).isoformat()
+
+    clauses = [
+        "timestamp >= ?",
+        "host IN ({})".format(",".join("?" for _ in AOE2WAR_STORY_HOSTS)),
+        "CAST(status AS INTEGER) >= 200",
+        "CAST(status AS INTEGER) < 400",
+        "normalized_path NOT LIKE '/api/%'",
+        "normalized_path NOT LIKE '/_next/%'",
+        "normalized_path NOT LIKE '/downloads/%'",
+        "normalized_path NOT LIKE '/icons/%'",
+        "normalized_path NOT IN ('/robots.txt', '/favicon.ico', '/manifest.webmanifest')",
+        """
+        NOT EXISTS (
+            SELECT 1
+            FROM traffic_browser_events b
+            WHERE b.ip = traffic_entries.ip
+              AND b.path = traffic_entries.normalized_path
+              AND datetime(b.received_at) >= datetime(traffic_entries.timestamp, '-5 minutes')
+              AND datetime(b.received_at) <= datetime(traffic_entries.timestamp, '+5 minutes')
+        )
+        """,
+    ]
+    params: list[Any] = [cutoff, *AOE2WAR_STORY_HOSTS]
+
+    if before_received_at:
+        clauses.append("timestamp < ?")
+        params.append(before_received_at)
+
+    rows = connection.execute(
+        f"""
+        SELECT
+            rowid AS synthetic_rowid,
+            event_id,
+            timestamp,
+            host,
+            normalized_path,
+            ip,
+            ua,
+            referrer,
+            status
+        FROM traffic_entries
+        WHERE {" AND ".join(clauses)}
+        ORDER BY timestamp DESC, rowid DESC
+        LIMIT ?
+        """,
+        (*params, limit),
+    ).fetchall()
+
+    events: list[dict[str, Any]] = []
+    for row in rows:
+        ip = str(row["ip"] or "").strip()
+        path = normalize_path(str(row["normalized_path"] or "/"))
+        geo = get_geo_details(ip)
+        known = known_visitor_for_ip(ip) if ip else None
+        synthetic_key = f"server:{row['event_id'] or row['synthetic_rowid']}"
+
+        events.append(
+            {
+                "id": _stable_negative_id(synthetic_key),
+                "received_at": row["timestamp"],
+                "occurred_at": row["timestamp"],
+                "host": row["host"] or "aoe2war.com",
+                "project_slug": "aoe2hdbets",
+                "project_name": "AoE2 War",
+                "path": path,
+                "title": "Server-observed page visit",
+                "referrer": row["referrer"] or "",
+                "visitor_id": f"server:{ip}",
+                "session_id": f"server:{ip}:{str(row['timestamp'] or '')[:13]}",
+                "page_view_id": synthetic_key,
+                "event_type": "page_view",
+                "viewport_width": 0,
+                "viewport_height": 0,
+                "document_height": 0,
+                "scroll_depth_pct": 0,
+                "max_scroll_depth_pct": 0,
+                "click_x": None,
+                "click_y": None,
+                "click_label": "",
+                "click_href": "",
+                "visibility_state": "",
+                "visible_ms": 0,
+                "dwell_ms": 0,
+                "user_agent": row["ua"] or "",
+                "ip": ip,
+                "country_code": _clean_text(geo.get("country_code"), 8),
+                "country": _clean_text(geo.get("country"), 120),
+                "area": _clean_text(geo.get("area"), 120),
+                "city": _clean_text(geo.get("city"), 120),
+                "known_visitor_label": _clean_text((known or {}).get("label"), 120) if known else "",
+                "known_visitor_detail": _clean_text((known or {}).get("detail"), 120) if known else "",
+                "known_visitor_kind": _clean_text((known or {}).get("identity_kind"), 40) if known else "",
+                "payload_json": json.dumps(
+                    {
+                        "source": "server_access_log",
+                        "traffic_event_id": row["event_id"],
+                        "status": row["status"],
+                    },
+                    separators=(",", ":"),
+                ),
+            }
+        )
+
+    return events
+
+
 def list_recent_browser_events(
     limit: int = 50,
     project_slug: str | None = None,
@@ -336,7 +475,25 @@ def list_recent_browser_events(
             (*params, limit),
         ).fetchall()
 
-    return [_enrich_browser_event_row(row) for row in rows]
+        events = [_enrich_browser_event_row(row) for row in rows]
+        events.extend(
+            _synthetic_server_story_events(
+                connection,
+                limit=limit,
+                project_slug=project_slug,
+                before_received_at=before_received_at,
+                since_hours=since_hours,
+            )
+        )
+
+    events.sort(
+        key=lambda event: (
+            str(event.get("received_at") or ""),
+            int(event.get("id") or 0),
+        ),
+        reverse=True,
+    )
+    return events[:limit]
 
 
 def build_beacon_javascript() -> str:
