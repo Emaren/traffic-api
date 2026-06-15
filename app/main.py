@@ -33,6 +33,7 @@ from app.services.traffic.known_visitors import (
 from app.services.traffic.notifications import (
     admin_api_configured,
     build_notification_dashboard,
+    list_notification_events_page,
     create_operator_identity,
     create_notification_mute,
     delete_operator_identity,
@@ -552,6 +553,28 @@ def api_admin_notifications_dashboard(
     _: None = Depends(require_admin_api_key),
 ) -> dict:
     return build_notification_dashboard(loop_state=get_notification_loop_state(request.app))
+
+
+@app.get("/api/admin/notifications/events")
+def api_admin_notification_events(
+    limit: int = Query(default=120, ge=1, le=300),
+    before_event_timestamp: str | None = Query(default=None),
+    since_hours: int = Query(default=24, ge=1, le=168),
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    events = list_notification_events_page(
+        limit=limit,
+        before_event_timestamp=before_event_timestamp,
+        since_hours=since_hours,
+    )
+    return {
+        "ok": True,
+        "generated_at": iso_now(),
+        "events": events,
+        "has_more": len(events) >= limit,
+        "next_before_event_timestamp": events[-1]["event_timestamp"] if events else None,
+        "since_hours": since_hours,
+    }
 
 
 @app.put("/api/admin/notifications/settings")

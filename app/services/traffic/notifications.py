@@ -882,6 +882,37 @@ def list_notification_events(limit: int = 100) -> list[dict[str, Any]]:
     return events
 
 
+
+def list_notification_events_page(
+    *,
+    limit: int = 120,
+    before_event_timestamp: str | None = None,
+    since_hours: int = 24,
+) -> list[dict[str, Any]]:
+    limit = max(1, min(int(limit or 120), 300))
+    since_hours = max(1, min(int(since_hours or 24), 168))
+
+    # Reuse the existing row serializer, then page in-memory.
+    # The delivery log is already throttled to visits, so 1500 is plenty for the cockpit window.
+    all_events = list_notification_events(limit=1500)
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+    before_time = parse_iso_timestamp(before_event_timestamp) if before_event_timestamp else None
+
+    filtered: list[dict[str, Any]] = []
+    for event in all_events:
+        event_time = parse_iso_timestamp(event.get("event_timestamp"))
+        if not event_time:
+            continue
+        if event_time < cutoff:
+            continue
+        if before_time and event_time >= before_time:
+            continue
+        filtered.append(event)
+
+    return filtered[:limit]
+
+
 def _notification_stats() -> dict[str, Any]:
     with _connect() as connection:
         _ensure_schema(connection)
@@ -1447,7 +1478,12 @@ def _send_web_push(
         except WebPushException as exc:
             status_code = getattr(exc.response, "status_code", None)
             message = str(exc)
-            deactivate = status_code in {404, 410}
+            deactivate = (
+                status_code in {400, 403, 404, 410}
+                or "BadJwtToken" in message
+                or "expired" in message.lower()
+                or "unauthorized" in message.lower()
+            )
             subscription_results.append(
                 {
                     "endpoint": endpoint,
