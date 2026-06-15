@@ -308,6 +308,40 @@ AOE2WAR_STORY_HOSTS = (
     "www.aoe2hdbets.com",
 )
 
+CHAIN_STORY_HOST_PREFIXES = ("rpc-", "rest-")
+CHAIN_STORY_PATH_PREFIXES = (
+    "/rpc",
+    "/rpc-mainnet",
+    "/rpc-testnet",
+    "/rest-mainnet",
+    "/rest-testnet",
+    "/cosmos/",
+    "/ibc/",
+    "/abci_",
+    "/blockchain",
+    "/block/",
+    "/blocks",
+    "/status",
+    "/validators",
+    "/tx_search",
+    "/broadcast_tx",
+)
+
+
+def _is_chain_story_host(host: str | None) -> bool:
+    lowered = (host or "").strip().lower()
+    return lowered.startswith(CHAIN_STORY_HOST_PREFIXES)
+
+
+def _is_chain_story_path(path: str | None) -> bool:
+    lowered = (path or "").strip().lower()
+    return any(lowered == prefix or lowered.startswith(prefix + "/") for prefix in CHAIN_STORY_PATH_PREFIXES)
+
+
+def _is_chain_story_event(event: dict[str, Any]) -> bool:
+    return _is_chain_story_host(event.get("host")) or _is_chain_story_path(event.get("path"))
+
+
 
 def _stable_negative_id(value: str) -> int:
     digest = hashlib.sha1(value.encode("utf-8")).hexdigest()[:12]
@@ -335,6 +369,22 @@ def _synthetic_server_story_events(
     clauses = [
         "timestamp >= ?",
         "host IN ({})".format(",".join("?" for _ in AOE2WAR_STORY_HOSTS)),
+        "host NOT LIKE 'rpc-%'",
+        "host NOT LIKE 'rest-%'",
+        "normalized_path NOT LIKE '/rpc%'",
+        "normalized_path NOT LIKE '/rpc-mainnet/%'",
+        "normalized_path NOT LIKE '/rpc-testnet/%'",
+        "normalized_path NOT LIKE '/rest-mainnet/%'",
+        "normalized_path NOT LIKE '/rest-testnet/%'",
+        "normalized_path NOT LIKE '/cosmos/%'",
+        "normalized_path NOT LIKE '/ibc/%'",
+        "normalized_path NOT LIKE '/abci_%'",
+        "normalized_path NOT LIKE '/blockchain%'",
+        "normalized_path NOT LIKE '/blocks%'",
+        "normalized_path NOT LIKE '/status%'",
+        "normalized_path NOT LIKE '/validators%'",
+        "normalized_path NOT LIKE '/tx_search%'",
+        "normalized_path NOT LIKE '/broadcast_tx%'",
         "CAST(status AS INTEGER) >= 200",
         "CAST(status AS INTEGER) < 400",
         "normalized_path NOT LIKE '/api/%'",
@@ -376,13 +426,18 @@ def _synthetic_server_story_events(
         ORDER BY timestamp DESC, rowid DESC
         LIMIT ?
         """,
-        (*params, limit),
+        (*params, max(limit * 30, 3000)),
     ).fetchall()
 
     events: list[dict[str, Any]] = []
     for row in rows:
         ip = str(row["ip"] or "").strip()
+        host = str(row["host"] or "").strip()
         path = normalize_path(str(row["normalized_path"] or "/"))
+
+        if _is_chain_story_host(host) or _is_chain_story_path(path):
+            continue
+
         geo = get_geo_details(ip)
         known = known_visitor_for_ip(ip) if ip else None
         synthetic_key = f"server:{row['event_id'] or row['synthetic_rowid']}"
@@ -485,6 +540,8 @@ def list_recent_browser_events(
                 since_hours=since_hours,
             )
         )
+
+    events = [event for event in events if not _is_chain_story_event(event)]
 
     events.sort(
         key=lambda event: (

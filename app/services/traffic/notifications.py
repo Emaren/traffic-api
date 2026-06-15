@@ -130,6 +130,32 @@ EXPLOIT_PATH_SNIPPETS = (
 
 ACTIVE_VISIT_BURST_WINDOW_SECONDS = 75
 RECENT_NOTIFICATION_CANDIDATE_MINUTES = 120
+CHAIN_NOTIFICATION_HOST_PREFIXES = ("rpc-", "rest-")
+CHAIN_NOTIFICATION_PATH_PREFIXES = (
+    "/rpc",
+    "/rpc-mainnet",
+    "/rpc-testnet",
+    "/rest-mainnet",
+    "/rest-testnet",
+    "/cosmos/",
+    "/ibc/",
+    "/abci_",
+    "/blockchain",
+    "/block/",
+    "/blocks",
+    "/status",
+    "/validators",
+    "/tx_search",
+    "/broadcast_tx",
+)
+
+
+def _is_chain_notification_entry(entry: dict[str, Any]) -> bool:
+    host = str(entry.get("host") or "").strip().lower()
+    path = str(entry.get("normalized_path") or entry.get("raw_path") or "").strip().lower()
+    if host.startswith(CHAIN_NOTIFICATION_HOST_PREFIXES):
+        return True
+    return any(path == prefix or path.startswith(prefix + "/") for prefix in CHAIN_NOTIFICATION_PATH_PREFIXES)
 
 
 def admin_api_configured() -> bool:
@@ -1052,6 +1078,22 @@ def _load_unprocessed_candidates(
         )
           AND host IN (""" + allowed_placeholders + """)
           AND normalized_path NOT IN (""" + ignored_path_placeholders + """)
+          AND host NOT LIKE 'rpc-%'
+          AND host NOT LIKE 'rest-%'
+          AND normalized_path NOT LIKE '/rpc%'
+          AND normalized_path NOT LIKE '/rpc-mainnet/%'
+          AND normalized_path NOT LIKE '/rpc-testnet/%'
+          AND normalized_path NOT LIKE '/rest-mainnet/%'
+          AND normalized_path NOT LIKE '/rest-testnet/%'
+          AND normalized_path NOT LIKE '/cosmos/%'
+          AND normalized_path NOT LIKE '/ibc/%'
+          AND normalized_path NOT LIKE '/abci_%'
+          AND normalized_path NOT LIKE '/blockchain%'
+          AND normalized_path NOT LIKE '/blocks%'
+          AND normalized_path NOT LIKE '/status%'
+          AND normalized_path NOT LIKE '/validators%'
+          AND normalized_path NOT LIKE '/tx_search%'
+          AND normalized_path NOT LIKE '/broadcast_tx%'
     """
     params.extend(sorted(ALLOWED_HOSTS))
     params.extend(sorted(INTERNAL_IGNORE_PATHS))
@@ -1074,7 +1116,7 @@ def _load_unprocessed_candidates(
     candidates: list[dict[str, Any]] = []
     for row in rows:
         parsed = _entry_from_row(row)
-        if parsed:
+        if parsed and not _is_chain_notification_entry(parsed):
             candidates.append(parsed)
     return candidates
 
@@ -1107,6 +1149,7 @@ def _load_person_recent_entries(
         FROM traffic_entries
         WHERE ip = ? AND ua = ? AND timestamp >= ?
         ORDER BY timestamp ASC
+        LIMIT 500
         """,
         (ip, ua, cutoff),
     ).fetchall()
@@ -1131,7 +1174,7 @@ def _find_session_for_entry(
         connection,
         ip=entry["ip"],
         ua=entry["ua"],
-        window_hours=24,
+        window_hours=2,
     )
     if not recent_entries:
         return None, False
@@ -1224,6 +1267,8 @@ def _suppression_reason(
     )
     if operator_identity and policy["suppress_operator_traffic"]:
         return "operator_traffic"
+    if _is_chain_notification_entry(entry):
+        return "chain_endpoint_filter"
     if policy["page_hits_only"] and entry["route_kind"] != "page":
         return "page_only_filter"
     if entry["route_kind"] == "page" and not is_primary_navigation_event:
