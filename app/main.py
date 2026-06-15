@@ -526,12 +526,23 @@ async def api_ingest_browser_event(
 def api_admin_browser_events_recent(
     limit: int = Query(default=50, ge=1, le=200),
     project_slug: str | None = Query(default=None),
+    before_received_at: str | None = Query(default=None),
+    since_hours: int = Query(default=24, ge=1, le=168),
     _: None = Depends(require_admin_api_key),
 ) -> dict:
+    events = list_recent_browser_events(
+        limit=limit,
+        project_slug=project_slug,
+        before_received_at=before_received_at,
+        since_hours=since_hours,
+    )
     return {
         "ok": True,
         "generated_at": iso_now(),
-        "events": list_recent_browser_events(limit=limit, project_slug=project_slug),
+        "events": events,
+        "has_more": len(events) >= limit,
+        "next_before_received_at": events[-1]["received_at"] if events else None,
+        "since_hours": since_hours,
     }
 
 

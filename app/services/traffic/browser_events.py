@@ -298,31 +298,44 @@ def _enrich_browser_event_row(row: sqlite3.Row) -> dict[str, Any]:
     return event
 
 
-def list_recent_browser_events(limit: int = 50, project_slug: str | None = None) -> list[dict[str, Any]]:
+def list_recent_browser_events(
+    limit: int = 50,
+    project_slug: str | None = None,
+    before_received_at: str | None = None,
+    since_hours: int = 24,
+) -> list[dict[str, Any]]:
     if not PERSIST_ENABLED:
         return []
+
     limit = max(1, min(int(limit or 50), 200))
+    since_hours = max(1, min(int(since_hours or 24), 168))
+
+    clauses = ["datetime(received_at) >= datetime('now', ?)"]
+    params: list[Any] = [f"-{since_hours} hours"]
+
+    if project_slug:
+        clauses.append("project_slug = ?")
+        params.append(project_slug)
+
+    if before_received_at:
+        clauses.append("received_at < ?")
+        params.append(before_received_at)
+
+    where_sql = " AND ".join(clauses)
+
     with _connect() as connection:
         _ensure_schema(connection)
-        if project_slug:
-            rows = connection.execute(
-                """
-                SELECT * FROM traffic_browser_events
-                WHERE project_slug = ?
-                ORDER BY received_at DESC, id DESC
-                LIMIT ?
-                """,
-                (project_slug, limit),
-            ).fetchall()
-        else:
-            rows = connection.execute(
-                """
-                SELECT * FROM traffic_browser_events
-                ORDER BY received_at DESC, id DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
+        rows = connection.execute(
+            f"""
+            SELECT *
+            FROM traffic_browser_events
+            WHERE {where_sql}
+            ORDER BY received_at DESC, id DESC
+            LIMIT ?
+            """,
+            (*params, limit),
+        ).fetchall()
+
     return [_enrich_browser_event_row(row) for row in rows]
 
 
