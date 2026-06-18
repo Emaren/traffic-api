@@ -2382,6 +2382,14 @@ def build_project_human_series(
     first_bucket = _align_bucket(effective_start, bucket_minutes)
     last_bucket = _align_bucket(now, bucket_minutes)
 
+    # Keep recent live dashboard graphs on a fixed visual canvas. Without this,
+    # the 24h graph shrinks when durable coverage starts inside the range.
+    if range_key == "24h" and window_hours:
+        expected_bucket_count = int((window_hours * 60) / bucket_minutes)
+        first_bucket = last_bucket - timedelta(
+            minutes=bucket_minutes * max(expected_bucket_count - 1, 0)
+        )
+
     bucket_list: list[datetime] = []
     cursor = first_bucket
     while cursor <= last_bucket:
