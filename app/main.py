@@ -143,11 +143,13 @@ app.add_middleware(
         "https://www.aoe2war.com",
         "https://aoe2hdbets.com",
         "https://www.aoe2hdbets.com",
+        "https://aoe2dewarwagers.com",
+        "https://www.aoe2dewarwagers.com",
     ],
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "X-Admin-Key"],
+    allow_headers=["*"],
 )
 
 
