@@ -5,6 +5,8 @@ import datetime as _traffic_dt
 import hashlib
 import re
 import sqlite3
+import threading
+import time
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
@@ -27,6 +29,16 @@ CORE_EVENT_TYPES = {
     "page_hide",
     "visibility_change",
 }
+
+
+_SYNTHETIC_STORY_CACHE_TTL_SECONDS = 5.0
+_SYNTHETIC_STORY_CACHE_MAX_KEYS = 64
+_SYNTHETIC_STORY_CACHE_LOCK = threading.Lock()
+_SYNTHETIC_STORY_CACHE: dict[tuple[int, str, str, int], tuple[float, list[dict[str, Any]]]] = {}
+
+
+def _copy_synthetic_story_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [dict(event) for event in events]
 
 
 def _connect() -> sqlite3.Connection:
@@ -492,6 +504,60 @@ def _synthetic_server_story_events(
     return events
 
 
+def _cached_synthetic_server_story_events(
+    connection: sqlite3.Connection,
+    *,
+    limit: int,
+    project_slug: str | None,
+    before_received_at: str | None,
+    since_hours: int,
+) -> list[dict[str, Any]]:
+    # The Admin Browser Events panel can poll this endpoint several times in quick
+    # succession. Building the synthetic server story scans access-log rows and
+    # enriches IP/geo/known visitor context, so protect the API from stampedes.
+    cache_key = (
+        int(limit or 50),
+        str(project_slug or ""),
+        str(before_received_at or ""),
+        int(since_hours or 24),
+    )
+    now = time.monotonic()
+
+    with _SYNTHETIC_STORY_CACHE_LOCK:
+        cached = _SYNTHETIC_STORY_CACHE.get(cache_key)
+        if cached and cached[0] > now:
+            return _copy_synthetic_story_events(cached[1])
+
+        events = _synthetic_server_story_events(
+            connection,
+            limit=limit,
+            project_slug=project_slug,
+            before_received_at=before_received_at,
+            since_hours=since_hours,
+        )
+
+        if len(_SYNTHETIC_STORY_CACHE) >= _SYNTHETIC_STORY_CACHE_MAX_KEYS:
+            expired_keys = [
+                key for key, value in _SYNTHETIC_STORY_CACHE.items()
+                if value[0] <= now
+            ]
+            for key in expired_keys:
+                _SYNTHETIC_STORY_CACHE.pop(key, None)
+
+            if len(_SYNTHETIC_STORY_CACHE) >= _SYNTHETIC_STORY_CACHE_MAX_KEYS:
+                oldest_key = min(
+                    _SYNTHETIC_STORY_CACHE,
+                    key=lambda key: _SYNTHETIC_STORY_CACHE[key][0],
+                )
+                _SYNTHETIC_STORY_CACHE.pop(oldest_key, None)
+
+        _SYNTHETIC_STORY_CACHE[cache_key] = (
+            now + _SYNTHETIC_STORY_CACHE_TTL_SECONDS,
+            _copy_synthetic_story_events(events),
+        )
+        return _copy_synthetic_story_events(events)
+
+
 def list_recent_browser_events(
     limit: int = 50,
     project_slug: str | None = None,
@@ -532,7 +598,7 @@ def list_recent_browser_events(
 
         events = [_enrich_browser_event_row(row) for row in rows]
         events.extend(
-            _synthetic_server_story_events(
+            _cached_synthetic_server_story_events(
                 connection,
                 limit=limit,
                 project_slug=project_slug,
