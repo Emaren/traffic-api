@@ -46,6 +46,7 @@ from zoneinfo import ZoneInfo
 
 ALBERTA_ZONE = ZoneInfo(ALBERTA_TZ_NAME)
 PROJECT_GRAPH_RANGES: dict[str, dict[str, Any]] = {
+    "12h": {"label": "12 Hours", "window_hours": 12},
     "24h": {"label": "24 Hours", "window_hours": 24},
     "7d": {"label": "1 Week", "window_hours": 24 * 7},
     "30d": {"label": "1 Month", "window_hours": 24 * 30},
@@ -358,7 +359,7 @@ def _project_options() -> list[dict[str, str]]:
     return [{"slug": project["slug"], "name": project["name"]} for project in PROJECTS]
 
 
-def build_overview(range_key: str = "24h") -> dict[str, Any]:
+def build_overview(range_key: str = "12h") -> dict[str, Any]:
     range_config = _range_config(range_key)
     window_hours = _window_hours_for_range(range_key)
     recent_entries, source_mode = collect_recent_entries_with_source(window_hours=window_hours)
@@ -2038,7 +2039,7 @@ def _human_signal_graph_sessions(sessions: list[dict[str, Any]]) -> list[dict[st
 
 
 def _range_config(range_key: str) -> dict[str, Any]:
-    return PROJECT_GRAPH_RANGES.get(range_key, PROJECT_GRAPH_RANGES["24h"])
+    return PROJECT_GRAPH_RANGES.get(range_key, PROJECT_GRAPH_RANGES["12h"])
 
 
 def _window_hours_for_range(range_key: str) -> int | None:
@@ -2253,13 +2254,13 @@ def _project_graph_all_time_rollup_payload(*, project_slug: str) -> dict[str, An
 def _project_graph_payload(
     *,
     project_slug: str,
-    range_key: str = "24h",
+    range_key: str = "12h",
     bucket_minutes_override: int | None = None,
 ) -> dict[str, Any]:
     if range_key == "all":
         return _project_graph_all_time_rollup_payload(project_slug=project_slug)
 
-    range_config = PROJECT_GRAPH_RANGES.get(range_key, PROJECT_GRAPH_RANGES["24h"])
+    range_config = PROJECT_GRAPH_RANGES.get(range_key, PROJECT_GRAPH_RANGES["12h"])
     window_hours = range_config["window_hours"]
     snapshot = _build_session_snapshot(
         window_hours=window_hours,
@@ -2287,7 +2288,7 @@ def _project_graph_payload(
 
     # Keep recent project graphs on a fixed visual canvas. Without this,
     # the 24h graph shrinks when durable coverage starts inside the range.
-    if range_key == "24h" and window_hours:
+    if range_key in {"12h", "24h"} and window_hours:
         expected_bucket_count = int((window_hours * 60) / bucket_minutes)
         first_bucket = last_bucket - timedelta(
             minutes=bucket_minutes * max(expected_bucket_count - 1, 0)
@@ -2316,7 +2317,7 @@ def _project_graph_payload(
         elif source_mode == "durable_store":
             note = "All-time view is ready, but this project has no stored visits yet."
     elif earliest_entry_at and requested_start and earliest_entry_at > requested_start:
-        if range_key == "24h":
+        if range_key in {"12h", "24h"}:
             note = (
                 f"Durable storage for this project currently begins at "
                 f"{_format_alberta_timestamp(earliest_entry_at)}; earlier buckets are shown as zero."
@@ -2357,10 +2358,10 @@ def _project_graph_payload(
 
 def build_project_human_series(
     *,
-    range_key: str = "24h",
+    range_key: str = "12h",
     bucket_minutes_override: int | None = None,
 ) -> dict[str, Any]:
-    range_config = PROJECT_GRAPH_RANGES.get(range_key, PROJECT_GRAPH_RANGES["24h"])
+    range_config = PROJECT_GRAPH_RANGES.get(range_key, PROJECT_GRAPH_RANGES["12h"])
     window_hours = range_config["window_hours"]
     snapshot = _build_session_snapshot(window_hours=window_hours)
     source_mode = snapshot["source_mode"]
@@ -2384,7 +2385,7 @@ def build_project_human_series(
 
     # Keep recent live dashboard graphs on a fixed visual canvas. Without this,
     # the 24h graph shrinks when durable coverage starts inside the range.
-    if range_key == "24h" and window_hours:
+    if range_key in {"12h", "24h"} and window_hours:
         expected_bucket_count = int((window_hours * 60) / bucket_minutes)
         first_bucket = last_bucket - timedelta(
             minutes=bucket_minutes * max(expected_bucket_count - 1, 0)
@@ -2478,7 +2479,7 @@ def build_project_human_series(
 def build_project_graph(
     *,
     project_slug: str,
-    range_key: str = "24h",
+    range_key: str = "12h",
 ) -> dict[str, Any]:
     project = next((item for item in PROJECTS if item["slug"] == project_slug), None)
     if not project:
