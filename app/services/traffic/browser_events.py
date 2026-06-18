@@ -104,6 +104,12 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_traffic_browser_events_visitor_received
             ON traffic_browser_events(visitor_id, received_at DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_traffic_browser_events_ip_path_received
+            ON traffic_browser_events(ip, path, received_at);
+
+        CREATE INDEX IF NOT EXISTS idx_traffic_entries_story_hosts_recent
+            ON traffic_entries(host, timestamp DESC, normalized_path, ip);
         """
     )
 
@@ -552,7 +558,7 @@ def _cached_synthetic_server_story_events(
                 _SYNTHETIC_STORY_CACHE.pop(oldest_key, None)
 
         _SYNTHETIC_STORY_CACHE[cache_key] = (
-            now + _SYNTHETIC_STORY_CACHE_TTL_SECONDS,
+            time.monotonic() + _SYNTHETIC_STORY_CACHE_TTL_SECONDS,
             _copy_synthetic_story_events(events),
         )
         return _copy_synthetic_story_events(events)
