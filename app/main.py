@@ -781,7 +781,7 @@ def api_admin_web_push_subscription_delete(
 
 @app.get("/api/overview")
 def api_overview(
-    range_key: str = Query("24h", pattern="^(24h|7d|30d|all)$"),
+    range_key: str = Query("24h", pattern="^(12h|24h|7d|30d|all)$"),
 ) -> dict:
     payload = cached_response(
         "overview",
@@ -809,13 +809,13 @@ def api_overview(
 
 @app.get("/api/summary")
 def api_summary(
-    range_key: str = Query("24h", pattern="^(24h|7d|30d|all)$"),
+    range_key: str = Query("24h", pattern="^(12h|24h|7d|30d|all)$"),
 ) -> dict:
     return api_overview(range_key=range_key)
 
 @app.get("/api/projects")
 def api_projects(
-    range_key: str = Query("24h", pattern="^(24h|7d|30d|all)$"),
+    range_key: str = Query("24h", pattern="^(12h|24h|7d|30d|all)$"),
 ) -> list[dict]:
     return cached_response(
         "overview",
@@ -854,7 +854,7 @@ def api_project_detail(
 @app.get("/api/projects/{project_slug}/graph")
 def api_project_graph(
     project_slug: str,
-    range_key: str = Query("24h", pattern="^(24h|7d|30d|all)$"),
+    range_key: str = Query("24h", pattern="^(12h|24h|7d|30d|all)$"),
 ) -> dict:
     if not any(project["slug"] == project_slug for project in PROJECTS):
         raise HTTPException(status_code=404, detail="Unknown project")
@@ -1028,7 +1028,7 @@ def api_live_visitors_stream(
 @app.get("/api/visitors/{visitor_id}")
 def api_visitor_profile(
     visitor_id: str,
-    range_key: str = Query("all", pattern="^(24h|7d|30d|all)$"),
+    range_key: str = Query("all", pattern="^(12h|24h|7d|30d|all)$"),
 ) -> dict:
     return cached_response(
         "visitor_profile",
@@ -1046,7 +1046,7 @@ def api_visitor_profile(
 async def api_visitor_profile_stream(
     request: Request,
     visitor_id: str,
-    range_key: str = Query("all", pattern="^(24h|7d|30d|all)$"),
+    range_key: str = Query("all", pattern="^(12h|24h|7d|30d|all)$"),
     poll_seconds: float = Query(1.5, ge=0.5, le=10.0),
     heartbeat_seconds: int = Query(20, ge=5, le=60),
 ) -> StreamingResponse:
@@ -1082,7 +1082,7 @@ async def api_visitor_profile_stream(
 
 @app.get("/api/project-human-series")
 def api_project_human_series(
-    range_key: str = Query("24h", pattern="^(24h|7d|30d|all)$"),
+    range_key: str = Query("24h", pattern="^(12h|24h|7d|30d|all)$"),
     bucket_minutes: int | None = Query(None, ge=1, le=1440),
 ) -> dict:
     return cached_response(
@@ -1101,7 +1101,7 @@ def api_project_human_series(
 def api_visits_history(
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    range_key: str = Query("all", pattern="^(24h|7d|30d|all)$"),
+    range_key: str = Query("all", pattern="^(12h|24h|7d|30d|all)$"),
     classification: str | None = Query(None),
     project: str | None = Query(None),
     projects: str | None = Query(None),
