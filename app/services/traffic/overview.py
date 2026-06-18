@@ -2285,6 +2285,14 @@ def _project_graph_payload(
     first_bucket = _align_bucket(effective_start, bucket_minutes)
     last_bucket = _align_bucket(now, bucket_minutes)
 
+    # Keep recent project graphs on a fixed visual canvas. Without this,
+    # the 24h graph shrinks when durable coverage starts inside the range.
+    if range_key == "24h" and window_hours:
+        expected_bucket_count = int((window_hours * 60) / bucket_minutes)
+        first_bucket = last_bucket - timedelta(
+            minutes=bucket_minutes * max(expected_bucket_count - 1, 0)
+        )
+
     bucket_list: list[datetime] = []
     cursor = first_bucket
     while cursor <= last_bucket:
@@ -2308,11 +2316,17 @@ def _project_graph_payload(
         elif source_mode == "durable_store":
             note = "All-time view is ready, but this project has no stored visits yet."
     elif earliest_entry_at and requested_start and earliest_entry_at > requested_start:
-        note = (
-            f"Durable storage for this project currently begins at "
-            f"{_format_alberta_timestamp(earliest_entry_at)}, so this {range_config['label'].lower()} "
-            "view starts there."
-        )
+        if range_key == "24h":
+            note = (
+                f"Durable storage for this project currently begins at "
+                f"{_format_alberta_timestamp(earliest_entry_at)}; earlier buckets are shown as zero."
+            )
+        else:
+            note = (
+                f"Durable storage for this project currently begins at "
+                f"{_format_alberta_timestamp(earliest_entry_at)}, so this {range_config['label'].lower()} "
+                "view starts there."
+            )
 
     if source_mode != "durable_store":
         note = "Durable storage is unavailable, so this graph is currently reading the live log tail."
