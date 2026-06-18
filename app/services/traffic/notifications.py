@@ -103,6 +103,7 @@ DEFAULT_NOTIFICATION_SETTINGS: dict[str, Any] = {
         "new_visitors_only": False,
         "selected_projects": [],
         "max_notifications_per_visitor_per_hour": 0,
+        "max_notifications_per_visitor_per_day": 1,
         "max_notifications_per_session": 0,
         "max_notifications_per_path_per_visitor_per_hour": 0,
     },
@@ -281,6 +282,12 @@ def _normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
             "max_notifications_per_visitor_per_hour": _normalize_int(
                 incoming_policy.get("max_notifications_per_visitor_per_hour"),
                 default=0,
+                minimum=0,
+                maximum=500,
+            ),
+            "max_notifications_per_visitor_per_day": _normalize_int(
+                incoming_policy.get("max_notifications_per_visitor_per_day"),
+                default=1,
                 minimum=0,
                 maximum=500,
             ),
@@ -1326,6 +1333,16 @@ def _suppression_reason(
         )
         if recent_count >= per_visitor_cap:
             return "visitor_hour_cap"
+
+    per_visitor_day_cap = policy.get("max_notifications_per_visitor_per_day", 0)
+    if per_visitor_day_cap > 0:
+        recent_day_count = _count_recent_notifications(
+            connection,
+            person_key=session["person_key"],
+            since_hours=24,
+        )
+        if recent_day_count >= per_visitor_day_cap:
+            return "visitor_day_cap"
 
     if _recent_delivered_event_in_visit_burst(
         connection,
