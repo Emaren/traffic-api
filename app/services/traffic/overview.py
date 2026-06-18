@@ -799,6 +799,7 @@ LIVE_SESSION_RESPONSE_KEYS = {
     "projects_visited_in_window",
     "returning_visitor",
     "live_priority",
+    "funnel_kind",
 }
 
 LIVE_SESSION_ARRAY_LIMITS = {
@@ -818,7 +819,10 @@ def _compact_live_session(session: dict[str, Any]) -> dict[str, Any]:
     for key, limit in LIVE_SESSION_ARRAY_LIMITS.items():
         value = compact.get(key)
         if isinstance(value, list):
-            compact[key] = value[:limit]
+            if key == "page_sequence" and len(value) > limit and value[-1] not in value[: limit - 1]:
+                compact[key] = [*value[: limit - 1], value[-1]]
+            else:
+                compact[key] = value[:limit]
 
     if "page_sequence" not in compact or compact["page_sequence"] is None:
         compact["page_sequence"] = []
@@ -1044,6 +1048,72 @@ def _session_path_values(session: dict[str, Any]) -> list[str]:
     return paths
 
 
+def _watcher_funnel_kind(session: dict[str, Any]) -> str:
+    joined = " ".join(path.lower() for path in _session_path_values(session))
+
+    if "/download/watcher" in joined or "windows-installer" in joined or "mac-installer" in joined:
+        return "installer_click"
+    if "/downloads/latest" in joined or "latest.yml" in joined or "latest-mac.yml" in joined:
+        return "watcher_update_check"
+    if any(token in joined for token in (".exe", ".msi", ".dmg", ".appimage", ".deb", ".rpm")):
+        return "artifact_download"
+    if "/download" in joined:
+        return "download_page_view"
+    return "watcher_funnel"
+
+
+def _is_watcher_funnel_session(session: dict[str, Any]) -> bool:
+    joined = " ".join(path.lower() for path in _session_path_values(session))
+    if not joined:
+        return False
+    return (
+        "/download" in joined
+        or "/downloads/" in joined
+        or "latest.yml" in joined
+        or "latest-mac.yml" in joined
+    )
+
+
+def _promote_watcher_funnel_session(session: dict[str, Any]) -> dict[str, Any]:
+    promoted = dict(session)
+    funnel_kind = _watcher_funnel_kind(session)
+    promoted["funnel_kind"] = funnel_kind
+
+    if funnel_kind == "download_page_view":
+        verdict = "Download Intent"
+        headline = "Viewed the watcher download page"
+        summary = "Traffic separated this as watcher download intent. Treat it as a person or browser session reaching the installer funnel, not background asset noise."
+    elif funnel_kind == "installer_click":
+        verdict = "Watcher Download"
+        headline = "Clicked a watcher installer route"
+        summary = "Traffic caught a watcher installer route. This is stronger than a normal page view and should line up with watcher/admin activity if the install continues."
+    elif funnel_kind == "artifact_download":
+        verdict = "Watcher Download"
+        headline = "Fetched a watcher release artifact"
+        summary = "Traffic caught a watcher artifact download. Keep this near the top because it can become an installed watcher heartbeat."
+    elif funnel_kind == "watcher_update_check":
+        verdict = "Watcher Activity"
+        headline = "Watcher updater checked latest release metadata"
+        summary = "Traffic separated this as installed watcher/updater activity. It matters operationally, but should not inflate ordinary human page depth."
+    else:
+        verdict = "Watcher Funnel"
+        headline = "Touched watcher funnel"
+        summary = "Traffic separated this as watcher funnel movement so download/install/update activity stays visible without polluting the people feed."
+
+    promoted["verdict_label"] = verdict
+    promoted["classification_summary"] = summary
+    promoted["classification_reason_labels"] = [
+        headline,
+        *(promoted.get("classification_reason_labels") or []),
+    ][:8]
+    promoted["classification_reasons"] = [
+        "watcher_funnel",
+        *(promoted.get("classification_reasons") or []),
+    ][:8]
+    promoted["suspicious_score"] = min(45, int(promoted.get("suspicious_score") or 0))
+    return promoted
+
+
 def _is_chain_signal_session(session: dict[str, Any]) -> bool:
     joined = " ".join(path.lower() for path in _session_path_values(session))
     return (
@@ -1064,6 +1134,8 @@ def _is_user_app_activity_session(session: dict[str, Any]) -> bool:
     joined = " ".join(path.lower() for path in _session_path_values(session))
 
     if _is_chain_signal_session(session):
+        return False
+    if _is_watcher_funnel_session(session):
         return False
     if session.get("known_automation"):
         return False
@@ -1386,6 +1458,13 @@ def build_live_visitors(
         and session.get("session_id") not in page_burst_member_ids
     ]
 
+    watcher_funnel_candidates = [
+        _promote_watcher_funnel_session(session)
+        for session in sessions
+        if _is_watcher_funnel_session(session)
+        and session.get("session_id") not in page_burst_member_ids
+    ]
+
     existing_tower_ids = {session.get("session_id") for session in tower_candidates}
     tower_candidates.extend(
         session
@@ -1444,6 +1523,7 @@ def build_live_visitors(
     security_preview = _collapse_security_preview(sorted(security_candidates, key=live_session_sort_key)[:auxiliary_limit])
     chain_signal_preview = sorted(chain_signal_candidates, key=live_session_sort_key)[:auxiliary_limit]
     app_activity_preview = sorted(app_activity_candidates, key=live_session_sort_key)[:auxiliary_limit]
+    watcher_funnel_preview = sorted(watcher_funnel_candidates, key=live_session_sort_key)[:auxiliary_limit]
 
     history_candidates = sorted(tower_candidates, key=lambda item: item["ended_at"], reverse=True)
     # history_candidates is sorted newest-first by ended_at.
@@ -1521,6 +1601,8 @@ def build_live_visitors(
         "chain_signal_preview": [_compact_live_session(session) for session in chain_signal_preview],
         "app_activity_count": len(app_activity_candidates),
         "app_activity_preview": [_compact_live_session(session) for session in app_activity_preview],
+        "watcher_funnel_count": len(watcher_funnel_candidates),
+        "watcher_funnel_preview": [_compact_live_session(session) for session in watcher_funnel_preview],
         "review_count": len(browser_script_candidates) + len(automation_candidates) + len(security_candidates),
         "review_preview": [],
         "recent_page_review_count": len(recent_page_review_candidates),

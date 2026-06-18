@@ -19,22 +19,69 @@ def is_suspicious_path(path: str | None) -> bool:
     return any(pattern.search(lowered) for pattern in SUSPICIOUS_PATH_REGEXES)
 
 
+
+FRAMEWORK_ASSET_PREFIXES = (
+    "/_next/",
+    "/uploads/",
+    "/legacy/",
+    "/watch-loops/",
+    "/champions/players/",
+)
+
+FRAMEWORK_ASSET_EXACT_PATHS = (
+    "/favicon.ico",
+    "/manifest.webmanifest",
+    "/admin-manifest.webmanifest",
+    "/robots.txt",
+    "/sitemap.xml",
+)
+
+WATCHER_ARTIFACT_EXTENSIONS = (
+    ".yml",
+    ".yaml",
+    ".exe",
+    ".msi",
+    ".dmg",
+    ".zip",
+    ".appimage",
+    ".deb",
+    ".rpm",
+)
+
+
+def is_framework_asset_path(path: str | None) -> bool:
+    lowered = (path or "").lower().split("?", 1)[0]
+    if lowered in FRAMEWORK_ASSET_EXACT_PATHS:
+        return True
+    return any(lowered.startswith(prefix) for prefix in FRAMEWORK_ASSET_PREFIXES)
+
+
+def is_watcher_funnel_path(path: str | None) -> bool:
+    lowered = (path or "").lower().split("?", 1)[0]
+    if lowered == "/download" or lowered.startswith("/download/") or lowered.startswith("/downloads/"):
+        return True
+    return lowered.endswith(WATCHER_ARTIFACT_EXTENSIONS)
+
+
 def detect_route_kind(path: str | None) -> str:
     lowered = (path or "").lower()
 
     if lowered in {"", "(unknown)"}:
         return "unknown"
+    if is_watcher_funnel_path(lowered):
+        return "watcher"
     if is_suspicious_path(lowered):
         return "probe"
+    if is_framework_asset_path(lowered):
+        return "asset"
     if any(lowered.startswith(prefix) for prefix in API_ROUTE_PREFIXES):
         return "api"
     if any(lowered.endswith(ext) for ext in ASSET_EXTENSIONS):
         return "asset"
     return "page"
 
-
 def is_trackable_path(path: str | None) -> bool:
-    return detect_route_kind(path) in {"page", "api", "probe"}
+    return detect_route_kind(path) in {"page", "api", "probe", "watcher"}
 
 
 def automation_family(ua: str | None) -> str | None:
@@ -164,6 +211,8 @@ def compute_quality_score(
         score += 24
     elif route_kind == "api":
         score += 4
+    elif route_kind == "watcher":
+        score += 12
     elif route_kind == "probe":
         score -= 40
     elif route_kind == "asset":
@@ -239,6 +288,9 @@ def compute_human_confidence(
     elif route_kind == "api":
         score += 2
         reasons.append("api_route")
+    elif route_kind == "watcher":
+        score += 10
+        reasons.append("watcher_funnel")
     elif route_kind == "probe":
         score -= 70
         reasons.append("probe_route")

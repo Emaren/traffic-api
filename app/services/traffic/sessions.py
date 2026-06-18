@@ -77,6 +77,7 @@ REASON_LABELS = {
     "suspicious_signal": "Request pattern looks hostile or scripted",
     "page_route": "Visited real pages, not just background endpoints",
     "api_route": "Mostly touched API endpoints in this session",
+    "watcher_funnel": "Touched the watcher/download funnel",
     "probe_route": "Hit probing or exploit-style paths",
     "asset_only": "Mostly requested static assets",
     "multi_page": "Moved through multiple pages",
