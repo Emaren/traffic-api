@@ -2188,6 +2188,13 @@ def _multi_signal_series_definitions() -> list[dict[str, Any]]:
             "axis": "audience",
         },
         {
+            "key": "unique_ips",
+            "label": "Unique IPs",
+            "tone": "slate",
+            "default_visible": False,
+            "axis": "audience",
+        },
+        {
             "key": "requests",
             "label": "All requests",
             "tone": "red",
@@ -2277,6 +2284,75 @@ def _raw_request_bucket_counts_by_project(
             continue
         if first_bucket <= bucket <= last_bucket:
             counters[slug][bucket.isoformat()] += 1
+
+    return counters
+
+
+
+def _raw_unique_ip_bucket_counts_by_project(
+    *,
+    project_slugs: set[str] | None,
+    first_bucket: datetime,
+    last_bucket: datetime,
+    bucket_minutes: int,
+) -> dict[str, Counter]:
+    host_to_slug: dict[str, str] = {}
+    allowed_slugs = set(project_slugs or [])
+
+    for project in PROJECTS:
+        slug = str(project.get("slug") or "")
+        if allowed_slugs and slug not in allowed_slugs:
+            continue
+        for host in project.get("hosts", []) or []:
+            if host:
+                host_to_slug[str(host).lower()] = slug
+
+    if not host_to_slug:
+        return defaultdict(Counter)
+
+    placeholders = ",".join("?" for _ in host_to_slug)
+    query_end = last_bucket + timedelta(minutes=bucket_minutes)
+    params = [*host_to_slug.keys(), first_bucket.isoformat(), query_end.isoformat()]
+
+    buckets: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
+
+    try:
+        with _connect() as connection:
+            _ensure_schema(connection)
+            rows = connection.execute(
+                f"""
+                SELECT host, ip, timestamp
+                FROM traffic_entries
+                WHERE host IN ({placeholders})
+                  AND timestamp >= ?
+                  AND timestamp < ?
+                """,
+                params,
+            ).fetchall()
+    except Exception:
+        return defaultdict(Counter)
+
+    for row in rows:
+        slug = host_to_slug.get(str(row["host"] or "").lower())
+        ip = str(row["ip"] or "").strip()
+        if not slug or not ip:
+            continue
+
+        try:
+            timestamp = datetime.fromisoformat(str(row["timestamp"]).replace("Z", "+00:00"))
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+            bucket = _align_bucket(timestamp.astimezone(timezone.utc), bucket_minutes)
+        except Exception:
+            continue
+
+        if first_bucket <= bucket <= last_bucket:
+            buckets[slug][bucket.isoformat()].add(ip)
+
+    counters: dict[str, Counter] = defaultdict(Counter)
+    for slug, bucket_map in buckets.items():
+        for bucket_iso, ips in bucket_map.items():
+            counters[slug][bucket_iso] = len(ips)
 
     return counters
 
@@ -2553,10 +2629,18 @@ def _project_graph_payload(
             last_bucket=last_bucket,
             bucket_minutes=bucket_minutes,
         )
+        unique_ip_counters = _raw_unique_ip_bucket_counts_by_project(
+            project_slugs={project_slug},
+            first_bucket=first_bucket,
+            last_bucket=last_bucket,
+            bucket_minutes=bucket_minutes,
+        )
     else:
         request_counters = defaultdict(Counter)
+        unique_ip_counters = defaultdict(Counter)
 
     request_counter = request_counters.get(project_slug, Counter())
+    unique_ip_counter = unique_ip_counters.get(project_slug, Counter())
     audience_session_ids = {session.get("session_id") for session in _human_signal_graph_sessions(sessions)}
 
     for session in sessions:
@@ -2620,6 +2704,7 @@ def _project_graph_payload(
                 "confirmed": confirmed_counter.get(bucket.isoformat(), 0),
                 "audience": audience_counter.get(bucket.isoformat(), 0),
                 "page_interest": page_interest_counter.get(bucket.isoformat(), 0),
+                "unique_ips": unique_ip_counter.get(bucket.isoformat(), 0),
                 "requests": request_counter.get(bucket.isoformat(), 0),
             }
             for bucket in bucket_list
@@ -2679,8 +2764,15 @@ def build_project_human_series(
             last_bucket=last_bucket,
             bucket_minutes=bucket_minutes,
         )
+        unique_ip_points_by_project = _raw_unique_ip_bucket_counts_by_project(
+            project_slugs=None,
+            first_bucket=first_bucket,
+            last_bucket=last_bucket,
+            bucket_minutes=bucket_minutes,
+        )
     else:
         request_points_by_project = defaultdict(Counter)
+        unique_ip_points_by_project = defaultdict(Counter)
 
     live_counts = Counter()
     audience_session_ids = {session.get("session_id") for session in _human_signal_graph_sessions(sessions)}
@@ -2719,6 +2811,7 @@ def build_project_human_series(
                     "confirmed": points_by_project[slug].get(bucket_iso, 0),
                     "audience": audience_points_by_project[slug].get(bucket_iso, 0),
                     "page_interest": page_interest_points_by_project[slug].get(bucket_iso, 0),
+                    "unique_ips": unique_ip_points_by_project[slug].get(bucket_iso, 0),
                     "requests": request_points_by_project[slug].get(bucket_iso, 0),
                 }
             )
@@ -2727,6 +2820,7 @@ def build_project_human_series(
             point.get("visitors", 0) > 0
             or point.get("audience", 0) > 0
             or point.get("page_interest", 0) > 0
+            or point.get("unique_ips", 0) > 0
             or point.get("requests", 0) > 0
             for point in points
         ) or live_counts[slug] > 0:
