@@ -1385,6 +1385,11 @@ def build_live_visitors(
 
     snapshot = _build_session_snapshot(window_hours=window_hours)
     sessions = snapshot["sessions"]
+    browser_engagement = _browser_engagement_summaries(
+        project_slugs={str(session.get("project_slug") or "") for session in sessions if session.get("project_slug")},
+        since_utc=datetime.now(timezone.utc) - timedelta(hours=window_hours or 24),
+    )
+    sessions = _attach_browser_engagement(sessions, browser_engagement)
 
     page_burst_clusters, page_burst_member_ids = _collapse_page_burst_sessions(sessions)
 
@@ -2355,6 +2360,143 @@ def _raw_unique_ip_bucket_counts_by_project(
             counters[slug][bucket_iso] = len(ips)
 
     return counters
+
+
+
+def _browser_engagement_summaries(
+    *,
+    project_slugs: set[str] | None,
+    since_utc: datetime,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Summarize first-party browser events for live visitor rows.
+
+    Keyed by (project_slug, ip). This intentionally stays lightweight and
+    bounded to the same live window so /api/live-visitors does not turn into
+    the heavier admin visitor-story endpoint.
+    """
+    allowed = set(project_slugs or [])
+    summaries: dict[tuple[str, str], dict[str, Any]] = {}
+
+    try:
+        with _connect() as connection:
+            _ensure_schema(connection)
+            exists = connection.execute(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='traffic_browser_events'"
+            ).fetchone()[0]
+            if not exists:
+                return summaries
+
+            rows = connection.execute(
+                """
+                SELECT
+                    project_slug,
+                    ip,
+                    path,
+                    event_type,
+                    received_at,
+                    scroll_depth_pct,
+                    max_scroll_depth_pct,
+                    click_label,
+                    click_href,
+                    click_text
+                FROM traffic_browser_events
+                WHERE received_at >= ?
+                  AND project_slug != ''
+                  AND ip != ''
+                ORDER BY received_at ASC
+                """,
+                (since_utc.isoformat(),),
+            ).fetchall()
+    except Exception:
+        return summaries
+
+    for row in rows:
+        project_slug = str(row["project_slug"] or "")
+        ip = str(row["ip"] or "")
+        if allowed and project_slug not in allowed:
+            continue
+        if not project_slug or not ip:
+            continue
+
+        key = (project_slug, ip)
+        summary = summaries.setdefault(
+            key,
+            {
+                "browser_clicks": 0,
+                "browser_max_scroll_pct": 0,
+                "browser_signal_count": 0,
+                "browser_route_trail": [],
+                "browser_latest_meaningful_event": "",
+                "browser_latest_meaningful_path": "",
+            },
+        )
+
+        event_type = str(row["event_type"] or "")
+        path_value = str(row["path"] or "")
+        if path_value and path_value not in summary["browser_route_trail"]:
+            summary["browser_route_trail"].append(path_value)
+
+        summary["browser_signal_count"] += 1
+
+        scroll_value = row["max_scroll_depth_pct"] if row["max_scroll_depth_pct"] is not None else row["scroll_depth_pct"]
+        try:
+            summary["browser_max_scroll_pct"] = max(
+                int(summary["browser_max_scroll_pct"] or 0),
+                int(scroll_value or 0),
+            )
+        except Exception:
+            pass
+
+        if "click" in event_type:
+            summary["browser_clicks"] += 1
+            label = str(row["click_label"] or row["click_text"] or "").strip()
+            if label:
+                summary["browser_latest_meaningful_event"] = f"clicked {label[:120]}"
+            else:
+                summary["browser_latest_meaningful_event"] = "clicked"
+            summary["browser_latest_meaningful_path"] = path_value
+        elif event_type == "scroll_milestone":
+            pct = summary["browser_max_scroll_pct"]
+            summary["browser_latest_meaningful_event"] = f"scrolled to {pct}%"
+            summary["browser_latest_meaningful_path"] = path_value
+        elif not summary["browser_latest_meaningful_event"] and path_value:
+            summary["browser_latest_meaningful_event"] = f"opened {path_value}"
+            summary["browser_latest_meaningful_path"] = path_value
+
+    for summary in summaries.values():
+        trail = summary.get("browser_route_trail") or []
+        summary["browser_route_trail"] = trail[:8]
+
+    return summaries
+
+
+def _attach_browser_engagement(
+    sessions: list[dict[str, Any]],
+    summaries: dict[tuple[str, str], dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not sessions or not summaries:
+        return sessions
+
+    for session in sessions:
+        project_slug = str(session.get("project_slug") or "")
+        ip = str(session.get("ip") or "")
+        summary = summaries.get((project_slug, ip))
+        if not summary:
+            continue
+
+        session["browser_clicks"] = int(summary.get("browser_clicks") or 0)
+        session["browser_max_scroll_pct"] = int(summary.get("browser_max_scroll_pct") or 0)
+        session["browser_signal_count"] = int(summary.get("browser_signal_count") or 0)
+        session["browser_route_trail"] = list(summary.get("browser_route_trail") or [])
+        session["browser_latest_meaningful_event"] = str(summary.get("browser_latest_meaningful_event") or "")
+        session["browser_latest_meaningful_path"] = str(summary.get("browser_latest_meaningful_path") or "")
+
+        # Preserve server journey, but expose the browser-derived journey as the
+        # preferred human trail when present.
+        if session["browser_route_trail"]:
+            session["route_trail"] = session["browser_route_trail"]
+
+    return sessions
 
 def _range_config(range_key: str) -> dict[str, Any]:
     return PROJECT_GRAPH_RANGES.get(range_key, PROJECT_GRAPH_RANGES["12h"])
