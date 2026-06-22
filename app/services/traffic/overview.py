@@ -778,6 +778,13 @@ LIVE_SESSION_RESPONSE_KEYS = {
     "exit_page",
     "next_page",
     "page_sequence",
+    "route_trail",
+    "browser_clicks",
+    "browser_max_scroll_pct",
+    "browser_signal_count",
+    "browser_route_trail",
+    "browser_latest_meaningful_event",
+    "browser_latest_meaningful_path",
     "page_count",
     "event_count",
     "total_seconds",
@@ -804,6 +811,8 @@ LIVE_SESSION_RESPONSE_KEYS = {
 
 LIVE_SESSION_ARRAY_LIMITS = {
     "page_sequence": 6,
+    "route_trail": 8,
+    "browser_route_trail": 8,
     "classification_reasons": 5,
     "classification_reason_labels": 5,
 }
