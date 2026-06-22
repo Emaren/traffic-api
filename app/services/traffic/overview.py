@@ -2065,10 +2065,52 @@ def _is_human_signal_session(session: dict[str, Any]) -> bool:
         return engaged_seconds > 0 or page_count <= 6 or total_seconds >= 30
 
     if state == "candidate":
-        return engaged_seconds >= 10 or (page_count <= 4 and total_seconds >= 20)
+        return (
+            engaged_seconds >= 5
+            or total_seconds >= 10
+            or page_count >= 2
+        )
 
     return False
 
+
+
+def _is_burst_member_graph_worthy(session: dict[str, Any]) -> bool:
+    """Allow credible lobby/page-burst members to count on the graph.
+
+    This does not promote them to confirmed human. It only prevents the
+    audience graph from looking dead after a real AoE2 lobby ad creates a
+    short, direct, same-area/same-prefix burst.
+    """
+    state = session.get("classification_state")
+
+    if session.get("known_automation"):
+        return False
+    if session.get("is_burst_cluster"):
+        return False
+    if session.get("route_kind") != "page":
+        return False
+    if state in AUTOMATED_OR_SCRIPT_STATES or state in {"bot", "browser_script", "script_burst", "suspicious"}:
+        return False
+
+    page_count = int(session.get("page_count") or 0)
+    event_count = int(session.get("event_count") or 0)
+    engaged_seconds = int(session.get("engaged_seconds") or 0)
+    total_seconds = int(session.get("total_seconds") or 0)
+    reasons = set(session.get("classification_reasons") or [])
+
+    if state == "likely_human":
+        return page_count >= 2 or engaged_seconds > 0 or event_count >= 2
+
+    if state == "candidate":
+        if page_count >= 3:
+            return True
+        if page_count >= 2 and (engaged_seconds >= 5 or total_seconds >= 5):
+            return True
+        if event_count >= 4 and "bounce" not in reasons:
+            return True
+
+    return False
 
 def _human_signal_graph_sessions(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     page_burst_clusters, page_burst_member_ids = _collapse_page_burst_sessions(sessions)
@@ -2090,7 +2132,7 @@ def _human_signal_graph_sessions(sessions: list[dict[str, Any]]) -> list[dict[st
         if not _is_human_signal_session(session):
             continue
 
-        if session.get("session_id") in page_burst_member_ids:
+        if session.get("session_id") in page_burst_member_ids and not _is_burst_member_graph_worthy(session):
             continue
 
         protected = (
@@ -2119,6 +2161,124 @@ def _human_signal_graph_sessions(sessions: list[dict[str, Any]]) -> list[dict[st
     return output
 
 
+
+
+
+def _multi_signal_series_definitions() -> list[dict[str, Any]]:
+    return [
+        {
+            "key": "visitors",
+            "label": "Confirmed humans",
+            "tone": "amber",
+            "default_visible": True,
+            "axis": "audience",
+        },
+        {
+            "key": "audience",
+            "label": "Audience signal",
+            "tone": "blue",
+            "default_visible": True,
+            "axis": "audience",
+        },
+        {
+            "key": "page_interest",
+            "label": "Page interest",
+            "tone": "purple",
+            "default_visible": False,
+            "axis": "audience",
+        },
+        {
+            "key": "requests",
+            "label": "All requests",
+            "tone": "red",
+            "default_visible": False,
+            "axis": "requests",
+        },
+    ]
+
+
+def _is_confirmed_graph_session(session: dict[str, Any]) -> bool:
+    return bool(
+        session.get("classification_state") == "human_confirmed"
+        or session.get("known_visitor_confirmed")
+        or session.get("human_confirmed")
+    )
+
+
+def _is_page_interest_graph_session(session: dict[str, Any]) -> bool:
+    if session.get("known_automation"):
+        return False
+    if session.get("route_kind") != "page":
+        return False
+
+    state = str(session.get("classification_state") or "")
+    if state in {"bot", "suspicious", "script_burst"}:
+        return False
+
+    if int(session.get("suspicious_score") or 0) > 0:
+        return False
+
+    return True
+
+
+def _raw_request_bucket_counts_by_project(
+    *,
+    project_slugs: set[str] | None,
+    first_bucket: datetime,
+    last_bucket: datetime,
+    bucket_minutes: int,
+) -> dict[str, Counter]:
+    host_to_slug: dict[str, str] = {}
+    allowed_slugs = set(project_slugs or [])
+
+    for project in PROJECTS:
+        slug = str(project.get("slug") or "")
+        if allowed_slugs and slug not in allowed_slugs:
+            continue
+        for host in project.get("hosts", []) or []:
+            if host:
+                host_to_slug[str(host).lower()] = slug
+
+    if not host_to_slug:
+        return defaultdict(Counter)
+
+    placeholders = ",".join("?" for _ in host_to_slug)
+    query_end = last_bucket + timedelta(minutes=bucket_minutes)
+    params = [*host_to_slug.keys(), first_bucket.isoformat(), query_end.isoformat()]
+
+    counters: dict[str, Counter] = defaultdict(Counter)
+
+    try:
+        with _connect() as connection:
+            _ensure_schema(connection)
+            rows = connection.execute(
+                f"""
+                SELECT host, timestamp
+                FROM traffic_entries
+                WHERE host IN ({placeholders})
+                  AND timestamp >= ?
+                  AND timestamp < ?
+                """,
+                params,
+            ).fetchall()
+    except Exception:
+        return counters
+
+    for row in rows:
+        slug = host_to_slug.get(str(row["host"] or "").lower())
+        if not slug:
+            continue
+        try:
+            timestamp = datetime.fromisoformat(str(row["timestamp"]).replace("Z", "+00:00"))
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+            bucket = _align_bucket(timestamp.astimezone(timezone.utc), bucket_minutes)
+        except Exception:
+            continue
+        if first_bucket <= bucket <= last_bucket:
+            counters[slug][bucket.isoformat()] += 1
+
+    return counters
 
 def _range_config(range_key: str) -> dict[str, Any]:
     return PROJECT_GRAPH_RANGES.get(range_key, PROJECT_GRAPH_RANGES["12h"])
@@ -2382,12 +2542,36 @@ def _project_graph_payload(
         bucket_list.append(cursor)
         cursor += timedelta(minutes=bucket_minutes)
 
-    series_counter = Counter()
-    for session in _human_signal_graph_sessions(sessions):
+    confirmed_counter = Counter()
+    audience_counter = Counter()
+    page_interest_counter = Counter()
+
+    if window_hours is not None and window_hours <= 168:
+        request_counters = _raw_request_bucket_counts_by_project(
+            project_slugs={project_slug},
+            first_bucket=first_bucket,
+            last_bucket=last_bucket,
+            bucket_minutes=bucket_minutes,
+        )
+    else:
+        request_counters = defaultdict(Counter)
+
+    request_counter = request_counters.get(project_slug, Counter())
+    audience_session_ids = {session.get("session_id") for session in _human_signal_graph_sessions(sessions)}
+
+    for session in sessions:
         started_at = datetime.fromisoformat(session["started_at"])
         bucket = _align_bucket(started_at, bucket_minutes)
-        if first_bucket <= bucket <= last_bucket:
-            series_counter[bucket.isoformat()] += 1
+        if bucket < first_bucket or bucket > last_bucket:
+            continue
+
+        bucket_iso = bucket.isoformat()
+        if _is_confirmed_graph_session(session):
+            confirmed_counter[bucket_iso] += 1
+        if session.get("session_id") in audience_session_ids:
+            audience_counter[bucket_iso] += 1
+        if _is_page_interest_graph_session(session):
+            page_interest_counter[bucket_iso] += 1
 
     note: str | None = None
     if range_key == "all":
@@ -2415,8 +2599,8 @@ def _project_graph_payload(
         note = "Durable storage is unavailable, so this graph is currently reading the live log tail."
 
     return {
-        "label": "Human-signal arrivals",
-        "series_kind": "human_signal_arrivals",
+        "label": "Confirmed humans",
+        "series_kind": "multi_signal_arrivals",
         "range_key": range_key,
         "range_label": range_config["label"],
         "window_hours": window_hours,
@@ -2427,11 +2611,16 @@ def _project_graph_payload(
             _format_alberta_timestamp(earliest_entry_at) if earliest_entry_at else None
         ),
         "note": note,
+        "series": _multi_signal_series_definitions(),
         "points": [
             {
                 "bucket_start": bucket.isoformat(),
                 "label": _bucket_label(bucket, bucket_minutes),
-                "visitors": series_counter.get(bucket.isoformat(), 0),
+                "visitors": confirmed_counter.get(bucket.isoformat(), 0),
+                "confirmed": confirmed_counter.get(bucket.isoformat(), 0),
+                "audience": audience_counter.get(bucket.isoformat(), 0),
+                "page_interest": page_interest_counter.get(bucket.isoformat(), 0),
+                "requests": request_counter.get(bucket.isoformat(), 0),
             }
             for bucket in bucket_list
         ],
@@ -2480,18 +2669,39 @@ def build_project_human_series(
         cursor += timedelta(minutes=bucket_minutes)
 
     points_by_project: dict[str, Counter] = defaultdict(Counter)
-    live_counts = Counter()
+    audience_points_by_project: dict[str, Counter] = defaultdict(Counter)
+    page_interest_points_by_project: dict[str, Counter] = defaultdict(Counter)
 
-    for session in _human_signal_graph_sessions(sessions):
+    if window_hours is not None and window_hours <= 168:
+        request_points_by_project = _raw_request_bucket_counts_by_project(
+            project_slugs=None,
+            first_bucket=first_bucket,
+            last_bucket=last_bucket,
+            bucket_minutes=bucket_minutes,
+        )
+    else:
+        request_points_by_project = defaultdict(Counter)
+
+    live_counts = Counter()
+    audience_session_ids = {session.get("session_id") for session in _human_signal_graph_sessions(sessions)}
+
+    for session in sessions:
         started_at = datetime.fromisoformat(session["started_at"])
         bucket = _align_bucket(started_at, bucket_minutes)
         if bucket < first_bucket or bucket > last_bucket:
             continue
 
-        points_by_project[session["project_slug"]][bucket.isoformat()] += 1
+        project_slug = session["project_slug"]
+        bucket_iso = bucket.isoformat()
 
-        if session["active_now"]:
-            live_counts[session["project_slug"]] += 1
+        if _is_confirmed_graph_session(session):
+            points_by_project[project_slug][bucket_iso] += 1
+        if session.get("session_id") in audience_session_ids:
+            audience_points_by_project[project_slug][bucket_iso] += 1
+            if session["active_now"]:
+                live_counts[project_slug] += 1
+        if _is_page_interest_graph_session(session):
+            page_interest_points_by_project[project_slug][bucket_iso] += 1
 
     projects_output: list[dict[str, Any]] = []
 
@@ -2506,10 +2716,20 @@ def build_project_human_series(
                     "bucket_start": bucket_iso,
                     "label": bucket.astimezone(ALBERTA_ZONE).strftime("%I:%M %p"),
                     "visitors": points_by_project[slug].get(bucket_iso, 0),
+                    "confirmed": points_by_project[slug].get(bucket_iso, 0),
+                    "audience": audience_points_by_project[slug].get(bucket_iso, 0),
+                    "page_interest": page_interest_points_by_project[slug].get(bucket_iso, 0),
+                    "requests": request_points_by_project[slug].get(bucket_iso, 0),
                 }
             )
 
-        if any(point["visitors"] > 0 for point in points) or live_counts[slug] > 0:
+        if any(
+            point.get("visitors", 0) > 0
+            or point.get("audience", 0) > 0
+            or point.get("page_interest", 0) > 0
+            or point.get("requests", 0) > 0
+            for point in points
+        ) or live_counts[slug] > 0:
             projects_output.append(
                 {
                     "slug": slug,
@@ -2553,7 +2773,8 @@ def build_project_human_series(
             _format_alberta_timestamp(earliest_entry_at) if earliest_entry_at else None
         ),
         "note": note,
-        "series_kind": "human_signal_arrivals",
+        "series_kind": "multi_signal_arrivals",
+        "series": _multi_signal_series_definitions(),
         "projects": projects_output,
     }
 
