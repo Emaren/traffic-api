@@ -2852,12 +2852,32 @@ def _graph_spike_diagnosis(points: list[dict[str, Any]]) -> dict[str, Any] | Non
             f"{audience_visitors} confirmed humans."
         )
 
-    if requests >= 1000 and (first_touches or page_interest or audience or visitors):
-        summary = (
-            f"{request_peak.get('label')} was both traffic pressure and audience movement: "
-            f"{requests:,} requests, {first_touches} first touches, "
-            f"{page_interest} page-interest sessions, {audience} audience signals."
-        )
+    audience_peak_differs = bool(audience_peak and audience_peak is not request_peak)
+    has_audience_movement = bool(
+        first_touches
+        or page_interest
+        or audience
+        or visitors
+        or audience_first_touches
+        or audience_page_interest
+        or audience_audience
+        or audience_visitors
+    )
+
+    if requests >= 1000 and has_audience_movement:
+        if audience_peak_differs:
+            summary = (
+                f"Request peak {request_peak.get('label')}: {requests:,} requests across "
+                f"{unique_ips or 1} IPs ({pressure:,} req/IP). "
+                f"Audience peak {audience_peak.get('label')}: {audience_first_touches} first touches, "
+                f"{audience_page_interest} page-interest sessions, {audience_audience} audience signals."
+            )
+        else:
+            summary = (
+                f"{request_peak.get('label')} was both traffic pressure and audience movement: "
+                f"{requests:,} requests, {first_touches} first touches, "
+                f"{page_interest} page-interest sessions, {audience} audience signals."
+            )
         kind = "mixed_spike"
     elif requests >= 1000:
         summary = (
@@ -2888,7 +2908,13 @@ def _graph_spike_diagnosis(points: list[dict[str, Any]]) -> dict[str, Any] | Non
         "audience": audience,
         "visitors": visitors,
         "requests_per_ip": pressure,
+        "request_peak_label": request_peak.get("label"),
         "audience_peak_label": (audience_peak or {}).get("label"),
+        "audience_peak_requests": audience_requests,
+        "audience_peak_first_touches": audience_first_touches,
+        "audience_peak_page_interest": audience_page_interest,
+        "audience_peak_audience": audience_audience,
+        "audience_peak_visitors": audience_visitors,
         "signals": signals[:6],
     }
 
