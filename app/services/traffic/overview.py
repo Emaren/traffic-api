@@ -2202,6 +2202,13 @@ def _multi_signal_series_definitions() -> list[dict[str, Any]]:
             "axis": "audience",
         },
         {
+            "key": "first_touches",
+            "label": "First touches",
+            "tone": "emerald",
+            "default_visible": True,
+            "axis": "audience",
+        },
+        {
             "key": "unique_ips",
             "label": "Unique IPs",
             "tone": "slate",
@@ -2225,6 +2232,52 @@ def _is_confirmed_graph_session(session: dict[str, Any]) -> bool:
         or session.get("human_confirmed")
     )
 
+
+
+def _is_first_touch_graph_session(session: dict[str, Any]) -> bool:
+    """Browser-shaped one-page top-of-funnel contact.
+
+    This intentionally does not claim confirmed humanity. It captures the
+    lobby-ad / campaign reality: one-page visitors can still be real market
+    contact, but they deserve their own line instead of polluting Potential.
+    """
+    state = session.get("classification_state")
+    reasons = set(session.get("classification_reasons") or [])
+
+    if session.get("known_automation"):
+        return False
+    if session.get("is_burst_cluster"):
+        return False
+    if session.get("route_kind") != "page":
+        return False
+    if state in AUTOMATED_OR_SCRIPT_STATES or state in {"bot", "browser_script", "script_burst", "suspicious"}:
+        return False
+    if int(session.get("suspicious_score") or 0) > 0:
+        return False
+    if int(session.get("page_count") or 0) != 1:
+        return False
+    if session.get("returning_visitor"):
+        return False
+    if int(session.get("total_project_visits") or 0) > 1:
+        return False
+    if "probe_route" in reasons or "known_automation" in reasons:
+        return False
+
+    page_sequence = session.get("page_sequence") or []
+    if not page_sequence:
+        return False
+
+    first_path = str(page_sequence[0] or "")
+    if (
+        first_path.startswith("/api/")
+        or first_path.startswith("/_next/")
+        or first_path.startswith("/rpc")
+        or first_path.startswith("/rest")
+        or first_path.startswith("/cosmos/")
+    ):
+        return False
+
+    return state in HUMAN_VISIBLE_STATES or state == "candidate"
 
 def _is_page_interest_graph_session(session: dict[str, Any]) -> bool:
     if session.get("known_automation"):
@@ -2772,6 +2825,7 @@ def _project_graph_payload(
     confirmed_counter = Counter()
     audience_counter = Counter()
     page_interest_counter = Counter()
+    first_touch_counter = Counter()
 
     if window_hours is not None and window_hours <= 168:
         request_counters = _raw_request_bucket_counts_by_project(
@@ -2807,6 +2861,8 @@ def _project_graph_payload(
             audience_counter[bucket_iso] += 1
         if _is_page_interest_graph_session(session):
             page_interest_counter[bucket_iso] += 1
+        if _is_first_touch_graph_session(session):
+            first_touch_counter[bucket_iso] += 1
 
     note: str | None = None
     if range_key == "all":
@@ -2855,6 +2911,7 @@ def _project_graph_payload(
                 "confirmed": confirmed_counter.get(bucket.isoformat(), 0),
                 "audience": audience_counter.get(bucket.isoformat(), 0),
                 "page_interest": page_interest_counter.get(bucket.isoformat(), 0),
+                "first_touches": first_touch_counter.get(bucket.isoformat(), 0),
                 "unique_ips": unique_ip_counter.get(bucket.isoformat(), 0),
                 "requests": request_counter.get(bucket.isoformat(), 0),
             }
@@ -2907,6 +2964,7 @@ def build_project_human_series(
     points_by_project: dict[str, Counter] = defaultdict(Counter)
     audience_points_by_project: dict[str, Counter] = defaultdict(Counter)
     page_interest_points_by_project: dict[str, Counter] = defaultdict(Counter)
+    first_touch_points_by_project: dict[str, Counter] = defaultdict(Counter)
 
     if window_hours is not None and window_hours <= 168:
         request_points_by_project = _raw_request_bucket_counts_by_project(
@@ -2945,6 +3003,8 @@ def build_project_human_series(
                 live_counts[project_slug] += 1
         if _is_page_interest_graph_session(session):
             page_interest_points_by_project[project_slug][bucket_iso] += 1
+        if _is_first_touch_graph_session(session):
+            first_touch_points_by_project[project_slug][bucket_iso] += 1
 
     projects_output: list[dict[str, Any]] = []
 
@@ -2962,6 +3022,7 @@ def build_project_human_series(
                     "confirmed": points_by_project[slug].get(bucket_iso, 0),
                     "audience": audience_points_by_project[slug].get(bucket_iso, 0),
                     "page_interest": page_interest_points_by_project[slug].get(bucket_iso, 0),
+                    "first_touches": first_touch_points_by_project[slug].get(bucket_iso, 0),
                     "unique_ips": unique_ip_points_by_project[slug].get(bucket_iso, 0),
                     "requests": request_points_by_project[slug].get(bucket_iso, 0),
                 }
@@ -2971,6 +3032,7 @@ def build_project_human_series(
             point.get("visitors", 0) > 0
             or point.get("audience", 0) > 0
             or point.get("page_interest", 0) > 0
+            or point.get("first_touches", 0) > 0
             or point.get("unique_ips", 0) > 0
             or point.get("requests", 0) > 0
             for point in points
