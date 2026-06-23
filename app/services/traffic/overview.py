@@ -2985,34 +2985,73 @@ def _raw_request_source_diagnosis(
     end = start + timedelta(minutes=max(minutes, 1))
 
     hosts = _project_hosts_for_raw_request_source(project_slug)
-    params: list[Any] = [start.isoformat(), end.isoformat()]
-    host_clause = ""
 
-    if hosts:
-        placeholders = ",".join("?" for _ in hosts)
-        host_clause = f" AND lower(host) IN ({placeholders})"
-        params.extend(hosts)
+    def _range_values(moment: datetime) -> list[str]:
+        base = moment.astimezone(timezone.utc).replace(microsecond=0)
+        return [
+            base.isoformat(),
+            base.isoformat().replace("+00:00", "Z"),
+            base.strftime("%Y-%m-%dT%H:%M:%S"),
+            base.strftime("%Y-%m-%d %H:%M:%S"),
+        ]
+
+    range_pairs: list[tuple[str, str]] = []
+    seen_ranges: set[tuple[str, str]] = set()
+
+    for start_value, end_value in zip(_range_values(start), _range_values(end)):
+        pair = (start_value, end_value)
+        if pair not in seen_ranges:
+            seen_ranges.add(pair)
+            range_pairs.append(pair)
+
+    rows = []
+    used_host_filter = False
+    used_time_range: tuple[str, str] | None = None
 
     try:
         with _connect() as connection:
             _ensure_schema(connection)
-            rows = connection.execute(
-                f"""
-                SELECT
-                    timestamp,
-                    ip,
-                    host,
-                    method,
-                    COALESCE(NULLIF(normalized_path, ''), NULLIF(raw_path, ''), request, '') AS path,
-                    status,
-                    ua
-                FROM traffic_entries
-                WHERE timestamp >= ?
-                  AND timestamp < ?
-                  {host_clause}
-                """,
-                params,
-            ).fetchall()
+
+            host_modes = [True, False] if hosts else [False]
+
+            for use_hosts in host_modes:
+                host_clause = ""
+                host_params: list[Any] = []
+
+                if use_hosts and hosts:
+                    placeholders = ",".join("?" for _ in hosts)
+                    host_clause = f" AND lower(host) IN ({placeholders})"
+                    host_params.extend(hosts)
+
+                for start_value, end_value in range_pairs:
+                    params: list[Any] = [start_value, end_value]
+                    params.extend(host_params)
+
+                    rows = connection.execute(
+                        f"""
+                        SELECT
+                            timestamp,
+                            ip,
+                            host,
+                            method,
+                            COALESCE(NULLIF(normalized_path, ''), NULLIF(raw_path, ''), request, '') AS path,
+                            status,
+                            ua
+                        FROM traffic_entries
+                        WHERE timestamp >= ?
+                          AND timestamp < ?
+                          {host_clause}
+                        """,
+                        params,
+                    ).fetchall()
+
+                    if rows:
+                        used_host_filter = bool(use_hosts and hosts)
+                        used_time_range = (start_value, end_value)
+                        break
+
+                if rows:
+                    break
     except Exception:
         return None
 
@@ -3073,6 +3112,9 @@ def _raw_request_source_diagnosis(
         "bucket_start": start.isoformat(),
         "bucket_end": end.isoformat(),
         "total": total,
+        "host_filter_used": used_host_filter,
+        "matched_hosts": hosts if used_host_filter else [],
+        "time_range_used": list(used_time_range or []),
         "source_label": source_label,
         "top_category": top_category,
         "summary": summary,
