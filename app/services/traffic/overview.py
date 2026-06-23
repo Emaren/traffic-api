@@ -3005,6 +3005,7 @@ def _raw_request_source_diagnosis(
             range_pairs.append(pair)
 
     rows = []
+    source_table = "traffic_entries"
     used_host_filter = False
     used_time_range: tuple[str, str] | None = None
 
@@ -3054,6 +3055,38 @@ def _raw_request_source_diagnosis(
                     break
     except Exception:
         return None
+
+    if not rows:
+        try:
+            with _connect() as connection:
+                _ensure_schema(connection)
+
+                for start_value, end_value in range_pairs:
+                    rows = connection.execute(
+                        """
+                        SELECT
+                            created_at AS timestamp,
+                            ip,
+                            host,
+                            NULL AS method,
+                            path,
+                            status,
+                            NULL AS ua
+                        FROM traffic_notification_events
+                        WHERE created_at >= ?
+                          AND created_at < ?
+                          AND project_slug = ?
+                        """,
+                        [start_value, end_value, project_slug],
+                    ).fetchall()
+
+                    if rows:
+                        source_table = "traffic_notification_events"
+                        used_host_filter = False
+                        used_time_range = (start_value, end_value)
+                        break
+        except Exception:
+            return None
 
     if not rows:
         return None
@@ -3112,6 +3145,7 @@ def _raw_request_source_diagnosis(
         "bucket_start": start.isoformat(),
         "bucket_end": end.isoformat(),
         "total": total,
+        "source_table": source_table,
         "host_filter_used": used_host_filter,
         "matched_hosts": hosts if used_host_filter else [],
         "time_range_used": list(used_time_range or []),
