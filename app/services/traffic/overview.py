@@ -2919,8 +2919,201 @@ def _graph_spike_diagnosis(points: list[dict[str, Any]]) -> dict[str, Any] | Non
     }
 
 
-def _graph_payload_with_spike_diagnosis(payload: dict[str, Any]) -> dict[str, Any]:
-    payload["spike_diagnosis"] = _graph_spike_diagnosis(payload.get("points") or [])
+
+def _project_hosts_for_raw_request_source(project_slug: str) -> list[str]:
+    hosts: set[str] = set()
+
+    for project in PROJECTS:
+        if project.get("slug") != project_slug:
+            continue
+
+        for key in ("hosts", "hostnames", "domains"):
+            value = project.get(key)
+            if isinstance(value, (list, tuple, set)):
+                hosts.update(str(host).strip().lower() for host in value if str(host).strip())
+
+        for key in ("host", "hostname", "domain"):
+            value = project.get(key)
+            if value:
+                hosts.add(str(value).strip().lower())
+
+    return sorted(hosts)
+
+
+def _raw_request_category(path: str) -> str:
+    normalized = str(path or "")
+
+    if normalized.startswith("/api/watcher/"):
+        return "watcher_api"
+    if normalized.startswith("/api/streams/"):
+        return "stream_api"
+    if normalized.startswith("/api/"):
+        return "app_api"
+    if normalized.startswith("/_next/"):
+        return "asset_next"
+    if normalized.startswith("/uploads/"):
+        return "asset_upload"
+    if normalized.startswith("/rpc") or normalized.startswith("/rest") or normalized.startswith("/cosmos/"):
+        return "chain_rpc"
+    if normalized.startswith("/xmlrpc") or normalized.startswith("/wp-") or normalized.startswith("/wp/"):
+        return "probe"
+    if "." in normalized.rsplit("/", 1)[-1]:
+        return "asset_file"
+    if normalized == "" or normalized.startswith("/"):
+        return "page_or_route"
+    return "other"
+
+
+def _raw_request_source_diagnosis(
+    *,
+    project_slug: str,
+    bucket_start: str | None,
+    bucket_minutes: int | None,
+) -> dict[str, Any] | None:
+    if not bucket_start:
+        return None
+
+    try:
+        start = datetime.fromisoformat(str(bucket_start).replace("Z", "+00:00"))
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        start = start.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+    minutes = int(bucket_minutes or SERIES_BUCKET_MINUTES or 30)
+    end = start + timedelta(minutes=max(minutes, 1))
+
+    hosts = _project_hosts_for_raw_request_source(project_slug)
+    params: list[Any] = [start.isoformat(), end.isoformat()]
+    host_clause = ""
+
+    if hosts:
+        placeholders = ",".join("?" for _ in hosts)
+        host_clause = f" AND lower(host) IN ({placeholders})"
+        params.extend(hosts)
+
+    try:
+        with _connect() as connection:
+            _ensure_schema(connection)
+            rows = connection.execute(
+                f"""
+                SELECT
+                    timestamp,
+                    ip,
+                    host,
+                    method,
+                    COALESCE(NULLIF(normalized_path, ''), NULLIF(raw_path, ''), request, '') AS path,
+                    status,
+                    ua
+                FROM traffic_entries
+                WHERE timestamp >= ?
+                  AND timestamp < ?
+                  {host_clause}
+                """,
+                params,
+            ).fetchall()
+    except Exception:
+        return None
+
+    if not rows:
+        return None
+
+    path_counts: Counter[str] = Counter()
+    ip_counts: Counter[str] = Counter()
+    category_counts: Counter[str] = Counter()
+    ip_path_counts: Counter[tuple[str, str]] = Counter()
+
+    for row in rows:
+        row_path = str(row["path"] or "")
+        row_ip = str(row["ip"] or "unknown")
+        category = _raw_request_category(row_path)
+
+        path_counts[row_path] += 1
+        ip_counts[row_ip] += 1
+        category_counts[category] += 1
+        ip_path_counts[(row_ip, row_path)] += 1
+
+    total = len(rows)
+    top_paths = [
+        {"path": key, "count": count, "share": round(count / max(total, 1), 4)}
+        for key, count in path_counts.most_common(8)
+    ]
+    top_ips = [
+        {"ip": key, "count": count, "share": round(count / max(total, 1), 4)}
+        for key, count in ip_counts.most_common(8)
+    ]
+    top_ip_paths = [
+        {"ip": key[0], "path": key[1], "count": count, "share": round(count / max(total, 1), 4)}
+        for key, count in ip_path_counts.most_common(8)
+    ]
+
+    top_category, top_category_count = category_counts.most_common(1)[0]
+    top_path = top_paths[0] if top_paths else {"path": "unknown", "count": 0}
+    top_ip = top_ips[0] if top_ips else {"ip": "unknown", "count": 0}
+
+    if top_category in {"watcher_api", "stream_api", "app_api"}:
+        source_label = "API pressure"
+    elif top_category == "probe":
+        source_label = "Probe traffic"
+    elif top_category.startswith("asset"):
+        source_label = "Asset pressure"
+    elif top_category == "page_or_route":
+        source_label = "Page traffic"
+    else:
+        source_label = "Request pressure"
+
+    summary = (
+        f"{source_label}: {top_category_count:,}/{total:,} raw requests were {top_category.replace('_', ' ')}. "
+        f"Top path {top_path['path']} ({top_path['count']:,}). "
+        f"Top IP {top_ip['ip']} ({top_ip['count']:,})."
+    )
+
+    return {
+        "bucket_start": start.isoformat(),
+        "bucket_end": end.isoformat(),
+        "total": total,
+        "source_label": source_label,
+        "top_category": top_category,
+        "summary": summary,
+        "categories": [
+            {"category": key, "count": count, "share": round(count / max(total, 1), 4)}
+            for key, count in category_counts.most_common()
+        ],
+        "top_paths": top_paths,
+        "top_ips": top_ips,
+        "top_ip_paths": top_ip_paths,
+    }
+
+
+def _graph_spike_diagnosis_with_source(
+    *,
+    project_slug: str | None,
+    points: list[dict[str, Any]],
+    bucket_minutes: int | None,
+) -> dict[str, Any] | None:
+    diagnosis = _graph_spike_diagnosis(points)
+
+    if diagnosis and project_slug:
+        diagnosis["source_diagnosis"] = _raw_request_source_diagnosis(
+            project_slug=project_slug,
+            bucket_start=diagnosis.get("bucket_start"),
+            bucket_minutes=bucket_minutes,
+        )
+
+    return diagnosis
+
+def _graph_payload_with_spike_diagnosis(
+    payload: dict[str, Any],
+    *,
+    project_slug: str | None = None,
+    bucket_minutes: int | None = None,
+) -> dict[str, Any]:
+    payload["spike_diagnosis"] = _graph_spike_diagnosis_with_source(
+        project_slug=project_slug,
+        points=payload.get("points") or [],
+        bucket_minutes=bucket_minutes,
+    )
     return payload
 
 def _project_graph_payload(
@@ -3193,7 +3386,7 @@ def build_project_human_series(
                     "name": project["name"],
                     "live_humans": live_counts[slug],
                     "points": points,
-                    "spike_diagnosis": _graph_spike_diagnosis(points),
+                    "spike_diagnosis": _graph_spike_diagnosis_with_source(project_slug=slug, points=points, bucket_minutes=bucket_minutes),
                 }
             )
 
