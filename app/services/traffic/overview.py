@@ -2773,6 +2773,130 @@ def _project_graph_all_time_rollup_payload(*, project_slug: str) -> dict[str, An
     }
 
 
+
+def _graph_spike_diagnosis(points: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Compact operator read of the biggest graph movement.
+
+    This deliberately uses graph-ready buckets, not a forensic raw-log query.
+    It tells the operator how to read the visible graph: red request wall,
+    audience movement, first-touch lift, or quiet background noise.
+    """
+    usable_points = [point for point in points if isinstance(point, dict)]
+    if not usable_points:
+        return None
+
+    def n(point: dict[str, Any], key: str) -> int:
+        try:
+            return int(point.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    request_peak = max(usable_points, key=lambda point: n(point, "requests"), default=None)
+    audience_peak = max(
+        usable_points,
+        key=lambda point: (
+            n(point, "audience")
+            + n(point, "first_touches")
+            + n(point, "page_interest")
+            + n(point, "visitors")
+        ),
+        default=None,
+    )
+
+    if not request_peak:
+        return None
+
+    requests = n(request_peak, "requests")
+    unique_ips = n(request_peak, "unique_ips")
+    first_touches = n(request_peak, "first_touches")
+    page_interest = n(request_peak, "page_interest")
+    audience = n(request_peak, "audience")
+    visitors = n(request_peak, "visitors")
+    pressure = round(requests / max(unique_ips, 1), 1) if requests else 0
+
+    audience_requests = n(audience_peak or {}, "requests")
+    audience_first_touches = n(audience_peak or {}, "first_touches")
+    audience_page_interest = n(audience_peak or {}, "page_interest")
+    audience_audience = n(audience_peak or {}, "audience")
+    audience_visitors = n(audience_peak or {}, "visitors")
+
+    signals: list[str] = []
+
+    if requests >= 1000:
+        if pressure >= 50:
+            signals.append(
+                f"Request wall: {requests:,} requests across {unique_ips or 1} IPs "
+                f"({pressure:,} req/IP)."
+            )
+        else:
+            signals.append(f"Broad request surge: {requests:,} requests across {unique_ips} IPs.")
+    elif requests > 0:
+        signals.append(f"Light request movement: {requests:,} requests.")
+
+    if first_touches > 0:
+        signals.append(f"Top-of-funnel contact: {first_touches} first touches in the peak bucket.")
+    if page_interest > 0:
+        signals.append(f"Page interest: {page_interest} browser-shaped page sessions.")
+    if audience > 0:
+        signals.append(f"Audience signal: {audience} likely/confirmed visitor arrivals.")
+    if visitors > 0:
+        signals.append(f"Confirmed humans: {visitors} strict confirmed visitors.")
+
+    if audience_peak and audience_peak is not request_peak:
+        signals.append(
+            "Audience peak differs from request peak: "
+            f"{audience_peak.get('label')} had "
+            f"{audience_first_touches} first touches, "
+            f"{audience_page_interest} page-interest sessions, "
+            f"{audience_audience} audience signals, "
+            f"{audience_visitors} confirmed humans."
+        )
+
+    if requests >= 1000 and (first_touches or page_interest or audience or visitors):
+        summary = (
+            f"{request_peak.get('label')} was both traffic pressure and audience movement: "
+            f"{requests:,} requests, {first_touches} first touches, "
+            f"{page_interest} page-interest sessions, {audience} audience signals."
+        )
+        kind = "mixed_spike"
+    elif requests >= 1000:
+        summary = (
+            f"{request_peak.get('label')} was mostly request pressure: "
+            f"{requests:,} requests across {unique_ips or 1} IPs."
+        )
+        kind = "request_wall"
+    elif first_touches or page_interest or audience or visitors:
+        summary = (
+            f"{request_peak.get('label')} showed audience movement: "
+            f"{first_touches} first touches, {page_interest} page-interest sessions, "
+            f"{audience} audience signals."
+        )
+        kind = "audience_signal"
+    else:
+        summary = f"{request_peak.get('label')} was quiet: no meaningful audience movement."
+        kind = "quiet"
+
+    return {
+        "kind": kind,
+        "bucket_start": request_peak.get("bucket_start"),
+        "label": request_peak.get("label"),
+        "summary": summary,
+        "requests": requests,
+        "unique_ips": unique_ips,
+        "first_touches": first_touches,
+        "page_interest": page_interest,
+        "audience": audience,
+        "visitors": visitors,
+        "requests_per_ip": pressure,
+        "audience_peak_label": (audience_peak or {}).get("label"),
+        "signals": signals[:6],
+    }
+
+
+def _graph_payload_with_spike_diagnosis(payload: dict[str, Any]) -> dict[str, Any]:
+    payload["spike_diagnosis"] = _graph_spike_diagnosis(payload.get("points") or [])
+    return payload
+
 def _project_graph_payload(
     *,
     project_slug: str,
@@ -2889,7 +3013,7 @@ def _project_graph_payload(
     if source_mode != "durable_store":
         note = "Durable storage is unavailable, so this graph is currently reading the live log tail."
 
-    return {
+    return _graph_payload_with_spike_diagnosis({
         "label": "Confirmed humans",
         "series_kind": "multi_signal_arrivals",
         "range_key": range_key,
@@ -2917,7 +3041,7 @@ def _project_graph_payload(
             }
             for bucket in bucket_list
         ],
-    }
+    })
 
 
 def build_project_human_series(
@@ -3043,6 +3167,7 @@ def build_project_human_series(
                     "name": project["name"],
                     "live_humans": live_counts[slug],
                     "points": points,
+                    "spike_diagnosis": _graph_spike_diagnosis(points),
                 }
             )
 
