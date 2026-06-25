@@ -1214,7 +1214,7 @@ def _promote_user_app_activity(session: dict[str, Any]) -> dict[str, Any]:
     promoted = dict(session)
     promoted["classification_state"] = (
         "human_confirmed"
-        if session.get("human_confirmed") or session.get("known_visitor_confirmed")
+        if session.get("human_confirmed")
         else "likely_human"
     )
     promoted["verdict_label"] = "App Activity"
@@ -1459,7 +1459,7 @@ def build_live_visitors(
     tower_candidates = [
         session
         for session in sessions
-        if session["classification_state"] in HUMAN_VISIBLE_STATES
+        if (session["classification_state"] in HUMAN_VISIBLE_STATES and not _is_known_identity_only_signal(session))
         and session["route_kind"] == "page"
         and session.get("session_id") not in page_burst_member_ids
         and not _is_chain_signal_session(session)
@@ -1570,7 +1570,7 @@ def build_live_visitors(
         session
         for session in recent_page_review_candidates
         if not session.get("known_automation")
-        and session.get("classification_state") in HUMAN_VISIBLE_STATES
+        and ((session.get("classification_state") in HUMAN_VISIBLE_STATES) and not _is_known_identity_only_signal(session))
         and not _is_chain_signal_session(session)
         and not _is_user_app_activity_session(session)
         and session.get("classification_state") not in {"bot", "browser_script", "script_burst", "suspicious"}
@@ -1854,7 +1854,9 @@ def _load_session_archive_history(
         except Exception:
             continue
         if isinstance(payload, dict):
-            items.append(_compact_live_session(payload))
+            compact = _compact_live_session(payload)
+            if not _is_known_identity_only_signal(compact):
+                items.append(compact)
 
     oldest_payload: dict[str, Any] | None = None
     if oldest_row:
@@ -1934,6 +1936,9 @@ def build_visits_history(
 
     filtered = sessions
     def _safe_human_history_session(session):
+        if _is_known_identity_only_signal(session):
+            return False
+
         if session["classification_state"] not in {"human_confirmed", "likely_human"}:
             return False
         if session.get("route_kind") != "page":
@@ -2050,7 +2055,50 @@ def _align_bucket(value: datetime, bucket_minutes: int) -> datetime:
     return datetime.fromtimestamp(aligned_timestamp, tz=value.tzinfo or timezone.utc)
 
 
+
+
+def _is_known_identity_only_signal(session: dict[str, Any]) -> bool:
+    """Known IP/fingerprint context without confirmed human/app activity.
+
+    This keeps known-player IP hits visible as context, but prevents them from
+    inflating audience-grade human/live charts unless behavior independently
+    earned confirmed-human status.
+    """
+    if not (session.get("known_identity_signal") or session.get("known_visitor_confirmed")):
+        return False
+
+    return not (
+        session.get("classification_state") == "human_confirmed"
+        or bool(session.get("human_confirmed"))
+    )
+
+
+def _is_stale_browser_signal(session: dict[str, Any]) -> bool:
+    """Traffic browser telemetry caps dwell/visible around 24h.
+
+    When a tab survives that long, recent beacon noise should not be treated
+    as fresh human attention or app login truth.
+    """
+    total_seconds = int(session.get("total_seconds") or 0)
+    engaged_seconds = int(session.get("engaged_seconds") or 0)
+    browser_visible_ms = int(session.get("browser_visible_ms") or 0)
+    browser_dwell_ms = int(session.get("browser_dwell_ms") or 0)
+
+    return (
+        total_seconds >= 86_399
+        or engaged_seconds >= 86_399
+        or browser_visible_ms >= 86_399_000
+        or browser_dwell_ms >= 86_399_000
+    )
+
+
 def _is_human_signal_session(session: dict[str, Any]) -> bool:
+    if _is_known_identity_only_signal(session):
+        return False
+
+    if _is_stale_browser_signal(session):
+        return False
+
     state = session.get("classification_state")
 
     if session.get("known_automation"):
@@ -2064,7 +2112,7 @@ def _is_human_signal_session(session: dict[str, Any]) -> bool:
 
     if state == "human_confirmed" or session.get("human_confirmed"):
         return True
-    if session.get("known_visitor_confirmed"):
+    if session.get("known_visitor_confirmed") and session.get("classification_state") == "human_confirmed":
         return True
     if session.get("active_now"):
         return True
@@ -2226,15 +2274,20 @@ def _multi_signal_series_definitions() -> list[dict[str, Any]]:
 
 
 def _is_confirmed_graph_session(session: dict[str, Any]) -> bool:
+    if _is_stale_browser_signal(session):
+        return False
+
     return bool(
         session.get("classification_state") == "human_confirmed"
-        or session.get("known_visitor_confirmed")
         or session.get("human_confirmed")
     )
 
 
 
 def _is_first_touch_graph_session(session: dict[str, Any]) -> bool:
+    if _is_known_identity_only_signal(session):
+        return False
+
     """Browser-shaped one-page top-of-funnel contact.
 
     This intentionally does not claim confirmed humanity. It captures the
@@ -2280,6 +2333,9 @@ def _is_first_touch_graph_session(session: dict[str, Any]) -> bool:
     return state in HUMAN_VISIBLE_STATES or state == "candidate"
 
 def _is_page_interest_graph_session(session: dict[str, Any]) -> bool:
+    if _is_known_identity_only_signal(session):
+        return False
+
     if session.get("known_automation"):
         return False
     if session.get("route_kind") != "page":
@@ -3418,7 +3474,7 @@ def build_project_human_series(
             points_by_project[project_slug][bucket_iso] += 1
         if session.get("session_id") in audience_session_ids:
             audience_points_by_project[project_slug][bucket_iso] += 1
-            if session["active_now"]:
+            if session["active_now"] and not _is_stale_browser_signal(session):
                 live_counts[project_slug] += 1
         if _is_page_interest_graph_session(session):
             page_interest_points_by_project[project_slug][bucket_iso] += 1

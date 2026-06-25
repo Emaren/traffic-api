@@ -247,24 +247,45 @@ def apply_known_visitor_confirmation(session: dict[str, Any]) -> dict[str, str] 
         return known_visitor
 
     if identity_kind in HUMAN_IDENTITY_KINDS and not automation_or_burst:
-        session["classification_state"] = "human_confirmed"
-        session["human_confidence"] = max(int(session.get("human_confidence") or 0), 100)
-        session["suspicious_score"] = min(int(session.get("suspicious_score") or 0), 5)
-        if "known_confirmed_visitor_ip" not in reasons:
-            reasons.append("known_confirmed_visitor_ip")
+        if "known_identity_signal" not in reasons:
+            reasons.append("known_identity_signal")
         session["classification_reasons"] = reasons
+        session["known_identity_signal"] = True
+
+        already_confirmed = (
+            session.get("classification_state") == "human_confirmed"
+            or bool(session.get("human_confirmed"))
+        )
+        route_kind = str(session.get("route_kind") or "").strip()
+
+        if already_confirmed and route_kind == "page":
+            session["classification_state"] = "human_confirmed"
+            session["human_confidence"] = max(int(session.get("human_confidence") or 0), 88)
+            session["suspicious_score"] = min(int(session.get("suspicious_score") or 0), 12)
+            session["classification_summary"] = (
+                f"Confirmed human behavior with known identity context: {label} is registered as {detail}."
+            )
+            session["attention_label"] = "Known human"
+            session["attention_summary"] = (
+                f"{label} · {detail}. Traffic saw enough page behavior to keep this as confirmed human."
+            )
+            session["human_confirmed"] = True
+            return known_visitor
+
+        # Important: a known IP is useful identity context, not proof of auth/login/presence.
         session["classification_summary"] = (
-            f"Confirmed human: {label} is registered as a known visitor for this IP."
+            f"Known signal: {label} is registered as {detail} for this IP. "
+            "This does not prove an authenticated login or fresh human presence."
         )
-        session["attention_label"] = "Known human"
+        session["attention_label"] = "Known signal"
         session["attention_summary"] = (
-            f"{label} · {detail}. Traffic upgraded this session because the IP is in the known identity registry."
+            f"{label} · {detail}. Treat as identity context until page behavior or app auth confirms activity."
         )
-        session["data_confidence_label"] = "Confirmed"
+        session["data_confidence_label"] = session.get("data_confidence_label") or "Context"
         session["data_confidence_summary"] = (
-            "This session has operator-confirmed human context from the known identity registry."
+            "Known identity registry matched this IP, but Traffic is not upgrading it to confirmed human by identity alone."
         )
-        session["human_confirmed"] = True
+        session["human_confirmed"] = already_confirmed and route_kind == "page"
         return known_visitor
 
     if "known_identity_unusual_behavior" not in reasons:

@@ -1735,6 +1735,11 @@ def _is_browser_notification_worthy(row: Any) -> bool:
     if not path or path.startswith("/api/") or path.startswith("/_next/"):
         return False
 
+    visible_ms = int(row["visible_ms"] or 0)
+    dwell_ms = int(row["dwell_ms"] or 0) if "dwell_ms" in row.keys() else 0
+    if max(visible_ms, dwell_ms) >= 86_399_000:
+        return False
+
     return True
 
 
@@ -1783,7 +1788,8 @@ def _load_unprocessed_browser_notification_candidates(
             area,
             city,
             max_scroll_depth_pct,
-            visible_ms
+            visible_ms,
+            dwell_ms
         FROM traffic_browser_events
         WHERE NOT EXISTS (
             SELECT 1
@@ -1840,13 +1846,18 @@ def _browser_event_to_session(row: Any) -> dict[str, Any]:
         "person_key": person_key,
         "visitor_profile_id": visitor_profile_id,
         "visitor_alias": visitor_alias,
+        "known_visitor_label": label or None,
+        "known_visitor_detail": detail or None,
+        "known_visitor_kind": str((known or {}).get("identity_kind") or "") or None,
+        "known_visitor_confirmed": bool((known or {}).get("confidence") == "confirmed"),
+        "known_identity_signal": bool(label),
         "ip": ip,
         "country_code": country_code,
         "country": country,
         "area": area,
         "city": city,
-        "classification_state": "human_confirmed" if label else "likely_human",
-        "verdict_label": "Confirmed Human" if label else "Likely Human",
+        "classification_state": "likely_human",
+        "verdict_label": "Known Signal" if label else "Likely Human",
         "returning_visitor": False,
         "total_project_visits": 1,
         "projects_visited_in_window": 1,
