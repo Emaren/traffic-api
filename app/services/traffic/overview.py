@@ -2690,8 +2690,6 @@ def _project_graph_all_time_rollup_payload(*, project_slug: str) -> dict[str, An
             "This project has no configured hosts."
         )
 
-    placeholders = ",".join("?" for _ in hosts)
-
     try:
         with _connect() as connection:
             _ensure_schema(connection)
@@ -2716,16 +2714,43 @@ def _project_graph_all_time_rollup_payload(*, project_slug: str) -> dict[str, An
                     "Run scripts/rebuild_project_daily_rollups.py to build historical graph data."
                 )
 
-            raw_bounds = connection.execute(
-                f"""
-                SELECT
-                    MIN(timestamp) AS earliest_seen,
-                    MAX(timestamp) AS latest_seen
-                FROM traffic_entries
-                WHERE host IN ({placeholders})
-                """,
-                hosts,
-            ).fetchone()
+            earliest_candidates: list[str] = []
+            latest_candidates: list[str] = []
+
+            # Use index-edge lookups instead of MIN/MAX over millions of matching rows.
+            # The (host, timestamp) index can satisfy each lookup directly.
+            for host in hosts:
+                first_row = connection.execute(
+                    """
+                    SELECT timestamp
+                    FROM traffic_entries
+                    WHERE host = ?
+                    ORDER BY timestamp ASC
+                    LIMIT 1
+                    """,
+                    (host,),
+                ).fetchone()
+
+                if first_row and first_row["timestamp"]:
+                    earliest_candidates.append(
+                        str(first_row["timestamp"])
+                    )
+
+                latest_row = connection.execute(
+                    """
+                    SELECT timestamp
+                    FROM traffic_entries
+                    WHERE host = ?
+                    ORDER BY timestamp DESC
+                    LIMIT 1
+                    """,
+                    (host,),
+                ).fetchone()
+
+                if latest_row and latest_row["timestamp"]:
+                    latest_candidates.append(
+                        str(latest_row["timestamp"])
+                    )
 
     except Exception as exc:
         return empty_payload(
@@ -2733,14 +2758,14 @@ def _project_graph_all_time_rollup_payload(*, project_slug: str) -> dict[str, An
         )
 
     earliest_seen = (
-        str(raw_bounds["earliest_seen"])
-        if raw_bounds and raw_bounds["earliest_seen"]
+        min(earliest_candidates)
+        if earliest_candidates
         else None
     )
 
     latest_raw_at = (
-        str(raw_bounds["latest_seen"])
-        if raw_bounds and raw_bounds["latest_seen"]
+        max(latest_candidates)
+        if latest_candidates
         else None
     )
 

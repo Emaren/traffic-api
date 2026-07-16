@@ -7,11 +7,13 @@ After=traffic-api.service
 Type=oneshot
 User=tony
 Group=tony
+RuntimeDirectory=traffic-rollups
+RuntimeDirectoryMode=0755
 WorkingDirectory=/var/www/Traffic/traffic-api
 EnvironmentFile=/etc/traffic-api.env
 Environment=PYTHONUNBUFFERED=1
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
-TimeoutStartSec=900
-ExecStart=/usr/bin/flock -n /run/traffic-project-daily-rollups-aoe2hdbets.lock /var/www/Traffic/traffic-api/.venv/bin/python3 scripts/rebuild_project_daily_rollups.py --incremental --project aoe2hdbets
+TimeoutStartSec=3600
+ExecStart=/usr/bin/flock -n /run/traffic-rollups/aoe2hdbets.lock /var/www/Traffic/traffic-api/.venv/bin/python3 scripts/rebuild_project_daily_rollups.py --incremental --project aoe2hdbets
