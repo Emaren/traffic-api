@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter, defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from threading import Event, Lock, Thread
 from time import monotonic
 from typing import Any
@@ -2652,37 +2652,10 @@ def _bucket_label(bucket: datetime, bucket_minutes: int) -> str:
 
 
 def _project_graph_all_time_rollup_payload(*, project_slug: str) -> dict[str, Any]:
-    project = next((item for item in PROJECTS if item["slug"] == project_slug), None)
-    if not project:
-        return {
-            "label": "All-time human-shaped arrivals",
-            "series_kind": "all_time_human_shaped_arrivals",
-            "range_key": "all",
-            "range_label": "All Time",
-            "window_hours": None,
-            "bucket_minutes": 1440,
-            "coverage_mode": "durable_store",
-            "coverage_started_at": None,
-            "coverage_started_alberta": None,
-            "note": "Unknown project.",
-            "points": [],
-        }
-
-    hosts = [str(host) for host in project.get("hosts", []) if host]
-    if not hosts:
-        return {
-            "label": "All-time human-shaped arrivals",
-            "series_kind": "all_time_human_shaped_arrivals",
-            "range_key": "all",
-            "range_label": "All Time",
-            "window_hours": None,
-            "bucket_minutes": 1440,
-            "coverage_mode": "durable_store",
-            "coverage_started_at": None,
-            "coverage_started_alberta": None,
-            "note": "This project has no configured hosts.",
-            "points": [],
-        }
+    project = next(
+        (item for item in PROJECTS if item["slug"] == project_slug),
+        None,
+    )
 
     def empty_payload(note: str) -> dict[str, Any]:
         return {
@@ -2695,112 +2668,161 @@ def _project_graph_all_time_rollup_payload(*, project_slug: str) -> dict[str, An
             "coverage_mode": "durable_store",
             "coverage_started_at": None,
             "coverage_started_alberta": None,
+            "rollup_through_day": None,
+            "rollup_updated_at": None,
+            "latest_raw_at": None,
+            "rollup_stale_days": None,
             "note": note,
             "points": [],
         }
 
-    placeholders = ",".join("?" for _ in hosts)
-    now = iso_now()
+    if not project:
+        return empty_payload("Unknown project.")
 
-    # Materialize daily rollups. This is intentionally broader and faster than the full
-    # live classifier: distinct IPs hitting browser-shaped, human-facing page routes per day.
-    # The all-time endpoint then reads the compact rollup table instead of scanning raw logs.
-    rebuild_query = f"""
-        INSERT OR REPLACE INTO traffic_project_daily_rollups (
-            project_slug,
-            bucket_day,
-            visitors,
-            events,
-            updated_at
+    hosts = [
+        str(host)
+        for host in project.get("hosts", [])
+        if host
+    ]
+
+    if not hosts:
+        return empty_payload(
+            "This project has no configured hosts."
         )
-        SELECT
-            ? AS project_slug,
-            substr(timestamp, 1, 10) AS bucket_day,
-            COUNT(DISTINCT ip) AS visitors,
-            COUNT(*) AS events,
-            ? AS updated_at
-        FROM traffic_entries
-        WHERE host IN ({placeholders})
-          AND status BETWEEN 200 AND 399
-          AND method = 'GET'
-          AND ua LIKE '%Mozilla%'
-          AND normalized_path NOT LIKE '/api/%'
-          AND normalized_path NOT LIKE '/rpc-%'
-          AND normalized_path NOT LIKE '/rest-%'
-          AND normalized_path NOT LIKE '/_next/%'
-          AND normalized_path NOT LIKE '/wp-%'
-          AND normalized_path NOT LIKE '/wp/%'
-          AND normalized_path NOT IN (
-            '/robots.txt',
-            '/favicon.ico',
-            '/manifest.webmanifest',
-            '/admin-manifest.webmanifest'
-          )
-        GROUP BY substr(timestamp, 1, 10)
-    """
 
-    earliest_query = f"""
-        SELECT MIN(timestamp) AS earliest_seen
-        FROM traffic_entries
-        WHERE host IN ({placeholders})
-    """
+    placeholders = ",".join("?" for _ in hosts)
 
     try:
         with _connect() as connection:
             _ensure_schema(connection)
 
-            existing_count = connection.execute(
-                """
-                SELECT COUNT(*) AS count
-                FROM traffic_project_daily_rollups
-                WHERE project_slug = ?
-                """,
-                (project_slug,),
-            ).fetchone()["count"]
-
-            if not existing_count:
-                return empty_payload(
-                    "All-time strict human-signal rollup has not been materialized yet. "
-                    "Run scripts/rebuild_project_daily_rollups.py to rebuild historical graph data."
-                )
-
-            earliest_row = connection.execute(earliest_query, hosts).fetchone()
-            earliest_seen = earliest_row["earliest_seen"] if earliest_row else None
-
             rows = connection.execute(
                 """
-                SELECT bucket_day, visitors, events
+                SELECT
+                    bucket_day,
+                    visitors,
+                    events,
+                    updated_at
                 FROM traffic_project_daily_rollups
                 WHERE project_slug = ?
                 ORDER BY bucket_day ASC
                 """,
                 (project_slug,),
             ).fetchall()
+
+            if not rows:
+                return empty_payload(
+                    "All-time strict human-signal rollup has not been materialized yet. "
+                    "Run scripts/rebuild_project_daily_rollups.py to build historical graph data."
+                )
+
+            raw_bounds = connection.execute(
+                f"""
+                SELECT
+                    MIN(timestamp) AS earliest_seen,
+                    MAX(timestamp) AS latest_seen
+                FROM traffic_entries
+                WHERE host IN ({placeholders})
+                """,
+                hosts,
+            ).fetchone()
+
     except Exception as exc:
-        return empty_payload(f"All-time rollup failed: {exc}")
+        return empty_payload(
+            f"All-time rollup failed: {exc}"
+        )
+
+    earliest_seen = (
+        str(raw_bounds["earliest_seen"])
+        if raw_bounds and raw_bounds["earliest_seen"]
+        else None
+    )
+
+    latest_raw_at = (
+        str(raw_bounds["latest_seen"])
+        if raw_bounds and raw_bounds["latest_seen"]
+        else None
+    )
 
     earliest_dt: datetime | None = None
+
     if earliest_seen:
         try:
-            earliest_dt = datetime.fromisoformat(str(earliest_seen).replace("Z", "+00:00"))
+            earliest_dt = datetime.fromisoformat(
+                earliest_seen.replace("Z", "+00:00")
+            )
+
             if earliest_dt.tzinfo is None:
-                earliest_dt = earliest_dt.replace(tzinfo=timezone.utc)
-            earliest_dt = earliest_dt.astimezone(timezone.utc)
+                earliest_dt = earliest_dt.replace(
+                    tzinfo=timezone.utc
+                )
+
+            earliest_dt = earliest_dt.astimezone(
+                timezone.utc
+            )
+
         except Exception:
             earliest_dt = None
 
-    points = []
-    for row in rows:
-        day = str(row["bucket_day"])
+    through_day = (
+        str(rows[-1]["bucket_day"])
+        if rows
+        else None
+    )
+
+    rollup_updated_at = (
+        max(
+            (
+                str(row["updated_at"] or "")
+                for row in rows
+            ),
+            default="",
+        )
+        or None
+    )
+
+    stale_days: int | None = None
+
+    if through_day and latest_raw_at:
         try:
-            bucket = datetime.fromisoformat(f"{day}T00:00:00+00:00")
+            latest_raw_day = datetime.fromisoformat(
+                latest_raw_at.replace("Z", "+00:00")
+            ).date()
+
+            stale_days = max(
+                0,
+                (
+                    latest_raw_day
+                    - date.fromisoformat(through_day)
+                ).days,
+            )
+
+        except Exception:
+            stale_days = None
+
+    points: list[dict[str, Any]] = []
+
+    for row in rows:
+        day_value = str(row["bucket_day"])
+
+        try:
+            bucket_day = date.fromisoformat(
+                day_value
+            )
+
+            bucket = datetime.fromisoformat(
+                f"{day_value}T00:00:00+00:00"
+            )
+
         except Exception:
             continue
 
         points.append(
             {
                 "bucket_start": bucket.isoformat(),
-                "label": bucket.astimezone(ALBERTA_ZONE).strftime("%b %d"),
+                # bucket_day is already the canonical calendar day.
+                # Do not timezone-shift midnight UTC backward into Alberta.
+                "label": bucket_day.strftime("%b %d"),
                 "visitors": int(row["visitors"] or 0),
                 "events": int(row["events"] or 0),
             }
@@ -2808,9 +2830,16 @@ def _project_graph_all_time_rollup_payload(*, project_slug: str) -> dict[str, An
 
     note = (
         "All Time uses a materialized strict historical human-signal rollup. "
-        "It suppresses proxy fanout, route sweeps, chain RPC, REST, API, assets, WordPress probes, "
-        "and obvious non-page noise so the graph does not inflate bot swarms as audience."
+        "It suppresses proxy fanout, route sweeps, chain RPC, REST, API, assets, "
+        "WordPress probes, and obvious non-page noise so the graph does not inflate "
+        "bot swarms as audience."
     )
+
+    if stale_days is not None and stale_days > 0:
+        note += (
+            f" Rollup maintenance is {stale_days} "
+            f"day{'s' if stale_days != 1 else ''} behind raw Traffic data."
+        )
 
     return {
         "label": "All-time human-shaped arrivals",
@@ -2820,14 +2849,23 @@ def _project_graph_all_time_rollup_payload(*, project_slug: str) -> dict[str, An
         "window_hours": None,
         "bucket_minutes": 1440,
         "coverage_mode": "durable_store",
-        "coverage_started_at": earliest_dt.isoformat() if earliest_dt else None,
-        "coverage_started_alberta": (
-            _format_alberta_timestamp(earliest_dt) if earliest_dt else None
+        "coverage_started_at": (
+            earliest_dt.isoformat()
+            if earliest_dt
+            else None
         ),
+        "coverage_started_alberta": (
+            _format_alberta_timestamp(earliest_dt)
+            if earliest_dt
+            else None
+        ),
+        "rollup_through_day": through_day,
+        "rollup_updated_at": rollup_updated_at,
+        "latest_raw_at": latest_raw_at,
+        "rollup_stale_days": stale_days,
         "note": note,
         "points": points,
     }
-
 
 
 def _graph_spike_diagnosis(points: list[dict[str, Any]]) -> dict[str, Any] | None:
