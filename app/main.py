@@ -1080,6 +1080,107 @@ async def api_visitor_profile_stream(
     )
 
 
+@app.get("/api/projects/{project_slug}/public-audience-series")
+def api_project_public_audience_series(
+    project_slug: str,
+) -> dict:
+    import sqlite3
+
+    from app.services.traffic.config import PERSIST_DB_PATH
+
+    if not any(
+        project["slug"] == project_slug
+        for project in PROJECTS
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Unknown project",
+        )
+
+    connection = sqlite3.connect(
+        f"file:{PERSIST_DB_PATH.resolve()}?mode=ro",
+        uri=True,
+    )
+
+    connection.row_factory = sqlite3.Row
+
+    try:
+        rows = connection.execute(
+            """
+            SELECT
+                bucket_day,
+                total_traffic,
+                suspected_human,
+                confirmed_human,
+                updated_at
+            FROM
+                traffic_public_daily_audience_rollups
+            WHERE
+                project_slug = ?
+            ORDER BY
+                bucket_day ASC
+            """,
+            (project_slug,),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Public audience history is not available.",
+        ) from exc
+    finally:
+        connection.close()
+
+    if not rows:
+        return {
+            "ok": True,
+            "project_slug": project_slug,
+            "coverage_started_at": None,
+            "coverage_ended_at": None,
+            "generated_at": iso_now(),
+            "semantics": {
+                "total_traffic": "Canonical page sessions",
+                "suspected_human": (
+                    "Page sessions classified as likely or confirmed human "
+                    "after automation and suspicion filtering"
+                ),
+                "confirmed_human": (
+                    "Page sessions classified as confirmed human"
+                ),
+            },
+            "points": [],
+        }
+
+    return {
+        "ok": True,
+        "project_slug": project_slug,
+        "coverage_started_at": rows[0]["bucket_day"],
+        "coverage_ended_at": rows[-1]["bucket_day"],
+        "generated_at": iso_now(),
+        "semantics": {
+            "total_traffic": "Canonical page sessions",
+            "suspected_human": (
+                "Page sessions classified as likely or confirmed human "
+                "after automation and suspicion filtering"
+            ),
+            "confirmed_human": (
+                "Page sessions classified as confirmed human"
+            ),
+        },
+        "points": [
+            {
+                "date": row["bucket_day"],
+                "values": {
+                    "totalTraffic": int(row["total_traffic"]),
+                    "suspectedHuman": int(row["suspected_human"]),
+                    "confirmedHuman": int(row["confirmed_human"]),
+                },
+            }
+            for row in rows
+        ],
+    }
+
+
+
 @app.get("/api/project-human-series")
 def api_project_human_series(
     range_key: str = Query("12h", pattern="^(12h|24h|7d|30d|all)$"),
