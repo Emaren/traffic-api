@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 import json
+import hmac
 import signal
 from time import monotonic
 import threading
@@ -21,6 +22,7 @@ from app.services.traffic.browser_events import (
 )
 from app.services.traffic.config import (
     ADMIN_API_KEY,
+    PERFORMANCE_INGEST_KEY,
     NOTIFICATION_BATCH_LIMIT,
     NOTIFICATION_LOOP_SECONDS,
     PROJECTS,
@@ -29,6 +31,16 @@ from app.services.traffic.known_visitors import (
     create_known_identity,
     delete_known_identity,
     list_known_identities,
+)
+from app.services.traffic.performance import (
+    build_performance_overview,
+    create_speed_report,
+    get_performance_sample,
+    get_speed_report,
+    list_performance_samples,
+    list_speed_reports,
+    record_performance_sample,
+    update_speed_report_status,
 )
 from app.services.traffic.notifications import (
     admin_api_configured,
@@ -402,6 +414,22 @@ def require_admin_api_key(
         )
 
 
+def require_performance_ingest_key(
+    x_performance_key: str | None = Header(default=None, alias="X-Performance-Key"),
+) -> None:
+    if not PERFORMANCE_INGEST_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Traffic performance ingest key is not configured",
+        )
+    supplied = x_performance_key or ""
+    if not hmac.compare_digest(supplied, PERFORMANCE_INGEST_KEY):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid performance ingest key",
+        )
+
+
 def sse_payload(data: dict) -> str:
     return f"data: {json.dumps(data, separators=(',', ':'))}\n\n"
 
@@ -523,6 +551,141 @@ async def api_ingest_browser_event(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/internal/performance/sample")
+def api_internal_performance_sample(
+    payload: dict = Body(...),
+    _: None = Depends(require_performance_ingest_key),
+) -> dict:
+    try:
+        return record_performance_sample(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/internal/performance/report")
+def api_internal_performance_report(
+    payload: dict = Body(...),
+    _: None = Depends(require_performance_ingest_key),
+) -> dict:
+    try:
+        return create_speed_report(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/admin/performance/overview")
+def api_admin_performance_overview(
+    project_slug: str = Query(default="aoe2hdbets"),
+    since_hours: int = Query(default=24, ge=1, le=336),
+    build_version: str | None = Query(default=None),
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    return build_performance_overview(
+        project_slug=project_slug,
+        since_hours=since_hours,
+        build_version=build_version,
+    )
+
+
+@app.get("/api/admin/performance/samples")
+def api_admin_performance_samples(
+    limit: int = Query(default=100, ge=1, le=500),
+    project_slug: str = Query(default="aoe2hdbets"),
+    since_hours: int = Query(default=24, ge=1, le=336),
+    before_received_at: str | None = Query(default=None),
+    user_query: str | None = Query(default=None),
+    route: str | None = Query(default=None),
+    build_version: str | None = Query(default=None),
+    slow_only: bool = Query(default=False),
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    samples = list_performance_samples(
+        limit=limit,
+        project_slug=project_slug,
+        since_hours=since_hours,
+        before_received_at=before_received_at,
+        user_query=user_query,
+        route=route,
+        build_version=build_version,
+        slow_only=slow_only,
+    )
+    return {
+        "ok": True,
+        "generated_at": iso_now(),
+        "samples": samples,
+        "has_more": len(samples) >= limit,
+        "next_before_received_at": samples[-1]["received_at"] if samples else None,
+    }
+
+
+@app.get("/api/admin/performance/samples/{sample_id}")
+def api_admin_performance_sample_detail(
+    sample_id: str,
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    try:
+        sample = get_performance_sample(sample_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if sample is None:
+        raise HTTPException(status_code=404, detail="Performance sample not found")
+    return {"ok": True, "generated_at": iso_now(), "sample": sample}
+
+
+@app.get("/api/admin/performance/reports")
+def api_admin_performance_reports(
+    limit: int = Query(default=100, ge=1, le=300),
+    project_slug: str = Query(default="aoe2hdbets"),
+    report_status: str | None = Query(default=None, alias="status"),
+    before_created_at: str | None = Query(default=None),
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    try:
+        reports = list_speed_reports(
+            limit=limit,
+            project_slug=project_slug,
+            status=report_status,
+            before_created_at=before_created_at,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "generated_at": iso_now(),
+        "reports": reports,
+        "has_more": len(reports) >= limit,
+        "next_before_created_at": reports[-1]["created_at"] if reports else None,
+    }
+
+
+@app.get("/api/admin/performance/reports/{report_id}")
+def api_admin_performance_report_detail(
+    report_id: str,
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    try:
+        report = get_speed_report(report_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if report is None:
+        raise HTTPException(status_code=404, detail="Speed report not found")
+    return {"ok": True, "generated_at": iso_now(), "report": report}
+
+
+@app.post("/api/admin/performance/reports/{report_id}/status")
+def api_admin_performance_report_status(
+    report_id: str,
+    payload: dict = Body(...),
+    _: None = Depends(require_admin_api_key),
+) -> dict:
+    try:
+        return update_speed_report_status(report_id, str(payload.get("status") or ""))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/api/admin/browser-events/recent")
