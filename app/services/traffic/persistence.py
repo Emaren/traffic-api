@@ -229,6 +229,12 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             CREATE INDEX IF NOT EXISTS idx_traffic_notification_events_status_time
                 ON traffic_notification_events(status, event_timestamp DESC);
 
+            CREATE INDEX IF NOT EXISTS idx_traffic_notification_events_event_time
+                ON traffic_notification_events(event_timestamp DESC, id DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_traffic_notification_events_status_delivered
+                ON traffic_notification_events(status, delivered_at DESC);
+
             CREATE INDEX IF NOT EXISTS idx_traffic_notification_events_person_time
                 ON traffic_notification_events(person_key, event_timestamp DESC);
 
