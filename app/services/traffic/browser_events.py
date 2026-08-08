@@ -590,8 +590,16 @@ def _synthetic_server_story_events(
             FROM traffic_browser_events b
             WHERE b.ip = traffic_entries.ip
               AND b.path = traffic_entries.normalized_path
-              AND datetime(b.received_at) >= datetime(traffic_entries.timestamp, '-5 minutes')
-              AND datetime(b.received_at) <= datetime(traffic_entries.timestamp, '+5 minutes')
+              AND b.received_at >= strftime(
+                  '%Y-%m-%dT%H:%M:%f000+00:00',
+                  traffic_entries.timestamp,
+                  '-5 minutes'
+              )
+              AND b.received_at <= strftime(
+                  '%Y-%m-%dT%H:%M:%f000+00:00',
+                  traffic_entries.timestamp,
+                  '+5 minutes'
+              )
         )
         """,
     ]
