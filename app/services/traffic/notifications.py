@@ -819,50 +819,75 @@ def delete_notification_mute(mute_id: int) -> None:
         connection.commit()
 
 
-def list_notification_events(limit: int = 100) -> list[dict[str, Any]]:
+def list_notification_events(
+    limit: int = 100,
+    *,
+    before_event_timestamp: str | None = None,
+    since_hours: int | None = None,
+) -> list[dict[str, Any]]:
+    limit = max(1, min(int(limit or 100), 1500))
     operators = list_operator_identities()
+
+    clauses: list[str] = []
+    params: list[Any] = []
+
+    if since_hours is not None:
+        normalized_hours = max(1, min(int(since_hours or 24), 168))
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=normalized_hours)
+        clauses.append("event_timestamp >= ?")
+        params.append(cutoff.isoformat())
+
+    if before_event_timestamp:
+        before_time = parse_iso_timestamp(before_event_timestamp)
+        if before_time is not None:
+            clauses.append("event_timestamp < ?")
+            params.append(before_time.isoformat())
+
+    query = """
+        SELECT
+            id,
+            traffic_event_id,
+            session_id,
+            event_timestamp,
+            project_slug,
+            project_name,
+            host,
+            path,
+            route_kind,
+            person_key,
+            visitor_profile_id,
+            visitor_alias,
+            ip,
+            country_code,
+            country,
+            classification_state,
+            verdict_label,
+            returning_visitor,
+            total_project_visits,
+            projects_visited_in_window,
+            status,
+            suppression_reason,
+            provider,
+            provider_message_id,
+            delivery_error,
+            notification_title,
+            notification_body,
+            destination_url,
+            details_json,
+            created_at,
+            delivered_at
+        FROM traffic_notification_events
+    """
+
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+
+    query += " ORDER BY event_timestamp DESC, id DESC LIMIT ?"
+    params.append(limit)
+
     with _connect() as connection:
         _ensure_schema(connection)
-        rows = connection.execute(
-            """
-            SELECT
-                id,
-                traffic_event_id,
-                session_id,
-                event_timestamp,
-                project_slug,
-                project_name,
-                host,
-                path,
-                route_kind,
-                person_key,
-                visitor_profile_id,
-                visitor_alias,
-                ip,
-                country_code,
-                country,
-                classification_state,
-                verdict_label,
-                returning_visitor,
-                total_project_visits,
-                projects_visited_in_window,
-                status,
-                suppression_reason,
-                provider,
-                provider_message_id,
-                delivery_error,
-                notification_title,
-                notification_body,
-                destination_url,
-                details_json,
-                created_at,
-                delivered_at
-            FROM traffic_notification_events
-            ORDER BY event_timestamp DESC, id DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
+        rows = connection.execute(query, tuple(params)).fetchall()
 
     events: list[dict[str, Any]] = []
     for row in rows:
@@ -926,25 +951,11 @@ def list_notification_events_page(
     limit = max(1, min(int(limit or 120), 300))
     since_hours = max(1, min(int(since_hours or 24), 168))
 
-    # Reuse the existing row serializer, then page in-memory.
-    # The delivery log is already throttled to visits, so 1500 is plenty for the cockpit window.
-    all_events = list_notification_events(limit=1500)
-
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
-    before_time = parse_iso_timestamp(before_event_timestamp) if before_event_timestamp else None
-
-    filtered: list[dict[str, Any]] = []
-    for event in all_events:
-        event_time = parse_iso_timestamp(event.get("event_timestamp"))
-        if not event_time:
-            continue
-        if event_time < cutoff:
-            continue
-        if before_time and event_time >= before_time:
-            continue
-        filtered.append(event)
-
-    return filtered[:limit]
+    return list_notification_events(
+        limit=limit,
+        before_event_timestamp=before_event_timestamp,
+        since_hours=since_hours,
+    )
 
 
 def _notification_stats() -> dict[str, Any]:
@@ -998,7 +1009,7 @@ def build_notification_dashboard(loop_state: dict[str, Any] | None = None) -> di
         "operators": list_operator_identities(),
         "mutes": list_notification_mutes(),
         "visibility_rules": list_visibility_rules(),
-        "recent_events": list_notification_events(limit=120),
+        "recent_events": list_notification_events(limit=40, since_hours=24),
         "stats": _notification_stats(),
         "loop": loop_state or {},
     }
