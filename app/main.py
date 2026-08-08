@@ -580,8 +580,10 @@ def api_internal_auth_presence(
         result = record_authenticated_presence(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    clear_session_snapshot_cache()
-    clear_response_cache()
+
+    # Authenticated presence is high-frequency telemetry.
+    # Persist it without destroying unrelated global read caches.
+    # Normal cache TTLs provide bounded freshness for Traffic views.
     return result
 
 
