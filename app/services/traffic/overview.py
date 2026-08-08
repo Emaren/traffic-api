@@ -21,6 +21,7 @@ from app.services.traffic.config import (
     VISITS_HISTORY_LIMIT,
     PROJECTS,
     ALBERTA_TZ_NAME,
+    BROWSER_EVENT_STORY_REJECT_UA_TERMS,
 )
 from app.services.traffic.geo import get_geo_details
 from app.services.traffic.normalize import ALLOWED_HOSTS, is_allowed_host, project_for_host
@@ -2504,8 +2505,12 @@ def _browser_engagement_summaries(
             if not exists:
                 return summaries
 
+            ua_reject_sql = " AND ".join(
+                f"LOWER(COALESCE(user_agent, '')) NOT LIKE '%{term}%'"
+                for term in BROWSER_EVENT_STORY_REJECT_UA_TERMS
+            )
             rows = connection.execute(
-                """
+                f"""
                 SELECT
                     project_slug,
                     ip,
@@ -2516,11 +2521,16 @@ def _browser_engagement_summaries(
                     max_scroll_depth_pct,
                     click_label,
                     click_href,
-                    click_text
+                    click_text,
+                    user_agent,
+                    visitor_id,
+                    session_id,
+                    payload_json
                 FROM traffic_browser_events
                 WHERE received_at >= ?
                   AND project_slug != ''
                   AND ip != ''
+                  AND (event_type = 'auth_presence' OR ({ua_reject_sql}))
                 ORDER BY received_at ASC
                 """,
                 (since_utc.isoformat(),),
@@ -2546,10 +2556,35 @@ def _browser_engagement_summaries(
                 "browser_route_trail": [],
                 "browser_latest_meaningful_event": "",
                 "browser_latest_meaningful_path": "",
+                "browser_visitor_id": "",
+                "browser_session_id": "",
+                "authenticated": False,
+                "authenticated_uid": "",
+                "authenticated_label": "",
             },
         )
 
         event_type = str(row["event_type"] or "")
+        try:
+            payload = json.loads(str(row["payload_json"] or "{}"))
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        auth_verified = bool(payload.get("auth_verified") is True and payload.get("authenticated_uid"))
+        request_classification = classify_request(row["user_agent"], row["path"])
+        if request_classification in {"bot", "suspicious"} and not auth_verified:
+            continue
+
+        if row["visitor_id"]:
+            summary["browser_visitor_id"] = str(row["visitor_id"] or "")
+        if row["session_id"]:
+            summary["browser_session_id"] = str(row["session_id"] or "")
+        if auth_verified:
+            summary["authenticated"] = True
+            summary["authenticated_uid"] = str(payload.get("authenticated_uid") or "")
+            summary["authenticated_label"] = str(payload.get("authenticated_label") or "Authenticated player")[:120]
+
         path_value = str(row["path"] or "")
         if path_value and path_value not in summary["browser_route_trail"]:
             summary["browser_route_trail"].append(path_value)
@@ -2608,6 +2643,33 @@ def _attach_browser_engagement(
         session["browser_route_trail"] = list(summary.get("browser_route_trail") or [])
         session["browser_latest_meaningful_event"] = str(summary.get("browser_latest_meaningful_event") or "")
         session["browser_latest_meaningful_path"] = str(summary.get("browser_latest_meaningful_path") or "")
+        session["browser_visitor_id"] = str(summary.get("browser_visitor_id") or "")
+        session["browser_session_id"] = str(summary.get("browser_session_id") or "")
+        session["authenticated"] = bool(summary.get("authenticated"))
+        session["authenticated_uid"] = str(summary.get("authenticated_uid") or "")
+
+        if session["authenticated"]:
+            label = str(summary.get("authenticated_label") or "Authenticated player")
+            session["known_visitor_label"] = label
+            session["known_visitor_detail"] = "authenticated AoE2WAR session"
+            session["known_visitor_kind"] = "known_player"
+            session["known_visitor_confirmed"] = True
+            reasons = list(session.get("classification_reasons") or [])
+            if "authenticated_presence" not in reasons:
+                reasons.append("authenticated_presence")
+            session["classification_reasons"] = reasons
+            if session.get("classification_state") not in {"bot", "suspicious"}:
+                session["classification_state"] = "likely_human"
+                session["human_confidence"] = max(int(session.get("human_confidence") or 0), 85)
+                session["human_confirmed"] = False
+                session["suspicious_score"] = min(int(session.get("suspicious_score") or 0), 12)
+                session["verdict_label"] = "Likely Human"
+            session["classification_summary"] = (
+                f"AoE2WAR verified an authenticated session for {label}. "
+                "Authentication is authoritative identity context; Traffic still keeps behavioral human confidence separate."
+            )
+            session["attention_label"] = "Authenticated"
+            session["attention_summary"] = f"{label} · server-verified AoE2WAR presence."
 
         # Preserve server journey, but expose the browser-derived journey as the
         # preferred human trail when present.

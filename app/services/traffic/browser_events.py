@@ -10,7 +10,8 @@ import time
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
-from app.services.traffic.config import PERSIST_DB_PATH, PERSIST_ENABLED
+from app.services.traffic.classify import automation_family, classify_request, is_known_singapore_cloud_browser
+from app.services.traffic.config import BROWSER_EVENT_STORY_REJECT_UA_TERMS, PERSIST_DB_PATH, PERSIST_ENABLED
 from app.services.traffic.geo import get_geo_details
 from app.services.traffic.known_visitors import known_visitor_for_ip
 from app.services.traffic.normalize import is_allowed_host, normalize_host, normalize_path, project_for_host
@@ -193,6 +194,11 @@ def _compact_payload(payload: dict[str, Any]) -> str:
         "screen_height",
         "device_pixel_ratio",
         "traffic_event_label",
+        "source",
+        "auth_verified",
+        "authenticated_uid",
+        "authenticated_label",
+        "authenticated_kind",
     }
     compact = {key: payload.get(key) for key in sorted(allowed_extra) if key in payload}
     return json.dumps(compact, separators=(",", ":"), ensure_ascii=False)
@@ -294,6 +300,128 @@ def record_browser_event(
     }
 
 
+def record_authenticated_presence(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+
+    visitor_id = _clean_text(payload.get("visitor_id"), 100)
+    session_id = _clean_text(payload.get("session_id"), 100)
+    authenticated_uid = _clean_text(payload.get("authenticated_uid"), 120)
+    authenticated_label = _clean_text(payload.get("authenticated_label"), 120)
+    client_ip = _clean_text(payload.get("client_ip"), 80)
+    client_user_agent = _clean_text(payload.get("client_user_agent"), 500)
+
+    if not visitor_id or not session_id:
+        raise ValueError("visitor_id and session_id are required")
+    if not authenticated_uid or not authenticated_label:
+        raise ValueError("authenticated identity is required")
+    if not client_ip:
+        raise ValueError("client_ip is required")
+
+    trusted_payload = {
+        "event_type": "auth_presence",
+        "occurred_at": _clean_text(payload.get("occurred_at"), 80) or iso_now(),
+        "host": _clean_text(payload.get("host"), 160) or "aoe2war.com",
+        "path": _clean_text(payload.get("path"), 500) or "/",
+        "title": f"Authenticated: {authenticated_label}",
+        "referrer": "",
+        "visitor_id": visitor_id,
+        "session_id": session_id,
+        "page_view_id": "",
+        "source": "aoe2war_authenticated_presence",
+        "auth_verified": True,
+        "authenticated_uid": authenticated_uid,
+        "authenticated_label": authenticated_label,
+        "authenticated_kind": "known_player",
+    }
+
+    if not PERSIST_ENABLED:
+        return {"ok": True, "stored": False, "reason": "persistence_disabled", "generated_at": iso_now()}
+
+    host = normalize_host(trusted_payload["host"])
+    if not is_allowed_host(host):
+        raise ValueError(f"host is not allowed: {host}")
+
+    project = project_for_host(host)
+    received_at = iso_now()
+    path = normalize_path(trusted_payload["path"])
+    geo = get_geo_details(client_ip)
+    payload_json = _compact_payload(trusted_payload)
+
+    with _connect() as connection:
+        _ensure_schema(connection)
+        existing = connection.execute(
+            """
+            SELECT id
+            FROM traffic_browser_events
+            WHERE project_slug = ? AND session_id = ? AND event_type = 'auth_presence'
+            ORDER BY received_at DESC, id DESC
+            LIMIT 1
+            """,
+            (project.get("slug") or "unknown", session_id),
+        ).fetchone()
+
+        if existing:
+            event_id = int(existing["id"])
+            connection.execute(
+                """
+                UPDATE traffic_browser_events
+                SET received_at = ?, occurred_at = ?, host = ?, project_slug = ?, project_name = ?,
+                    path = ?, title = ?, visitor_id = ?, user_agent = ?, ip = ?,
+                    country_code = ?, country = ?, area = ?, city = ?, payload_json = ?
+                WHERE id = ?
+                """,
+                (
+                    received_at, trusted_payload["occurred_at"], host, project.get("slug") or "unknown",
+                    project.get("name") or "Unknown", path, trusted_payload["title"], visitor_id,
+                    client_user_agent, client_ip, _clean_text(geo.get("country_code"), 8),
+                    _clean_text(geo.get("country"), 120), _clean_text(geo.get("area"), 120),
+                    _clean_text(geo.get("city"), 120), payload_json, event_id,
+                ),
+            )
+        else:
+            cursor = connection.execute(
+                """
+                INSERT INTO traffic_browser_events (
+                    received_at, occurred_at, host, project_slug, project_name, path, title, referrer,
+                    visitor_id, session_id, page_view_id, event_type, viewport_width, viewport_height,
+                    document_height, scroll_y, scroll_depth_pct, max_scroll_depth_pct, click_x, click_y,
+                    click_text, click_label, click_href, click_selector, element_role, element_tag,
+                    visible_ms, dwell_ms, user_agent, ip, country_code, country, area, city, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, '', 'auth_presence',
+                    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '', '', '', '', '', '',
+                    NULL, NULL, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    received_at, trusted_payload["occurred_at"], host, project.get("slug") or "unknown",
+                    project.get("name") or "Unknown", path, trusted_payload["title"], visitor_id, session_id,
+                    client_user_agent, client_ip, _clean_text(geo.get("country_code"), 8),
+                    _clean_text(geo.get("country"), 120), _clean_text(geo.get("area"), 120),
+                    _clean_text(geo.get("city"), 120), payload_json,
+                ),
+            )
+            event_id = int(cursor.lastrowid)
+
+        connection.commit()
+
+    return {
+        "ok": True,
+        "stored": True,
+        "event_id": event_id,
+        "event_type": "auth_presence",
+        "project_slug": project.get("slug") or "unknown",
+        "generated_at": received_at,
+    }
+
+
+def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
+    try:
+        parsed = json.loads(str(event.get("payload_json") or "{}"))
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _enrich_browser_event_row(row: sqlite3.Row) -> dict[str, Any]:
     event = dict(row)
     ip = str(event.get("ip") or "").strip()
@@ -305,17 +433,55 @@ def _enrich_browser_event_row(row: sqlite3.Row) -> dict[str, Any]:
         event["area"] = _clean_text(geo.get("area"), 120)
         event["city"] = _clean_text(geo.get("city"), 120)
 
-    known_visitor = known_visitor_for_ip(ip)
-    if known_visitor:
-        event["known_visitor_label"] = _clean_text(known_visitor.get("label"), 120)
-        event["known_visitor_detail"] = _clean_text(known_visitor.get("detail"), 120)
-        event["known_visitor_kind"] = _clean_text(known_visitor.get("identity_kind"), 40)
+    payload = _event_payload(event)
+    authenticated = bool(payload.get("auth_verified") is True and payload.get("authenticated_uid"))
+    event["authenticated"] = authenticated
+    event["authenticated_uid"] = _clean_text(payload.get("authenticated_uid"), 120) if authenticated else ""
+    event["automation_family"] = automation_family(event.get("user_agent")) or ""
+    event["request_classification"] = classify_request(event.get("user_agent"), event.get("path"))
+
+    if authenticated:
+        event["known_visitor_label"] = _clean_text(payload.get("authenticated_label"), 120) or "Authenticated player"
+        event["known_visitor_detail"] = "authenticated AoE2WAR session"
+        event["known_visitor_kind"] = _clean_text(payload.get("authenticated_kind"), 40) or "known_player"
     else:
-        event["known_visitor_label"] = ""
-        event["known_visitor_detail"] = ""
-        event["known_visitor_kind"] = ""
+        known_visitor = known_visitor_for_ip(ip)
+        if known_visitor:
+            event["known_visitor_label"] = _clean_text(known_visitor.get("label"), 120)
+            event["known_visitor_detail"] = _clean_text(known_visitor.get("detail"), 120)
+            event["known_visitor_kind"] = _clean_text(known_visitor.get("identity_kind"), 40)
+        else:
+            event["known_visitor_label"] = ""
+            event["known_visitor_detail"] = ""
+            event["known_visitor_kind"] = ""
 
     return event
+
+
+def _propagate_authenticated_identity(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_session: dict[str, dict[str, str]] = {}
+    for event in events:
+        if not event.get("authenticated"):
+            continue
+        session_id = str(event.get("session_id") or "").strip()
+        if not session_id:
+            continue
+        by_session[session_id] = {
+            "authenticated_uid": str(event.get("authenticated_uid") or ""),
+            "known_visitor_label": str(event.get("known_visitor_label") or "Authenticated player"),
+            "known_visitor_detail": str(event.get("known_visitor_detail") or "authenticated AoE2WAR session"),
+            "known_visitor_kind": str(event.get("known_visitor_kind") or "known_player"),
+        }
+
+    for event in events:
+        session_id = str(event.get("session_id") or "").strip()
+        identity = by_session.get(session_id)
+        if not identity:
+            continue
+        event["authenticated"] = True
+        event.update(identity)
+
+    return events
 
 
 
@@ -366,6 +532,13 @@ def _stable_negative_id(value: str) -> int:
     return -int(digest, 16)
 
 
+
+def _story_event_is_nonhuman(event: dict[str, Any]) -> bool:
+    if event.get("authenticated"):
+        return False
+    return event.get("request_classification") in {"bot", "suspicious"}
+
+
 def _synthetic_server_story_events(
     connection: sqlite3.Connection,
     *,
@@ -410,6 +583,7 @@ def _synthetic_server_story_events(
         "normalized_path NOT LIKE '/downloads/%'",
         "normalized_path NOT LIKE '/icons/%'",
         "normalized_path NOT IN ('/robots.txt', '/favicon.ico', '/manifest.webmanifest')",
+        *[f"LOWER(COALESCE(ua, '')) NOT LIKE '%{term}%'" for term in BROWSER_EVENT_STORY_REJECT_UA_TERMS],
         """
         NOT EXISTS (
             SELECT 1
@@ -457,6 +631,14 @@ def _synthetic_server_story_events(
             continue
 
         geo = get_geo_details(ip)
+        request_classification = classify_request(row["ua"], path)
+        if request_classification in {"bot", "suspicious"}:
+            continue
+        if is_known_singapore_cloud_browser(
+            ip, geo.get("country_code"), geo.get("country"), row["ua"]
+        ):
+            continue
+
         known = known_visitor_for_ip(ip) if ip else None
         synthetic_key = f"server:{row['event_id'] or row['synthetic_rowid']}"
 
@@ -496,6 +678,10 @@ def _synthetic_server_story_events(
                 "known_visitor_label": _clean_text((known or {}).get("label"), 120) if known else "",
                 "known_visitor_detail": _clean_text((known or {}).get("detail"), 120) if known else "",
                 "known_visitor_kind": _clean_text((known or {}).get("identity_kind"), 40) if known else "",
+                "authenticated": False,
+                "authenticated_uid": "",
+                "automation_family": automation_family(row["ua"]) or "",
+                "request_classification": request_classification,
                 "payload_json": json.dumps(
                     {
                         "source": "server_access_log",
@@ -587,6 +773,11 @@ def list_recent_browser_events(
         clauses.append("received_at < ?")
         params.append(before_received_at)
 
+    ua_reject_sql = " AND ".join(
+        f"LOWER(COALESCE(user_agent, '')) NOT LIKE '%{term}%'" for term in BROWSER_EVENT_STORY_REJECT_UA_TERMS
+    )
+    clauses.append(f"(event_type = 'auth_presence' OR ({ua_reject_sql}))")
+
     where_sql = " AND ".join(clauses)
 
     with _connect() as connection:
@@ -603,6 +794,7 @@ def list_recent_browser_events(
         ).fetchall()
 
         events = [_enrich_browser_event_row(row) for row in rows]
+        events = [event for event in events if not _story_event_is_nonhuman(event)]
         events.extend(
             _cached_synthetic_server_story_events(
                 connection,
@@ -614,6 +806,7 @@ def list_recent_browser_events(
         )
 
     events = [event for event in events if not _is_chain_story_event(event)]
+    events = _propagate_authenticated_identity(events)
 
     events.sort(
         key=lambda event: (

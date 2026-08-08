@@ -44,6 +44,7 @@ ADMIN_API_KEY = os.getenv("TRAFFIC_ADMIN_API_KEY", "").strip()
 PERFORMANCE_ENABLED = os.getenv("TRAFFIC_PERFORMANCE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 PERFORMANCE_DB_PATH = Path(os.getenv("TRAFFIC_PERFORMANCE_DB_PATH", "/mnt/HC_Volume_105319120/traffic-performance/traffic_performance.sqlite3"))
 PERFORMANCE_INGEST_KEY = os.getenv("TRAFFIC_PERFORMANCE_INGEST_KEY", "").strip()
+IDENTITY_INGEST_KEY = os.getenv("TRAFFIC_IDENTITY_INGEST_KEY", "").strip()
 PERFORMANCE_SAMPLE_RETENTION_DAYS = int(os.getenv("TRAFFIC_PERFORMANCE_SAMPLE_RETENTION_DAYS", "14"))
 PERFORMANCE_DETAIL_RETENTION_DAYS = int(os.getenv("TRAFFIC_PERFORMANCE_DETAIL_RETENTION_DAYS", "7"))
 PERFORMANCE_REPORT_RETENTION_DAYS = int(os.getenv("TRAFFIC_PERFORMANCE_REPORT_RETENTION_DAYS", "180"))
@@ -81,7 +82,44 @@ KNOWN_AUTOMATION_UA_TERMS = [
     "mediapartners-google",
     "google-read-aloud",
     "storebot-google",
+    "meta-externalagent",
+    "meta-externalfetcher",
+    "applebot",
+    "baiduspider",
+    "semrushbot",
+    "mj12bot",
+    "gptbot",
+    "claudebot",
+    "bytespider",
+    "visionheight.com/scan",
 ]
+
+BROWSER_EVENT_STORY_REJECT_UA_TERMS = (
+    "meta-externalagent",
+    "meta-externalfetcher",
+    "applebot",
+    "googlebot",
+    "googleother",
+    "baiduspider",
+    "bingbot",
+    "semrushbot",
+    "mj12bot",
+    "gptbot",
+    "claudebot",
+    "bytespider",
+    "facebookexternalhit",
+    "twitterbot",
+    "headlesschrome",
+    "playwright",
+    "puppeteer",
+    "selenium",
+    "visionheight.com/scan",
+    "go-http-client",
+    "python-requests",
+    "scrapy",
+    "curl/",
+    "wget/",
+)
 
 SUSPICIOUS_UA_TERMS = [
     "curl",

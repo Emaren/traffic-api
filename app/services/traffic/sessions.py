@@ -19,6 +19,7 @@ from app.services.traffic.classify import (
     detect_os,
     detect_route_kind,
     is_trackable_path,
+    is_known_singapore_cloud_browser,
     quality_label_for_score,
 )
 from app.services.traffic.config import (
@@ -69,6 +70,9 @@ CHAIN_API_ROUTE_PREFIXES = (
 CHAIN_POLLER_WINDOW_SECONDS = 20 * 60
 CHAIN_POLLER_MIN_SESSIONS = 2
 CHAIN_POLLER_MAX_TOTAL_SECONDS = 20
+NETWORK_ACTOR_WINDOW_SECONDS = 10 * 60
+NETWORK_ACTOR_MIN_SESSIONS = 3
+NETWORK_ACTOR_MIN_IPS = 3
 
 REASON_LABELS = {
     "browser_ua": "Browser fingerprint looks like a real person",
@@ -102,6 +106,8 @@ REASON_LABELS = {
     "one_hit_fanout": "Each member looked like a thin one-hit route probe rather than a real journey",
     "chain_rpc_poll": "Hit chain RPC/REST endpoints instead of human-facing pages",
     "same_ip_chain_poller": "Same IP repeatedly polled chain infrastructure inside a short window",
+    "authenticated_presence": "AoE2WAR verified an authenticated player session",
+    "network_actor_cluster": "Multiple IP sessions were folded into one known network actor",
 }
 
 
@@ -449,17 +455,17 @@ def _build_distributed_burst_session(group: list[dict[str, Any]]) -> dict[str, A
 
 
 
-def _is_known_singapore_43_fanout(session: dict[str, Any]) -> bool:
-    ip = str(session.get("ip") or "")
-    if not (ip.startswith("43.172.") or ip.startswith("43.173.")):
-        return False
-    if (session.get("country_code") or session.get("country")) not in {"SG", "Singapore"}:
+def _is_known_singapore_cloud_fanout(session: dict[str, Any]) -> bool:
+    if not is_known_singapore_cloud_browser(
+        session.get("ip"),
+        session.get("country_code"),
+        session.get("country"),
+        session.get("user_agent"),
+    ):
         return False
     if session.get("project_slug") != "aoe2hdbets":
         return False
     if session.get("device") != "desktop":
-        return False
-    if session.get("os") != "Windows":
         return False
     if session.get("browser") != "Chrome":
         return False
@@ -618,6 +624,134 @@ def collapse_chain_api_pollers(sessions: list[dict[str, Any]]) -> list[dict[str,
         for session in sessions
         if session["session_id"] not in collapsed_session_ids
     ] + chain_poller_sessions
+
+
+def _network_actor_bucket(session: dict[str, Any]) -> int:
+    parsed = parse_iso_timestamp(session.get("started_at"))
+    if parsed is None:
+        parsed = datetime.now(timezone.utc)
+    return int(parsed.timestamp() // NETWORK_ACTOR_WINDOW_SECONDS)
+
+
+def _network_actor_family(session: dict[str, Any]) -> str:
+    if session.get("known_automation") and session.get("automation_family"):
+        return str(session.get("automation_family") or "")
+    return str(session.get("network_actor_family") or "")
+
+
+def _build_network_actor_cluster(family: str, group: list[dict[str, Any]]) -> dict[str, Any]:
+    ordered = sorted(group, key=lambda item: item.get("started_at", ""))
+    first = ordered[0]
+    starts = [parse_iso_timestamp(item.get("started_at")) for item in ordered]
+    ends = [parse_iso_timestamp(item.get("ended_at")) for item in ordered]
+    starts = [value for value in starts if value is not None]
+    ends = [value for value in ends if value is not None]
+    first_dt = min(starts) if starts else datetime.now(timezone.utc)
+    last_dt = max(ends) if ends else first_dt
+    ips = ordered_unique([str(item.get("ip") or "") for item in ordered if item.get("ip")])
+    paths = ordered_unique([
+        str(path)
+        for item in ordered
+        for path in (item.get("page_sequence") or [item.get("entry_page", "")])
+        if path
+    ])
+    signature = "|".join([
+        "network_actor",
+        first.get("project_slug", ""),
+        family,
+        first.get("country_code") or first.get("country", ""),
+        str(_network_actor_bucket(first)),
+    ])
+    profile_id = visitor_profile_id_for_person(signature)
+    known_bot = any(bool(item.get("known_automation")) for item in ordered)
+    state = "bot" if known_bot else "browser_script"
+    suspicious_score = 60 if known_bot else 82
+
+    return {
+        **first,
+        "session_id": f"network|{profile_id}|{first_dt.isoformat()}",
+        "visitor_key": signature,
+        "person_key": signature,
+        "visitor_profile_id": profile_id,
+        "visitor_alias": f"{family} · {len(ips)} IPs",
+        "started_at": first_dt.isoformat(),
+        "ended_at": last_dt.isoformat(),
+        "first_seen_at": first_dt.isoformat(),
+        "last_seen_at": last_dt.isoformat(),
+        "first_seen_alberta": to_alberta_display(first_dt),
+        "last_seen_alberta": to_alberta_display(last_dt),
+        "entry_page": paths[0] if paths else first.get("entry_page", ""),
+        "current_page": paths[-1] if paths else first.get("current_page", ""),
+        "exit_page": paths[-1] if paths else first.get("exit_page", ""),
+        "next_page": paths[1] if len(paths) > 1 else "",
+        "page_sequence": paths[:30],
+        "page_count": len(paths),
+        "event_count": sum(safe_int(item.get("event_count"), 0) for item in ordered),
+        "total_seconds": max(0, int((last_dt - first_dt).total_seconds())),
+        "engaged_seconds": 0,
+        "human_confidence": 0,
+        "human_confirmed": False,
+        "classification_state": state,
+        "classification_reasons": ordered_unique([
+            "network_actor_cluster",
+            *(["known_non_human_identity"] if known_bot else ["distributed_ip_burst", "browser_script_pattern"]),
+        ]),
+        "classification_reason_labels": [
+            humanize_reason("network_actor_cluster"),
+        ],
+        "suspicious_score": max(suspicious_score, safe_int(first.get("suspicious_score"), 0)),
+        "quality_score": min(safe_int(first.get("quality_score"), 0), 10),
+        "quality_label": "weak",
+        "primary_category": "bot" if known_bot else "suspicious",
+        "verdict_label": label_classification_state(state),
+        "classification_summary": (
+            f"Folded {len(group)} sessions across {len(ips)} IPs into the network actor {family}. "
+            "This is one crawler/automation fleet, not separate visitors."
+        ),
+        "attention_label": "Network actor",
+        "attention_summary": f"{family} · {len(ips)} IPs folded together.",
+        "known_automation": known_bot,
+        "automation_family": family if known_bot else first.get("automation_family", ""),
+        "network_actor_family": family,
+        "is_network_actor_cluster": True,
+        "network_actor_member_count": len(group),
+        "network_actor_ip_count": len(ips),
+        "network_actor_sample_ips": ips[:20],
+        "network_actor_paths": paths[:30],
+        "visits_in_window": 1,
+        "project_visits_in_window": 1,
+        "total_project_visits": 1,
+        "times_returned_in_project": 0,
+        "returning_visitor": False,
+    }
+
+
+def collapse_network_actors(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, str, int], list[dict[str, Any]]] = defaultdict(list)
+    for session in sessions:
+        family = _network_actor_family(session)
+        if not family:
+            continue
+        key = (
+            str(session.get("project_slug") or ""),
+            family,
+            str(session.get("country_code") or session.get("country") or ""),
+            _network_actor_bucket(session),
+        )
+        grouped[key].append(session)
+
+    collapsed: set[str] = set()
+    clusters: list[dict[str, Any]] = []
+    for (_project, family, _country, _bucket), group in grouped.items():
+        ips = {str(item.get("ip") or "") for item in group if item.get("ip")}
+        if len(group) < NETWORK_ACTOR_MIN_SESSIONS or len(ips) < NETWORK_ACTOR_MIN_IPS:
+            continue
+        collapsed.update(str(item.get("session_id") or "") for item in group)
+        clusters.append(_build_network_actor_cluster(family, group))
+
+    if not collapsed:
+        return sessions
+    return [item for item in sessions if str(item.get("session_id") or "") not in collapsed] + clusters
 
 
 def collapse_distributed_bursts(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1116,6 +1250,7 @@ def build_single_session(
         "device": detect_device_type(first["ua"]),
         "os": detect_os(first["ua"]),
         "browser": detect_browser(first["ua"]),
+        "user_agent": first["ua"] or "",
         "known_automation": known_automation,
         "automation_family": automation_label,
         "route_bundle_spam": bool(ip_behavior.get("route_bundle_spam")),
@@ -1218,7 +1353,7 @@ def enrich_sessions(sessions: list[dict[str, Any]]) -> None:
                 )
             session["attention_label"] = "Chain poller"
             session["attention_summary"] = "Not a normal human visitor journey; separated from the people feed."
-        elif _is_known_singapore_43_fanout(session):
+        elif _is_known_singapore_cloud_fanout(session):
             session["classification_state"] = "browser_script"
             session["classification_reasons"] = ordered_unique(
                 [*session.get("classification_reasons", []), "distributed_ip_burst", "one_hit_fanout", "thin_direct_browser"]
@@ -1228,13 +1363,14 @@ def enrich_sessions(sessions: list[dict[str, Any]]) -> None:
             session["quality_label"] = "weak"
             session["primary_category"] = "suspicious"
             session["suspicious_score"] = max(safe_int(session.get("suspicious_score"), 0), 76)
-            session["visitor_alias"] = f"Singapore43Script-{session.get('ip', '').split('.')[-1] or 'IP'}"
+            session["visitor_alias"] = f"SingaporeCloudScript-{session.get('ip', '').split('.')[-1] or 'IP'}"
             session["classification_summary"] = (
-                "This is a thin one-hit Windows Chrome session from the recurring Singapore 43.x fanout range. "
-                "Treat it as scripted browsing unless it later shows real journey depth."
+                "This is a thin one-hit desktop Chrome session from the recurring Singapore cloud fanout ranges "
+                "(43.172/43.173/47.79/47.82). Treat it as scripted browsing unless it later shows real journey depth."
             )
             session["attention_label"] = "Script watch"
-            session["attention_summary"] = "Known Singapore 43.x one-hit fanout pattern."
+            session["attention_summary"] = "Known Singapore cloud one-hit fanout pattern."
+            session["network_actor_family"] = "Singapore Cloud Browser Fleet"
         elif session.get("is_burst_cluster") or session["classification_state"] == "script_burst":
             ip_count = safe_int(session.get("burst_ip_count"), 0)
             path_count = safe_int(session.get("burst_path_count"), 0)
@@ -1318,6 +1454,7 @@ def build_sessions(recent_entries: list[dict[str, Any]], limit: int | None = Non
     sessions = collapse_distributed_bursts(sessions)
     sessions = collapse_chain_api_pollers(sessions)
     enrich_sessions(sessions)
+    sessions = collapse_network_actors(sessions)
     sessions.sort(key=lambda item: item["ended_at"], reverse=True)
 
     if limit is None:

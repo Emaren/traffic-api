@@ -84,6 +84,31 @@ def is_trackable_path(path: str | None) -> bool:
     return detect_route_kind(path) in {"page", "api", "probe", "watcher"}
 
 
+SINGAPORE_CLOUD_BROWSER_PREFIXES = ("43.172.", "43.173.", "47.79.", "47.82.")
+
+
+def is_known_singapore_cloud_browser(
+    ip: str | None,
+    country_code: str | None,
+    country: str | None,
+    ua: str | None,
+) -> bool:
+    cleaned_ip = (ip or "").strip()
+    if not any(cleaned_ip.startswith(prefix) for prefix in SINGAPORE_CLOUD_BROWSER_PREFIXES):
+        return False
+
+    geo = {(country_code or "").strip().upper(), (country or "").strip().lower()}
+    if "SG" not in geo and "singapore" not in geo:
+        return False
+
+    lowered = (ua or "").lower()
+    if "chrome/" not in lowered:
+        return False
+    if any(term in lowered for term in ("android", "iphone", "ipad", "mobile")):
+        return False
+    return any(term in lowered for term in ("windows nt", "macintosh", "x11; linux"))
+
+
 def automation_family(ua: str | None) -> str | None:
     lowered = (ua or "").lower()
     if "dataminr" in lowered or "help@dataminr.com" in lowered:
@@ -102,6 +127,32 @@ def automation_family(ua: str | None) -> str | None:
         return "Storebot-Google"
     if "googlebot" in lowered:
         return "Googlebot"
+    if "meta-externalagent" in lowered:
+        return "Meta ExternalAgent"
+    if "meta-externalfetcher" in lowered:
+        return "Meta ExternalFetcher"
+    if "applebot" in lowered:
+        return "Applebot"
+    if "baiduspider" in lowered:
+        return "Baiduspider"
+    if "semrushbot" in lowered:
+        return "SemrushBot"
+    if "mj12bot" in lowered:
+        return "MJ12Bot"
+    if "gptbot" in lowered:
+        return "GPTBot"
+    if "claudebot" in lowered:
+        return "ClaudeBot"
+    if "bytespider" in lowered:
+        return "Bytespider"
+    if "visionheight.com/scan" in lowered:
+        return "VisionHeight Scanner"
+    if "facebookexternalhit" in lowered:
+        return "Facebook ExternalHit"
+    if "twitterbot" in lowered:
+        return "Twitterbot"
+    if "bingbot" in lowered or "bingpreview" in lowered:
+        return "Bingbot"
     return None
 
 

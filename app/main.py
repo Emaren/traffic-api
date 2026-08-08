@@ -18,10 +18,12 @@ from app.services.traffic.overview import clear_session_snapshot_cache, warm_ses
 from app.services.traffic.browser_events import (
     build_beacon_javascript,
     list_recent_browser_events,
+    record_authenticated_presence,
     record_browser_event,
 )
 from app.services.traffic.config import (
     ADMIN_API_KEY,
+    IDENTITY_INGEST_KEY,
     PERFORMANCE_INGEST_KEY,
     NOTIFICATION_BATCH_LIMIT,
     NOTIFICATION_LOOP_SECONDS,
@@ -414,6 +416,22 @@ def require_admin_api_key(
         )
 
 
+def require_identity_ingest_key(
+    x_identity_key: str | None = Header(default=None, alias="X-Identity-Key"),
+) -> None:
+    if not IDENTITY_INGEST_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Traffic identity ingest key is not configured",
+        )
+    supplied = x_identity_key or ""
+    if not hmac.compare_digest(supplied, IDENTITY_INGEST_KEY):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid identity ingest key",
+        )
+
+
 def require_performance_ingest_key(
     x_performance_key: str | None = Header(default=None, alias="X-Performance-Key"),
 ) -> None:
@@ -551,6 +569,20 @@ async def api_ingest_browser_event(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/internal/auth-presence")
+def api_internal_auth_presence(
+    payload: dict = Body(...),
+    _: None = Depends(require_identity_ingest_key),
+) -> dict:
+    try:
+        result = record_authenticated_presence(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    clear_session_snapshot_cache()
+    clear_response_cache()
+    return result
 
 
 @app.post("/api/internal/performance/sample")
