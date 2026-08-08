@@ -344,9 +344,10 @@ def _build_session_snapshot(
 
 
 def warm_session_snapshots() -> None:
-    # Keep boot memory bounded. A 24h warm cache makes the live cockpit fast,
-    # while all-time snapshots can be rebuilt lazily only when an operator asks for them.
-    _refresh_session_snapshot_async(window_hours=24)
+    # Warm the default 12h observatory window directly.
+    # The caller already runs this function off the event loop, so do not
+    # spawn another unmanaged worker thread here.
+    _rebuild_session_snapshot(window_hours=12)
 
 
 def clear_session_snapshot_cache() -> None:

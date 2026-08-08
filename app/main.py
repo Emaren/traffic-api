@@ -80,6 +80,28 @@ LONG_RANGE_CACHE_TTL_SECONDS = 60.0
 MID_RANGE_CACHE_TTL_SECONDS = 40.0
 
 
+async def delayed_session_snapshot_warm(
+    app: FastAPI,
+    *,
+    delay_seconds: float = 20.0,
+) -> None:
+    shutdown_event = getattr(app.state, "shutdown_event", None)
+
+    if isinstance(shutdown_event, asyncio.Event):
+        try:
+            await asyncio.wait_for(
+                shutdown_event.wait(),
+                timeout=delay_seconds,
+            )
+            return
+        except asyncio.TimeoutError:
+            pass
+    else:
+        await asyncio.sleep(delay_seconds)
+
+    await asyncio.to_thread(warm_session_snapshots)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     shutdown_event = asyncio.Event()
@@ -111,7 +133,7 @@ async def lifespan(app: FastAPI):
             signal.signal(signum, request_shutdown)
 
     notification_task = asyncio.create_task(notification_worker(app))
-    warm_cache_task = asyncio.create_task(asyncio.to_thread(warm_session_snapshots))
+    warm_cache_task = asyncio.create_task(delayed_session_snapshot_warm(app))
 
     try:
         yield
