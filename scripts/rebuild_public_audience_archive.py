@@ -37,7 +37,7 @@ from app.services.traffic.sessions import (
     UNKNOWN_HOST,
     UNKNOWN_REFERRER,
     _is_framework_route_bundle_path,
-    _is_known_singapore_43_fanout,
+    _is_known_singapore_cloud_fanout,
     apply_known_visitor_confirmation,
     build_single_session,
     collapse_distributed_bursts,
@@ -334,7 +334,7 @@ def finalize_bucket(
         )
 
         singapore_script = (
-            _is_known_singapore_43_fanout(
+            _is_known_singapore_cloud_fanout(
                 session
             )
         )
