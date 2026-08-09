@@ -100,6 +100,9 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_traffic_browser_events_project_received
             ON traffic_browser_events(project_slug, received_at DESC);
 
+        CREATE INDEX IF NOT EXISTS idx_traffic_browser_events_project_type_received
+            ON traffic_browser_events(project_slug, event_type, received_at DESC);
+
         CREATE INDEX IF NOT EXISTS idx_traffic_browser_events_session_received
             ON traffic_browser_events(session_id, received_at DESC);
 
@@ -404,6 +407,18 @@ def record_authenticated_presence(payload: dict[str, Any]) -> dict[str, Any]:
 
         connection.commit()
 
+        session_event_count = int(
+            connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM traffic_browser_events
+                WHERE session_id = ?
+                  AND event_type != 'auth_presence'
+                """,
+                (session_id,),
+            ).fetchone()[0]
+        )
+
     return {
         "ok": True,
         "stored": True,
@@ -411,6 +426,7 @@ def record_authenticated_presence(payload: dict[str, Any]) -> dict[str, Any]:
         "event_type": "auth_presence",
         "project_slug": project.get("slug") or "unknown",
         "generated_at": received_at,
+        "session_event_count": session_event_count,
     }
 
 
@@ -444,16 +460,23 @@ def _enrich_browser_event_row(row: sqlite3.Row) -> dict[str, Any]:
         event["known_visitor_label"] = _clean_text(payload.get("authenticated_label"), 120) or "Authenticated player"
         event["known_visitor_detail"] = "authenticated AoE2WAR session"
         event["known_visitor_kind"] = _clean_text(payload.get("authenticated_kind"), 40) or "known_player"
+        event["known_visitor_source"] = "authenticated"
     else:
         known_visitor = known_visitor_for_ip(ip)
         if known_visitor:
+            # Historical IP association is useful context only.
+            # It is never proof that this browser is logged in as that person.
             event["known_visitor_label"] = _clean_text(known_visitor.get("label"), 120)
             event["known_visitor_detail"] = _clean_text(known_visitor.get("detail"), 120)
             event["known_visitor_kind"] = _clean_text(known_visitor.get("identity_kind"), 40)
+            event["known_visitor_source"] = "ip_context"
         else:
             event["known_visitor_label"] = ""
             event["known_visitor_detail"] = ""
             event["known_visitor_kind"] = ""
+            event["known_visitor_source"] = ""
+
+    event.pop("auth_story_rank", None)
 
     return event
 
@@ -471,6 +494,7 @@ def _propagate_authenticated_identity(events: list[dict[str, Any]]) -> list[dict
             "known_visitor_label": str(event.get("known_visitor_label") or "Authenticated player"),
             "known_visitor_detail": str(event.get("known_visitor_detail") or "authenticated AoE2WAR session"),
             "known_visitor_kind": str(event.get("known_visitor_kind") or "known_player"),
+            "known_visitor_source": "authenticated",
         }
 
     for event in events:
@@ -483,6 +507,257 @@ def _propagate_authenticated_identity(events: list[dict[str, Any]]) -> list[dict
 
     return events
 
+
+
+
+def _story_sort_key(
+    event: dict[str, Any],
+) -> tuple[str, int]:
+    return (
+        str(
+            event.get("received_at")
+            or ""
+        ),
+        int(
+            event.get("id")
+            or 0
+        ),
+    )
+
+
+def _dedupe_browser_story_events(
+    events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    deduped: list[
+        dict[str, Any]
+    ] = []
+
+    seen: set[
+        tuple[str, str, str, str]
+    ] = set()
+
+    for event in events:
+        marker = (
+            str(event.get("id") or ""),
+            str(event.get("event_type") or ""),
+            str(event.get("received_at") or ""),
+            str(event.get("session_id") or ""),
+        )
+
+        if marker in seen:
+            continue
+
+        seen.add(marker)
+        deduped.append(event)
+
+    return deduped
+
+
+def _prioritize_authenticated_story_events(
+    events: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """
+    Reserve story capacity for authenticated sessions.
+
+    Every authenticated session receives its auth proof first.
+    Meaningful journey context is then distributed round-robin,
+    preventing one noisy session from starving another player.
+    Remaining capacity is filled chronologically.
+    """
+    limit = max(
+        1,
+        int(limit),
+    )
+
+    ordered = sorted(
+        _dedupe_browser_story_events(
+            events
+        ),
+        key=_story_sort_key,
+        reverse=True,
+    )
+
+    auth_presence_by_session: dict[
+        str,
+        dict[str, Any],
+    ] = {}
+
+    for event in ordered:
+        if not event.get(
+            "authenticated"
+        ):
+            continue
+
+        if (
+            event.get("event_type")
+            != "auth_presence"
+        ):
+            continue
+
+        session_id = str(
+            event.get("session_id")
+            or ""
+        ).strip()
+
+        if not session_id:
+            continue
+
+        auth_presence_by_session.setdefault(
+            session_id,
+            event,
+        )
+
+    session_order = list(
+        auth_presence_by_session.keys()
+    )
+
+    selected: list[
+        dict[str, Any]
+    ] = []
+
+    selected_markers: set[
+        tuple[str, str, str, str]
+    ] = set()
+
+    def marker(
+        event: dict[str, Any],
+    ) -> tuple[str, str, str, str]:
+        return (
+            str(event.get("id") or ""),
+            str(event.get("event_type") or ""),
+            str(event.get("received_at") or ""),
+            str(event.get("session_id") or ""),
+        )
+
+    def add(
+        event: dict[str, Any],
+    ) -> bool:
+        if len(selected) >= limit:
+            return False
+
+        event_marker = marker(
+            event
+        )
+
+        if (
+            event_marker
+            in selected_markers
+        ):
+            return True
+
+        selected.append(event)
+
+        selected_markers.add(
+            event_marker
+        )
+
+        return True
+
+    # Auth proof always gets first claim on capacity.
+    for session_id in session_order:
+        if not add(
+            auth_presence_by_session[
+                session_id
+            ]
+        ):
+            break
+
+    if len(selected) >= limit:
+        return sorted(
+            selected,
+            key=_story_sort_key,
+            reverse=True,
+        )
+
+    context_by_session: dict[
+        str,
+        list[dict[str, Any]],
+    ] = {
+        session_id: []
+        for session_id
+        in session_order
+    }
+
+    for event in ordered:
+        if not event.get(
+            "authenticated"
+        ):
+            continue
+
+        if (
+            event.get("event_type")
+            == "auth_presence"
+        ):
+            continue
+
+        session_id = str(
+            event.get("session_id")
+            or ""
+        ).strip()
+
+        if (
+            session_id
+            in context_by_session
+        ):
+            context_by_session[
+                session_id
+            ].append(event)
+
+    positions = {
+        session_id: 0
+        for session_id
+        in session_order
+    }
+
+    while len(selected) < limit:
+        progressed = False
+
+        for session_id in session_order:
+            position = positions[
+                session_id
+            ]
+
+            candidates = (
+                context_by_session[
+                    session_id
+                ]
+            )
+
+            if (
+                position
+                >= len(candidates)
+            ):
+                continue
+
+            positions[
+                session_id
+            ] += 1
+
+            add(
+                candidates[position]
+            )
+
+            progressed = True
+
+            if len(selected) >= limit:
+                break
+
+        if not progressed:
+            break
+
+    for event in ordered:
+        if len(selected) >= limit:
+            break
+
+        add(event)
+
+    return sorted(
+        selected,
+        key=_story_sort_key,
+        reverse=True,
+    )
 
 
 AOE2WAR_STORY_HOSTS = (
@@ -686,6 +961,7 @@ def _synthetic_server_story_events(
                 "known_visitor_label": _clean_text((known or {}).get("label"), 120) if known else "",
                 "known_visitor_detail": _clean_text((known or {}).get("detail"), 120) if known else "",
                 "known_visitor_kind": _clean_text((known or {}).get("identity_kind"), 40) if known else "",
+                "known_visitor_source": "ip_context" if known else "",
                 "authenticated": False,
                 "authenticated_uid": "",
                 "automation_family": automation_family(row["ua"]) or "",
@@ -767,30 +1043,84 @@ def list_recent_browser_events(
     if not PERSIST_ENABLED:
         return []
 
-    limit = max(1, min(int(limit or 50), 200))
-    since_hours = max(1, min(int(since_hours or 24), 168))
+    limit = max(
+        1,
+        min(
+            int(limit or 50),
+            200,
+        ),
+    )
 
-    clauses = ["datetime(received_at) >= datetime('now', ?)"]
-    params: list[Any] = [f"-{since_hours} hours"]
+    since_hours = max(
+        1,
+        min(
+            int(since_hours or 24),
+            168,
+        ),
+    )
+
+    clauses = [
+        "datetime(received_at) >= datetime('now', ?)"
+    ]
+
+    params: list[Any] = [
+        f"-{since_hours} hours"
+    ]
 
     if project_slug:
-        clauses.append("project_slug = ?")
-        params.append(project_slug)
+        clauses.append(
+            "project_slug = ?"
+        )
+        params.append(
+            project_slug
+        )
 
     if before_received_at:
-        clauses.append("received_at < ?")
-        params.append(before_received_at)
+        clauses.append(
+            "received_at < ?"
+        )
+        params.append(
+            before_received_at
+        )
 
     ua_reject_sql = " AND ".join(
-        f"LOWER(COALESCE(user_agent, '')) NOT LIKE '%{term}%'" for term in BROWSER_EVENT_STORY_REJECT_UA_TERMS
+        (
+            "LOWER(COALESCE(user_agent, '')) "
+            f"NOT LIKE '%{term}%'"
+        )
+        for term
+        in BROWSER_EVENT_STORY_REJECT_UA_TERMS
     )
-    clauses.append(f"(event_type = 'auth_presence' OR ({ua_reject_sql}))")
 
-    where_sql = " AND ".join(clauses)
+    clauses.append(
+        f"(event_type = 'auth_presence' OR ({ua_reject_sql}))"
+    )
+
+    where_sql = " AND ".join(
+        clauses
+    )
+
+    general_cutoff = (
+        _traffic_dt.datetime.now(
+            _traffic_dt.timezone.utc
+        )
+        - _traffic_dt.timedelta(
+            hours=since_hours
+        )
+    ).isoformat()
+
+    browser_events: list[
+        dict[str, Any]
+    ] = []
+
+    synthetic_events: list[
+        dict[str, Any]
+    ] = []
 
     with _connect() as connection:
         _ensure_schema(connection)
-        rows = connection.execute(
+
+        ordinary_rows = connection.execute(
             f"""
             SELECT *
             FROM traffic_browser_events
@@ -798,12 +1128,194 @@ def list_recent_browser_events(
             ORDER BY received_at DESC, id DESC
             LIMIT ?
             """,
-            (*params, limit),
+            (
+                *params,
+                limit,
+            ),
         ).fetchall()
 
-        events = [_enrich_browser_event_row(row) for row in rows]
-        events = [event for event in events if not _story_event_is_nonhuman(event)]
-        events.extend(
+        auth_rows: list[
+            sqlite3.Row
+        ] = []
+
+        auth_context_rows: list[
+            sqlite3.Row
+        ] = []
+
+        # Reserve authenticated truth independently of ordinary
+        # chronological story traffic on the main page.
+        if before_received_at is None:
+            auth_hours = min(
+                since_hours,
+                24,
+            )
+
+            auth_cutoff = (
+                _traffic_dt.datetime.now(
+                    _traffic_dt.timezone.utc
+                )
+                - _traffic_dt.timedelta(
+                    hours=auth_hours
+                )
+            ).isoformat()
+
+            auth_clauses = [
+                "event_type = 'auth_presence'",
+                "received_at >= ?",
+            ]
+
+            auth_params: list[Any] = [
+                auth_cutoff
+            ]
+
+            if project_slug:
+                auth_clauses.append(
+                    "project_slug = ?"
+                )
+                auth_params.append(
+                    project_slug
+                )
+
+            # If more authenticated sessions exist than the page
+            # can physically display, the newest LIMIT sessions win.
+            auth_presence_limit = limit
+
+            auth_rows = connection.execute(
+                f"""
+                SELECT *
+                FROM traffic_browser_events
+                WHERE {' AND '.join(auth_clauses)}
+                ORDER BY received_at DESC, id DESC
+                LIMIT ?
+                """,
+                (
+                    *auth_params,
+                    auth_presence_limit,
+                ),
+            ).fetchall()
+
+            auth_session_ids: list[
+                str
+            ] = []
+
+            for row in auth_rows:
+                session_id = str(
+                    row["session_id"]
+                    or ""
+                ).strip()
+
+                if (
+                    session_id
+                    and session_id
+                    not in auth_session_ids
+                ):
+                    auth_session_ids.append(
+                        session_id
+                    )
+
+            if auth_session_ids:
+                placeholders = ",".join(
+                    "?"
+                    for _
+                    in auth_session_ids
+                )
+
+                context_clauses = [
+                    (
+                        "session_id IN "
+                        f"({placeholders})"
+                    ),
+                    "received_at >= ?",
+                    """
+                    event_type IN (
+                        'page_view',
+                        'click',
+                        'outbound_click',
+                        'scroll_milestone',
+                        'page_hide',
+                        'visibility_change'
+                    )
+                    """,
+                ]
+
+                context_params: list[
+                    Any
+                ] = [
+                    *auth_session_ids,
+                    general_cutoff,
+                ]
+
+                if project_slug:
+                    context_clauses.append(
+                        "project_slug = ?"
+                    )
+                    context_params.append(
+                        project_slug
+                    )
+
+                auth_context_rows = (
+                    connection.execute(
+                        f"""
+                        SELECT *
+                        FROM (
+                            SELECT
+                                b.*,
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY b.session_id
+                                    ORDER BY
+                                        b.received_at DESC,
+                                        b.id DESC
+                                ) AS auth_story_rank
+                            FROM traffic_browser_events AS b
+                            WHERE {' AND '.join(context_clauses)}
+                        ) ranked
+                        WHERE auth_story_rank <= ?
+                        ORDER BY received_at DESC, id DESC
+                        """,
+                        (
+                            *context_params,
+                            6,
+                        ),
+                    ).fetchall()
+                )
+
+        browser_rows = [
+            *ordinary_rows,
+            *auth_rows,
+            *auth_context_rows,
+        ]
+
+        browser_events = [
+            _enrich_browser_event_row(
+                row
+            )
+            for row
+            in browser_rows
+        ]
+
+        browser_events = (
+            _dedupe_browser_story_events(
+                browser_events
+            )
+        )
+
+        # Authentication wins before any generic nonhuman filter.
+        browser_events = (
+            _propagate_authenticated_identity(
+                browser_events
+            )
+        )
+
+        browser_events = [
+            event
+            for event
+            in browser_events
+            if not _story_event_is_nonhuman(
+                event
+            )
+        ]
+
+        synthetic_events = (
             _cached_synthetic_server_story_events(
                 connection,
                 limit=limit,
@@ -813,17 +1325,41 @@ def list_recent_browser_events(
             )
         )
 
-    events = [event for event in events if not _is_chain_story_event(event)]
-    events = _propagate_authenticated_identity(events)
+    events = [
+        *browser_events,
+        *synthetic_events,
+    ]
+
+    events = [
+        event
+        for event
+        in events
+        if not _is_chain_story_event(
+            event
+        )
+    ]
+
+    events = (
+        _dedupe_browser_story_events(
+            events
+        )
+    )
 
     events.sort(
-        key=lambda event: (
-            str(event.get("received_at") or ""),
-            int(event.get("id") or 0),
-        ),
+        key=_story_sort_key,
         reverse=True,
     )
+
+    if before_received_at is None:
+        return (
+            _prioritize_authenticated_story_events(
+                events,
+                limit=limit,
+            )
+        )
+
     return events[:limit]
+
 
 
 def build_beacon_javascript() -> str:
