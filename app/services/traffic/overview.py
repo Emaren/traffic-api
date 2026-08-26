@@ -7,6 +7,7 @@ from threading import Event, Lock, Thread
 from time import monotonic
 from typing import Any
 
+from app.services.traffic.browser_events import auth_presence_is_fresh
 from app.services.traffic.classify import classify_request, detect_route_kind
 from app.services.traffic.config import (
     INTERNAL_IGNORE_PATHS,
@@ -25,7 +26,12 @@ from app.services.traffic.config import (
 )
 from app.services.traffic.geo import get_geo_details
 from app.services.traffic.normalize import ALLOWED_HOSTS, is_allowed_host, project_for_host
-from app.services.traffic.parse import iso_now, parse_log_line, read_recent_log_lines
+from app.services.traffic.parse import (
+    iso_now,
+    parse_iso_timestamp,
+    parse_log_line,
+    read_recent_log_lines,
+)
 from app.services.traffic.persistence import _connect, _ensure_schema, load_recent_entries, persistence_enabled
 from app.services.traffic.sessions import (
     activity_sequence_for_events,
@@ -842,6 +848,15 @@ def _compact_live_session(session: dict[str, Any]) -> dict[str, Any]:
     if isinstance(summary, str) and len(summary) > 420:
         compact["classification_summary"] = summary[:417].rstrip() + "..."
 
+    compact = compact
+    compact["authenticated"] = bool(
+        session.get("authenticated")
+    )
+    compact["authenticated_uid"] = (
+        str(session.get("authenticated_uid") or "")
+        if compact["authenticated"]
+        else ""
+    )
     return compact
 
 
@@ -2060,13 +2075,20 @@ def _align_bucket(value: datetime, bucket_minutes: int) -> datetime:
 
 
 def _is_known_identity_only_signal(session: dict[str, Any]) -> bool:
-    """Known IP/fingerprint context without confirmed human/app activity.
+    """Known identity context without current authenticated/app activity.
 
-    This keeps known-player IP hits visible as context, but prevents them from
-    inflating audience-grade human/live charts unless behavior independently
-    earned confirmed-human status.
+    Static IP/fingerprint identity alone must not inflate audience-grade
+    human/live truth. Fresh server-verified authentication is different:
+    it proves an active app identity even while behavioral human confidence
+    remains a separate signal.
     """
-    if not (session.get("known_identity_signal") or session.get("known_visitor_confirmed")):
+    if session.get("authenticated"):
+        return False
+
+    if not (
+        session.get("known_identity_signal")
+        or session.get("known_visitor_confirmed")
+    ):
         return False
 
     return not (
@@ -2483,19 +2505,79 @@ def _raw_unique_ip_bucket_counts_by_project(
 
 
 
+def _browser_engagement_key(
+    project_slug: object,
+    ip: object,
+    user_agent: object,
+) -> tuple[str, str, str]:
+    return (
+        str(project_slug or ""),
+        str(ip or ""),
+        str(user_agent or "")
+        .strip()
+        .lower(),
+    )
+
+
+def _auth_presence_overlaps_session(
+    session: dict[str, Any],
+    authenticated_at: object,
+) -> bool:
+    authenticated = (
+        parse_iso_timestamp(
+            str(
+                authenticated_at
+                or ""
+            )
+        )
+    )
+
+    started = parse_iso_timestamp(
+        str(
+            session.get("started_at")
+            or ""
+        )
+    )
+
+    ended = parse_iso_timestamp(
+        str(
+            session.get("ended_at")
+            or ""
+        )
+    )
+
+    if (
+        authenticated is None
+        or started is None
+        or ended is None
+    ):
+        return False
+
+    skew = timedelta(
+        seconds=15,
+    )
+
+    return (
+        started - skew
+        <= authenticated
+        <= ended + skew
+    )
+
+
 def _browser_engagement_summaries(
     *,
     project_slugs: set[str] | None,
     since_utc: datetime,
-) -> dict[tuple[str, str], dict[str, Any]]:
+) -> dict[tuple[str, str, str], dict[str, Any]]:
     """Summarize first-party browser events for live visitor rows.
 
-    Keyed by (project_slug, ip). This intentionally stays lightweight and
+    Keyed by (project_slug, ip, user_agent). IP alone is never enough to
+    carry authenticated identity between browser/server sessions.
     bounded to the same live window so /api/live-visitors does not turn into
     the heavier admin visitor-story endpoint.
     """
     allowed = set(project_slugs or [])
-    summaries: dict[tuple[str, str], dict[str, Any]] = {}
+    summaries: dict[tuple[str, str, str], dict[str, Any]] = {}
 
     try:
         with _connect() as connection:
@@ -2547,7 +2629,11 @@ def _browser_engagement_summaries(
         if not project_slug or not ip:
             continue
 
-        key = (project_slug, ip)
+        key = _browser_engagement_key(
+            project_slug,
+            ip,
+            row["user_agent"],
+        )
         summary = summaries.setdefault(
             key,
             {
@@ -2562,6 +2648,7 @@ def _browser_engagement_summaries(
                 "authenticated": False,
                 "authenticated_uid": "",
                 "authenticated_label": "",
+                "authenticated_at": "",
             },
         )
 
@@ -2572,7 +2659,20 @@ def _browser_engagement_summaries(
             payload = {}
         if not isinstance(payload, dict):
             payload = {}
-        auth_verified = bool(payload.get("auth_verified") is True and payload.get("authenticated_uid"))
+        auth_verified = bool(
+            event_type
+            == "auth_presence"
+            and payload.get(
+                "auth_verified"
+            )
+            is True
+            and payload.get(
+                "authenticated_uid"
+            )
+            and auth_presence_is_fresh(
+                row["received_at"]
+            )
+        )
         request_classification = classify_request(row["user_agent"], row["path"])
         if request_classification in {"bot", "suspicious"} and not auth_verified:
             continue
@@ -2583,8 +2683,22 @@ def _browser_engagement_summaries(
             summary["browser_session_id"] = str(row["session_id"] or "")
         if auth_verified:
             summary["authenticated"] = True
-            summary["authenticated_uid"] = str(payload.get("authenticated_uid") or "")
-            summary["authenticated_label"] = str(payload.get("authenticated_label") or "Authenticated player")[:120]
+            summary["authenticated_uid"] = str(
+                payload.get(
+                    "authenticated_uid"
+                )
+                or ""
+            )
+            summary["authenticated_label"] = str(
+                payload.get(
+                    "authenticated_label"
+                )
+                or "Authenticated player"
+            )[:120]
+            summary["authenticated_at"] = str(
+                row["received_at"]
+                or ""
+            )
 
         path_value = str(row["path"] or "")
         if path_value and path_value not in summary["browser_route_trail"]:
@@ -2626,7 +2740,7 @@ def _browser_engagement_summaries(
 
 def _attach_browser_engagement(
     sessions: list[dict[str, Any]],
-    summaries: dict[tuple[str, str], dict[str, Any]],
+    summaries: dict[tuple[str, str, str], dict[str, Any]],
 ) -> list[dict[str, Any]]:
     if not sessions or not summaries:
         return sessions
@@ -2634,7 +2748,16 @@ def _attach_browser_engagement(
     for session in sessions:
         project_slug = str(session.get("project_slug") or "")
         ip = str(session.get("ip") or "")
-        summary = summaries.get((project_slug, ip))
+        key = _browser_engagement_key(
+            project_slug,
+            ip,
+            session.get(
+                "user_agent"
+            ),
+        )
+
+        summary = summaries.get(key)
+
         if not summary:
             continue
 
@@ -2646,8 +2769,30 @@ def _attach_browser_engagement(
         session["browser_latest_meaningful_path"] = str(summary.get("browser_latest_meaningful_path") or "")
         session["browser_visitor_id"] = str(summary.get("browser_visitor_id") or "")
         session["browser_session_id"] = str(summary.get("browser_session_id") or "")
-        session["authenticated"] = bool(summary.get("authenticated"))
-        session["authenticated_uid"] = str(summary.get("authenticated_uid") or "")
+        session["authenticated"] = bool(
+            summary.get(
+                "authenticated"
+            )
+            and _auth_presence_overlaps_session(
+                session,
+                summary.get(
+                    "authenticated_at"
+                ),
+            )
+        )
+
+        session["authenticated_uid"] = (
+            str(
+                summary.get(
+                    "authenticated_uid"
+                )
+                or ""
+            )
+            if session[
+                "authenticated"
+            ]
+            else ""
+        )
 
         if session["authenticated"]:
             label = str(summary.get("authenticated_label") or "Authenticated player")

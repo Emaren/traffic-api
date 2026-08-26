@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 from collections import deque
 from datetime import datetime, timezone
@@ -8,6 +9,95 @@ from typing import Any
 
 from app.services.traffic.config import LEGACY_LOG_LINE_RE, UNKNOWN_HOST
 from app.services.traffic.normalize import normalize_host, normalize_path, normalize_referrer
+
+
+_CLOUDFLARE_NETWORKS = tuple(
+    ipaddress.ip_network(value)
+    for value in (
+        "173.245.48.0/20",
+        "103.21.244.0/22",
+        "103.22.200.0/22",
+        "103.31.4.0/22",
+        "141.101.64.0/18",
+        "108.162.192.0/18",
+        "190.93.240.0/20",
+        "188.114.96.0/20",
+        "197.234.240.0/22",
+        "198.41.128.0/17",
+        "162.158.0.0/15",
+        "104.16.0.0/13",
+        "104.24.0.0/14",
+        "172.64.0.0/13",
+        "131.0.72.0/22",
+        "2400:cb00::/32",
+        "2606:4700::/32",
+        "2803:f800::/32",
+        "2405:b500::/32",
+        "2405:8100::/32",
+        "2a06:98c0::/29",
+        "2c0f:f248::/32",
+    )
+)
+
+
+def _valid_ip(value: str | None) -> str:
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return ""
+
+    try:
+        ipaddress.ip_address(cleaned)
+    except ValueError:
+        return ""
+
+    return cleaned
+
+
+def _is_cloudflare_proxy(value: str | None) -> bool:
+    cleaned = _valid_ip(value)
+    if not cleaned:
+        return False
+
+    address = ipaddress.ip_address(cleaned)
+
+    return any(
+        address in network
+        for network in _CLOUDFLARE_NETWORKS
+    )
+
+
+def client_ip_from_json_payload(
+    payload: dict[str, Any],
+) -> str:
+    """Resolve client IP without trusting arbitrary forwarded headers.
+
+    X-Forwarded-For is authoritative only when the socket peer is a
+    recognized Cloudflare proxy. Direct clients cannot spoof identity or
+    geography by supplying their own forwarded header.
+    """
+
+    remote = _valid_ip(
+        str(payload.get("remote_addr") or "")
+    )
+
+    forwarded = str(
+        payload.get("x_forwarded_for")
+        or ""
+    ).strip()
+
+    if (
+        remote
+        and forwarded
+        and _is_cloudflare_proxy(remote)
+    ):
+        candidate = _valid_ip(
+            forwarded.split(",", 1)[0]
+        )
+
+        if candidate:
+            return candidate
+
+    return remote
 
 
 def safe_int(value: Any, default: int = 0) -> int:
@@ -68,9 +158,10 @@ def parse_json_log_line(line: str) -> dict[str, Any] | None:
 
     method = str(payload.get("method") or "").upper() or "(unknown)"
     raw_path = str(payload.get("request_uri") or payload.get("uri") or "(unknown)")
+    client_ip = client_ip_from_json_payload(payload)
 
     return {
-        "ip": str(payload.get("remote_addr") or ""),
+        "ip": client_ip,
         "timestamp": parsed_timestamp,
         "timestamp_iso": parsed_timestamp.isoformat(),
         "request": str(payload.get("request") or ""),

@@ -20,6 +20,71 @@ from app.services.traffic.parse import iso_now
 _EVENT_NAME_RE = re.compile(r"^[a-zA-Z0-9_:.:-]{1,80}$")
 _MAX_TEXT = 240
 
+# AoE2WAR refreshes Traffic identity at most once per minute.
+# Three minutes tolerates normal jitter while ensuring authentication
+# cannot survive indefinitely inside a long-lived browser session.
+AUTH_PRESENCE_FRESH_SECONDS = 180
+
+
+def _event_datetime(
+    value: object,
+) -> _traffic_dt.datetime | None:
+    cleaned = str(value or "").strip()
+
+    if not cleaned:
+        return None
+
+    try:
+        parsed = _traffic_dt.datetime.fromisoformat(
+            cleaned.replace(
+                "Z",
+                "+00:00",
+            )
+        )
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(
+            tzinfo=_traffic_dt.timezone.utc,
+        )
+
+    return parsed.astimezone(
+        _traffic_dt.timezone.utc,
+    )
+
+
+def auth_presence_is_fresh(
+    authenticated_at: object,
+    *,
+    reference_at: object | None = None,
+) -> bool:
+    authenticated = _event_datetime(
+        authenticated_at
+    )
+
+    reference = (
+        _event_datetime(reference_at)
+        if reference_at is not None
+        else _traffic_dt.datetime.now(
+            _traffic_dt.timezone.utc
+        )
+    )
+
+    if authenticated is None or reference is None:
+        return False
+
+    age = (
+        reference
+        - authenticated
+    ).total_seconds()
+
+    return (
+        0
+        <= age
+        <= AUTH_PRESENCE_FRESH_SECONDS
+    )
+
 CORE_EVENT_TYPES = {
     "page_view",
     "heartbeat",
@@ -187,7 +252,19 @@ def _client_ip(headers: Mapping[str, str], fallback: str | None) -> str:
     return _clean_text(fallback, 80)
 
 
-def _compact_payload(payload: dict[str, Any]) -> str:
+_TRUSTED_AUTH_PAYLOAD_KEYS = {
+    "auth_verified",
+    "authenticated_uid",
+    "authenticated_label",
+    "authenticated_kind",
+}
+
+
+def _compact_payload(
+    payload: dict[str, Any],
+    *,
+    trusted_auth: bool = False,
+) -> str:
     allowed_extra = {
         "visibility_state",
         "scroll_milestone",
@@ -198,13 +275,26 @@ def _compact_payload(payload: dict[str, Any]) -> str:
         "device_pixel_ratio",
         "traffic_event_label",
         "source",
-        "auth_verified",
-        "authenticated_uid",
-        "authenticated_label",
-        "authenticated_kind",
     }
-    compact = {key: payload.get(key) for key in sorted(allowed_extra) if key in payload}
-    return json.dumps(compact, separators=(",", ":"), ensure_ascii=False)
+
+    if trusted_auth:
+        allowed_extra |= (
+            _TRUSTED_AUTH_PAYLOAD_KEYS
+        )
+
+    compact = {
+        key: payload.get(key)
+        for key in sorted(
+            allowed_extra
+        )
+        if key in payload
+    }
+
+    return json.dumps(
+        compact,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
 
 
 def record_browser_event(
@@ -226,6 +316,12 @@ def record_browser_event(
 
     project = project_for_host(host)
     event_type = _clean_event_type(payload.get("event_type"))
+
+    if event_type == "auth_presence":
+        raise ValueError(
+            "auth_presence is reserved for trusted server ingest"
+        )
+
     received_at = iso_now()
     occurred_at = _clean_text(payload.get("occurred_at"), 80) or received_at
     path = normalize_path(_clean_text(payload.get("path"), 500) or "/")
@@ -349,7 +445,10 @@ def record_authenticated_presence(payload: dict[str, Any]) -> dict[str, Any]:
     received_at = iso_now()
     path = normalize_path(trusted_payload["path"])
     geo = get_geo_details(client_ip)
-    payload_json = _compact_payload(trusted_payload)
+    payload_json = _compact_payload(
+        trusted_payload,
+        trusted_auth=True,
+    )
 
     with _connect() as connection:
         _ensure_schema(connection)
@@ -450,7 +549,17 @@ def _enrich_browser_event_row(row: sqlite3.Row) -> dict[str, Any]:
         event["city"] = _clean_text(geo.get("city"), 120)
 
     payload = _event_payload(event)
-    authenticated = bool(payload.get("auth_verified") is True and payload.get("authenticated_uid"))
+    authenticated = bool(
+        event.get("event_type")
+        == "auth_presence"
+        and payload.get(
+            "auth_verified"
+        )
+        is True
+        and payload.get(
+            "authenticated_uid"
+        )
+    )
     event["authenticated"] = authenticated
     event["authenticated_uid"] = _clean_text(payload.get("authenticated_uid"), 120) if authenticated else ""
     event["automation_family"] = automation_family(event.get("user_agent")) or ""
@@ -481,29 +590,123 @@ def _enrich_browser_event_row(row: sqlite3.Row) -> dict[str, Any]:
     return event
 
 
-def _propagate_authenticated_identity(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    by_session: dict[str, dict[str, str]] = {}
-    for event in events:
-        if not event.get("authenticated"):
-            continue
-        session_id = str(event.get("session_id") or "").strip()
+def _propagate_authenticated_identity(
+    events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Propagate identity only while its authentication evidence is fresh."""
+
+    by_session: dict[
+        str,
+        dict[str, str],
+    ] = {}
+
+    for event in sorted(
+        events,
+        key=_story_sort_key,
+    ):
+        session_id = str(
+            event.get("session_id")
+            or ""
+        ).strip()
+
         if not session_id:
             continue
-        by_session[session_id] = {
-            "authenticated_uid": str(event.get("authenticated_uid") or ""),
-            "known_visitor_label": str(event.get("known_visitor_label") or "Authenticated player"),
-            "known_visitor_detail": str(event.get("known_visitor_detail") or "authenticated AoE2WAR session"),
-            "known_visitor_kind": str(event.get("known_visitor_kind") or "known_player"),
-            "known_visitor_source": "authenticated",
-        }
 
-    for event in events:
-        session_id = str(event.get("session_id") or "").strip()
-        identity = by_session.get(session_id)
+        if event.get("authenticated"):
+            by_session[session_id] = {
+                "authenticated_uid": str(
+                    event.get(
+                        "authenticated_uid"
+                    )
+                    or ""
+                ),
+                "known_visitor_label": str(
+                    event.get(
+                        "known_visitor_label"
+                    )
+                    or "Authenticated player"
+                ),
+                "known_visitor_kind": str(
+                    event.get(
+                        "known_visitor_kind"
+                    )
+                    or "known_player"
+                ),
+                "authenticated_at": str(
+                    event.get(
+                        "received_at"
+                    )
+                    or ""
+                ),
+            }
+
+        identity = by_session.get(
+            session_id
+        )
+
         if not identity:
             continue
-        event["authenticated"] = True
-        event.update(identity)
+
+        fresh = auth_presence_is_fresh(
+            identity["authenticated_at"],
+            reference_at=event.get(
+                "received_at"
+            ),
+        )
+
+        event["authentication_fresh"] = fresh
+        event["authenticated_at"] = (
+            identity["authenticated_at"]
+        )
+
+        if fresh:
+            event["authenticated"] = True
+            event["authenticated_uid"] = (
+                identity[
+                    "authenticated_uid"
+                ]
+            )
+            event["known_visitor_label"] = (
+                identity[
+                    "known_visitor_label"
+                ]
+            )
+            event["known_visitor_detail"] = (
+                "authenticated AoE2WAR session"
+            )
+            event["known_visitor_kind"] = (
+                identity[
+                    "known_visitor_kind"
+                ]
+            )
+            event["known_visitor_source"] = (
+                "authenticated"
+            )
+            continue
+
+        event["authenticated"] = False
+        event["previously_authenticated_uid"] = (
+            identity[
+                "authenticated_uid"
+            ]
+        )
+        event["authenticated_uid"] = ""
+        event["known_visitor_label"] = (
+            identity[
+                "known_visitor_label"
+            ]
+        )
+        event["known_visitor_detail"] = (
+            "previously authenticated AoE2WAR session"
+        )
+        event["known_visitor_kind"] = (
+            identity[
+                "known_visitor_kind"
+            ]
+        )
+        event["known_visitor_source"] = (
+            "authenticated_stale"
+        )
 
     return events
 
