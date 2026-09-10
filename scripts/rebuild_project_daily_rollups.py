@@ -5,6 +5,7 @@ import argparse
 import json
 import sqlite3
 import sys
+import time
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -281,6 +282,36 @@ def upsert_project_day(
     )
 
 
+def upsert_project_day_with_retry(
+    conn: sqlite3.Connection,
+    *,
+    project_slug: str,
+    bucket_day: date,
+    visitors: int,
+    events: int,
+    attempts: int = 3,
+    retry_delay_seconds: float = 1.0,
+) -> None:
+    if attempts <= 0:
+        raise ValueError("attempts must be positive")
+    for attempt in range(1, attempts + 1):
+        try:
+            upsert_project_day(
+                conn,
+                project_slug=project_slug,
+                bucket_day=bucket_day,
+                visitors=visitors,
+                events=events,
+            )
+            conn.commit()
+            return
+        except sqlite3.OperationalError as exc:
+            conn.rollback()
+            if "locked" not in str(exc).lower() or attempt >= attempts:
+                raise
+            time.sleep(retry_delay_seconds * attempt)
+
+
 def refresh_project(
     conn: sqlite3.Connection,
     *,
@@ -361,17 +392,13 @@ def refresh_project(
             bucket_day=bucket_day,
         )
 
-        upsert_project_day(
+        upsert_project_day_with_retry(
             conn,
             project_slug=project_slug,
             bucket_day=bucket_day,
             visitors=visitors,
             events=events,
         )
-
-        # Short transactions: don't hold a SQLite writer lock through a
-        # multi-day backfill.
-        conn.commit()
 
         processed += 1
         total_visitors += visitors

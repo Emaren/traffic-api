@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from app.services.traffic.sqlite_utils import connect as closing_sqlite_connect
 from app.services.traffic.config import (
     LOG_PATH,
     LOG_PATHS,
@@ -20,6 +22,11 @@ from app.services.traffic.parse import parse_iso_timestamp, parse_log_line
 _SYNC_LOCK = Lock()
 _SCHEMA_LOCK = Lock()
 _SCHEMA_READY = False
+_RETENTION_LOCK = Lock()
+_LAST_RETENTION_PRUNE_MONOTONIC = 0.0
+SYNC_WRITE_BATCH_ROWS = 2_000
+RETENTION_PRUNE_BATCH_ROWS = 5_000
+RETENTION_PRUNE_INTERVAL_SECONDS = 300.0
 
 
 def persistence_enabled() -> bool:
@@ -28,7 +35,7 @@ def persistence_enabled() -> bool:
 
 def _connect() -> sqlite3.Connection:
     PERSIST_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(PERSIST_DB_PATH, timeout=30)
+    connection = closing_sqlite_connect(PERSIST_DB_PATH, timeout=30)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA busy_timeout=30000")
     connection.execute("PRAGMA journal_mode=WAL")
@@ -334,14 +341,81 @@ def _chain_firehose_event_id(parsed: dict[str, Any]) -> str:
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:24]
 
 
-def _prune_old_entries(connection: sqlite3.Connection) -> None:
+def _insert_entry_batches(
+    connection: sqlite3.Connection,
+    batch: list[tuple[Any, ...]],
+    *,
+    batch_rows: int = SYNC_WRITE_BATCH_ROWS,
+) -> None:
+    if batch_rows <= 0:
+        raise ValueError("batch_rows must be positive")
+    sql = """
+        INSERT OR IGNORE INTO traffic_entries (
+            event_id, source_path, source_inode, line_offset, timestamp, ip,
+            request, method, raw_path, normalized_path, status, referrer,
+            referrer_host, ua, host, raw
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    for start in range(0, len(batch), batch_rows):
+        connection.executemany(sql, batch[start : start + batch_rows])
+        # Bound SQLite writer ownership. Replaying committed chunks after a
+        # crash is safe because event_id is unique and INSERT is idempotent.
+        connection.commit()
+
+
+def _prune_old_entries_bounded(
+    connection: sqlite3.Connection,
+    *,
+    limit: int = RETENTION_PRUNE_BATCH_ROWS,
+) -> int:
+    if limit <= 0:
+        raise ValueError("limit must be positive")
     retention_cutoff = (
         datetime.now(timezone.utc) - timedelta(days=PERSIST_RETENTION_DAYS)
     ).isoformat()
-    connection.execute(
-        "DELETE FROM traffic_entries WHERE timestamp < ?",
-        (retention_cutoff,),
+    cursor = connection.execute(
+        """
+        DELETE FROM traffic_entries
+        WHERE rowid IN (
+            SELECT rowid
+            FROM traffic_entries
+            WHERE timestamp < ?
+            ORDER BY timestamp ASC
+            LIMIT ?
+        )
+        """,
+        (retention_cutoff, limit),
     )
+    return max(0, int(cursor.rowcount or 0))
+
+
+def _maybe_prune_old_entries() -> int:
+    global _LAST_RETENTION_PRUNE_MONOTONIC
+    now = time.monotonic()
+    if now - _LAST_RETENTION_PRUNE_MONOTONIC < RETENTION_PRUNE_INTERVAL_SECONDS:
+        return 0
+    if not _RETENTION_LOCK.acquire(blocking=False):
+        return 0
+    try:
+        now = time.monotonic()
+        if now - _LAST_RETENTION_PRUNE_MONOTONIC < RETENTION_PRUNE_INTERVAL_SECONDS:
+            return 0
+        connection = sqlite3.connect(PERSIST_DB_PATH, timeout=1)
+        try:
+            connection.execute("PRAGMA busy_timeout=1000")
+            removed = _prune_old_entries_bounded(connection)
+            connection.commit()
+        except sqlite3.OperationalError as exc:
+            connection.rollback()
+            if "locked" in str(exc).lower():
+                return 0
+            raise
+        finally:
+            connection.close()
+        _LAST_RETENTION_PRUNE_MONOTONIC = now
+        return removed
+    finally:
+        _RETENTION_LOCK.release()
 
 
 def sync_log_to_persistence(log_path: Path = LOG_PATH) -> dict[str, int | str]:
@@ -453,29 +527,7 @@ def sync_log_to_persistence(log_path: Path = LOG_PATH) -> dict[str, int | str]:
             batch.extend(current_batch)
 
             if batch:
-                connection.executemany(
-                    """
-                    INSERT OR IGNORE INTO traffic_entries (
-                        event_id,
-                        source_path,
-                        source_inode,
-                        line_offset,
-                        timestamp,
-                        ip,
-                        request,
-                        method,
-                        raw_path,
-                        normalized_path,
-                        status,
-                        referrer,
-                        referrer_host,
-                        ua,
-                        host,
-                        raw
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    batch,
-                )
+                _insert_entry_batches(connection, batch)
                 inserted = len(batch)
 
             connection.execute(
@@ -494,9 +546,12 @@ def sync_log_to_persistence(log_path: Path = LOG_PATH) -> dict[str, int | str]:
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
-            _prune_old_entries(connection)
             connection.commit()
 
+    # Retention is housekeeping, not part of the ingest correctness
+    # transaction. Keep it bounded and opportunistic so it cannot monopolize
+    # the writer lane on the large production corpus.
+    _maybe_prune_old_entries()
     return {"inserted": inserted, "offset": final_offset, "mode": "persisted"}
 
 
