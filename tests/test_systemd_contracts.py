@@ -23,6 +23,14 @@ class SystemdContractTests(unittest.TestCase):
         )
         self.assertNotIn("SuccessExitStatus=1", unit)
 
+    def test_shared_rollup_runtime_directory_is_preserved_across_oneshot_exit(self) -> None:
+        for unit_path in (DAILY, PUBLIC_ARCHIVE):
+            with self.subTest(unit=unit_path.name):
+                unit = unit_path.read_text(encoding="utf-8")
+                self.assertIn("RuntimeDirectory=traffic-rollups", unit)
+                self.assertIn("RuntimeDirectoryMode=0755", unit)
+                self.assertIn("RuntimeDirectoryPreserve=yes", unit)
+
     def test_public_archive_and_daily_rollup_share_one_serialization_lock(self) -> None:
         daily = DAILY.read_text(encoding="utf-8")
         archive = PUBLIC_ARCHIVE.read_text(encoding="utf-8")
