@@ -10,6 +10,7 @@ import time
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
+from app.services.traffic.sqlite_utils import connect as closing_sqlite_connect
 from app.services.traffic.classify import automation_family, classify_request, is_known_singapore_cloud_browser
 from app.services.traffic.config import BROWSER_EVENT_STORY_REJECT_UA_TERMS, PERSIST_DB_PATH, PERSIST_ENABLED
 from app.services.traffic.geo import get_geo_details
@@ -24,6 +25,9 @@ _MAX_TEXT = 240
 # Three minutes tolerates normal jitter while ensuring authentication
 # cannot survive indefinitely inside a long-lived browser session.
 AUTH_PRESENCE_FRESH_SECONDS = 180
+
+_BROWSER_SCHEMA_LOCK = threading.Lock()
+_BROWSER_SCHEMA_READY = False
 
 
 def _event_datetime(
@@ -109,7 +113,7 @@ def _copy_synthetic_story_events(events: list[dict[str, Any]]) -> list[dict[str,
 
 def _connect() -> sqlite3.Connection:
     PERSIST_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(PERSIST_DB_PATH, timeout=30)
+    connection = closing_sqlite_connect(PERSIST_DB_PATH, timeout=30)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA busy_timeout=30000")
     connection.execute("PRAGMA journal_mode=WAL")
@@ -117,7 +121,7 @@ def _connect() -> sqlite3.Connection:
     return connection
 
 
-def _ensure_schema(connection: sqlite3.Connection) -> None:
+def _ensure_schema_body(connection: sqlite3.Connection) -> None:
     connection.executescript(
         """
         CREATE TABLE IF NOT EXISTS traffic_browser_events (
@@ -191,6 +195,18 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             connection.execute(
                 f"ALTER TABLE traffic_browser_events ADD COLUMN {column_name} TEXT NOT NULL DEFAULT ''"
             )
+
+
+def _ensure_schema(connection: sqlite3.Connection) -> None:
+    global _BROWSER_SCHEMA_READY
+    if _BROWSER_SCHEMA_READY:
+        return
+    with _BROWSER_SCHEMA_LOCK:
+        if _BROWSER_SCHEMA_READY:
+            return
+        _ensure_schema_body(connection)
+        connection.commit()
+        _BROWSER_SCHEMA_READY = True
 
 
 def _clean_text(value: Any, max_len: int = _MAX_TEXT) -> str:

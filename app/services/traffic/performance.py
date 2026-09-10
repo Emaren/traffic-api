@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlparse
 
+from app.services.traffic.sqlite_utils import connect as closing_sqlite_connect
 from app.services.traffic.config import (
     PERFORMANCE_DETAIL_RETENTION_DAYS,
     PERFORMANCE_REPORT_RETENTION_DAYS,
@@ -62,7 +63,7 @@ _RETENTION_INTERVAL_SECONDS = 3600.0
 
 def _connect() -> sqlite3.Connection:
     PERFORMANCE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(PERFORMANCE_DB_PATH, timeout=30)
+    connection = closing_sqlite_connect(PERFORMANCE_DB_PATH, timeout=30)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA busy_timeout=30000")
     connection.execute("PRAGMA journal_mode=WAL")

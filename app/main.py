@@ -59,6 +59,7 @@ from app.services.traffic.notifications import (
     update_notification_settings,
 )
 from app.services.traffic.parse import iso_now
+from app.services.traffic.sqlite_utils import connect as closing_sqlite_connect
 from app.services.traffic.visibility import (
     create_visibility_rule,
     delete_visibility_rule,
@@ -552,8 +553,7 @@ def stream_json_response(
     )
 
 
-@app.get("/healthz")
-def healthz() -> dict[str, str | bool | int]:
+def _health_payload() -> dict[str, str | bool | int]:
     return {
         "ok": True,
         "service": "traffic-api",
@@ -564,9 +564,16 @@ def healthz() -> dict[str, str | bool | int]:
     }
 
 
+@app.get("/healthz")
+async def healthz() -> dict[str, str | bool | int]:
+    # Health must stay independent of the sync worker pool so a slow SQLite
+    # maintenance/read worker cannot make the watchdog misdiagnose the API.
+    return _health_payload()
+
+
 @app.get("/api/healthz")
-def api_healthz() -> dict[str, str | bool | int]:
-    return healthz()
+async def api_healthz() -> dict[str, str | bool | int]:
+    return _health_payload()
 
 
 @app.get("/api/beacon.js")
@@ -584,7 +591,11 @@ async def api_ingest_browser_event(
     payload: dict = Body(...),
 ) -> dict:
     try:
-        return record_browser_event(
+        # SQLite is synchronous. Keep its bounded busy wait off the asyncio
+        # event loop so ingestion pressure cannot starve health or other async
+        # control endpoints.
+        return await asyncio.to_thread(
+            record_browser_event,
             payload,
             headers=request.headers,
             client_host=request.client.host if request.client else None,
@@ -1587,7 +1598,7 @@ def _ops_archive_status(project_slug: str) -> dict[str, object]:
         }
 
     try:
-        with sqlite3.connect(db_path, timeout=5) as connection:
+        with closing_sqlite_connect(db_path, timeout=5) as connection:
             connection.row_factory = sqlite3.Row
             table = connection.execute(
                 "SELECT name "
