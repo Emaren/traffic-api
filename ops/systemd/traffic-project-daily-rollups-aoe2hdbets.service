@@ -16,4 +16,4 @@ Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
 TimeoutStartSec=3600
-ExecStart=/usr/bin/flock -n /run/traffic-rollups/aoe2hdbets.lock /var/www/Traffic/traffic-api/.venv/bin/python3 scripts/rebuild_project_daily_rollups.py --incremental --project aoe2hdbets
+ExecStart=/usr/bin/flock -n -E 0 /run/traffic-rollups/aoe2hdbets.lock /var/www/Traffic/traffic-api/.venv/bin/python3 scripts/rebuild_project_daily_rollups.py --incremental --project aoe2hdbets
