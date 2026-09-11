@@ -16,5 +16,10 @@ Environment=PYTHONUNBUFFERED=1
 Nice=15
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
+CPUQuota=50%
+MemoryHigh=1G
+MemoryMax=1536M
+MemorySwapMax=256M
+OOMPolicy=stop
 TimeoutStartSec=7200
 ExecStart=/usr/bin/flock /run/traffic-rollups/aoe2hdbets.lock /var/www/Traffic/traffic-api/.venv/bin/python3 scripts/rebuild_public_audience_archive.py --apply

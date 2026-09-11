@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DAILY = ROOT / "ops/systemd/traffic-project-daily-rollups-aoe2hdbets.service"
 PUBLIC_ARCHIVE = ROOT / "ops/systemd/traffic-public-audience-aoe2hdbets.service"
+PUBLIC_ARCHIVE_TIMER = ROOT / "ops/systemd/traffic-public-audience-aoe2hdbets.timer"
 LOCK = "/run/traffic-rollups/aoe2hdbets.lock"
 
 
@@ -38,6 +39,27 @@ class SystemdContractTests(unittest.TestCase):
         self.assertIn(LOCK, archive)
         self.assertIn(f"ExecStart=/usr/bin/flock {LOCK} ", archive)
         self.assertNotIn(f"ExecStart=/usr/bin/flock -n {LOCK} ", archive)
+
+    def test_public_archive_full_forge_is_resource_bounded(self) -> None:
+        archive = PUBLIC_ARCHIVE.read_text(encoding="utf-8")
+        self.assertIn("Nice=15", archive)
+        self.assertIn("IOSchedulingPriority=7", archive)
+        self.assertIn("CPUQuota=50%", archive)
+        self.assertIn("MemoryHigh=1G", archive)
+        self.assertIn("MemoryMax=1536M", archive)
+        self.assertIn("MemorySwapMax=256M", archive)
+        self.assertIn("OOMPolicy=stop", archive)
+
+    def test_public_archive_full_forge_runs_once_daily(self) -> None:
+        timer = PUBLIC_ARCHIVE_TIMER.read_text(encoding="utf-8")
+        calendar_lines = [
+            line
+            for line in timer.splitlines()
+            if line.startswith("OnCalendar=")
+        ]
+        self.assertEqual(calendar_lines, ["OnCalendar=*-*-* 06:15:00 UTC"])
+        self.assertIn("Persistent=true", timer)
+        self.assertIn("RandomizedDelaySec=3min", timer)
 
 
 if __name__ == "__main__":

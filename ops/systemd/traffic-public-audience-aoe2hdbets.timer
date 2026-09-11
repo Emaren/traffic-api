@@ -1,11 +1,8 @@
 [Unit]
-Description=Refresh canonical AoE2 War public Traffic audience every 6 hours
+Description=Refresh canonical AoE2 War public Traffic audience daily
 
 [Timer]
-OnCalendar=*-*-* 00:15:00 UTC
 OnCalendar=*-*-* 06:15:00 UTC
-OnCalendar=*-*-* 12:15:00 UTC
-OnCalendar=*-*-* 18:15:00 UTC
 RandomizedDelaySec=3min
 AccuracySec=1min
 Persistent=true
