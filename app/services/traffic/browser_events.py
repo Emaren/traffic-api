@@ -460,6 +460,28 @@ def record_browser_event(
     if not isinstance(payload, dict):
         raise ValueError("payload must be an object")
 
+    user_agent = _clean_text(
+        headers.get("user-agent")
+        or headers.get("User-Agent"),
+        500,
+    )
+    lowered_user_agent = user_agent.lower()
+    nonhuman_marker = next(
+        (
+            term
+            for term in BROWSER_EVENT_STORY_REJECT_UA_TERMS
+            if term in lowered_user_agent
+        ),
+        "",
+    )
+    if nonhuman_marker:
+        return {
+            "ok": True,
+            "stored": False,
+            "reason": "nonhuman_browser",
+            "generated_at": iso_now(),
+        }
+
     header_host = _host_from_headers(headers)
     host = normalize_host(_clean_text(payload.get("host"), 160) or header_host)
     if not is_allowed_host(host):
@@ -508,7 +530,7 @@ def record_browser_event(
         "element_tag": _clean_text(payload.get("element_tag"), 40).lower(),
         "visible_ms": _int_or_none(payload.get("visible_ms"), minimum=0, maximum=86_400_000),
         "dwell_ms": _int_or_none(payload.get("dwell_ms"), minimum=0, maximum=86_400_000),
-        "user_agent": _clean_text(headers.get("user-agent") or headers.get("User-Agent"), 500),
+        "user_agent": user_agent,
         "ip": ip,
         "country_code": _clean_text(geo.get("country_code"), 8),
         "country": _clean_text(geo.get("country"), 120),

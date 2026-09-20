@@ -50,6 +50,7 @@ Traffic notifications follow this pipeline:
 - default allowed hosts are derived from `PROJECTS`; if production sets `TRAFFIC_ALLOWED_HOSTS`, keep `aoe2war.com`, `www.aoe2war.com`, `api-prodn.aoe2war.com`, and the legacy aliases in that env value
 - `POST /api/internal/browser-visitor-audience` is the authenticated product join for recent browser identities, distinct visit counts, return counts, presence, route, and conservative operator/nonhuman exclusion signals; it uses the same `X-Identity-Key` authority as authenticated-presence ingest
 - AoE2WAR synthetic browser harnesses stamp `X-AoE2WAR-Synthetic`; browser-event ingest accepts the request but deliberately does not persist it, preventing Speed OS and other explicitly marked observer traffic from entering human audience truth
+- browser-event ingest also fails closed before persistence for unmistakable browser-automation user agents (including HeadlessChrome, CodexBrowser, Playwright, Puppeteer, and Selenium), so unload/sendBeacon paths cannot contaminate raw browser-event truth when a custom synthetic header is unavailable
 
 ## UseTab / AscendAI reporting contract
 

@@ -204,6 +204,95 @@ class BrowserAudienceTests(unittest.TestCase):
                 browser_events.PERSIST_ENABLED = original_enabled
                 browser_events._BROWSER_SCHEMA_READY = original_ready
 
+    def test_browser_automation_user_agents_fail_closed_before_persistence(self) -> None:
+        with TemporaryDirectory() as directory:
+            database = Path(directory) / "traffic.sqlite3"
+            connection = sqlite3.connect(database)
+            connection.execute(
+                "CREATE TABLE traffic_entries (host TEXT, timestamp TEXT, normalized_path TEXT, ip TEXT)"
+            )
+            connection.commit()
+            connection.close()
+
+            original_path = browser_events.PERSIST_DB_PATH
+            original_enabled = browser_events.PERSIST_ENABLED
+            original_ready = browser_events._BROWSER_SCHEMA_READY
+
+            try:
+                browser_events.PERSIST_DB_PATH = database
+                browser_events.PERSIST_ENABLED = True
+                browser_events._BROWSER_SCHEMA_READY = False
+
+                payload = {
+                    "host": "aoe2war.com",
+                    "path": "/speed",
+                    "event_type": "page_hide",
+                    "visitor_id": "v_automation",
+                    "session_id": "s_automation",
+                    "page_view_id": "pv_automation",
+                }
+                base_headers = {
+                    "origin": "https://aoe2war.com",
+                    "x-forwarded-for": "203.0.113.121",
+                }
+
+                for user_agent in (
+                    (
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "HeadlessChrome/153.0.0.0 Safari/537.36"
+                    ),
+                    (
+                        "Mozilla/5.0 AppleWebKit/537.36 Chrome/153 Safari/537.36 "
+                        "CodexBrowser"
+                    ),
+                ):
+                    result = browser_events.record_browser_event(
+                        payload,
+                        headers={
+                            **base_headers,
+                            "user-agent": user_agent,
+                        },
+                    )
+                    self.assertFalse(result["stored"])
+                    self.assertEqual(result["reason"], "nonhuman_browser")
+
+                connection = sqlite3.connect(database)
+                try:
+                    persisted_tables = {
+                        row[0]
+                        for row in connection.execute(
+                            "SELECT name FROM sqlite_master WHERE type = 'table'"
+                        ).fetchall()
+                    }
+                finally:
+                    connection.close()
+
+                self.assertNotIn("traffic_browser_events", persisted_tables)
+                self.assertNotIn("traffic_browser_sessions", persisted_tables)
+
+                human = browser_events.record_browser_event(
+                    {
+                        **payload,
+                        "event_type": "page_view",
+                        "visitor_id": "v_human_control",
+                        "session_id": "s_human_control",
+                        "page_view_id": "pv_human_control",
+                    },
+                    headers={
+                        **base_headers,
+                        "user-agent": (
+                            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                            "AppleWebKit/537.36 Chrome/153 Safari/537.36"
+                        ),
+                    },
+                )
+                self.assertTrue(human["stored"])
+            finally:
+                browser_events.PERSIST_DB_PATH = original_path
+                browser_events.PERSIST_ENABLED = original_enabled
+                browser_events._BROWSER_SCHEMA_READY = original_ready
+
 
 if __name__ == "__main__":
     unittest.main()
