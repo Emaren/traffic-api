@@ -7,7 +7,7 @@ import re
 import sqlite3
 import threading
 import time
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 from urllib.parse import urlparse
 
 from app.services.traffic.sqlite_utils import connect as closing_sqlite_connect
@@ -181,6 +181,21 @@ def _ensure_schema_body(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_traffic_browser_events_ip_path_received
             ON traffic_browser_events(ip, path, received_at);
 
+        CREATE TABLE IF NOT EXISTS traffic_browser_sessions (
+            project_slug TEXT NOT NULL,
+            visitor_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            first_seen_at TEXT NOT NULL,
+            PRIMARY KEY (project_slug, visitor_id, session_id)
+        ) WITHOUT ROWID;
+
+        CREATE TABLE IF NOT EXISTS traffic_browser_session_backfills (
+            project_slug TEXT NOT NULL,
+            visitor_id TEXT NOT NULL,
+            backfilled_at TEXT NOT NULL,
+            PRIMARY KEY (project_slug, visitor_id)
+        ) WITHOUT ROWID;
+
         CREATE INDEX IF NOT EXISTS idx_traffic_entries_story_hosts_recent
             ON traffic_entries(host, timestamp DESC, normalized_path, ip);
         """
@@ -207,6 +222,112 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
         _ensure_schema_body(connection)
         connection.commit()
         _BROWSER_SCHEMA_READY = True
+
+
+def _record_browser_session(
+    connection: sqlite3.Connection,
+    *,
+    project_slug: str,
+    visitor_id: str,
+    session_id: str,
+    first_seen_at: str,
+) -> None:
+    if not visitor_id or not session_id:
+        return
+
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO traffic_browser_sessions (
+            project_slug,
+            visitor_id,
+            session_id,
+            first_seen_at
+        ) VALUES (?, ?, ?, ?)
+        """,
+        (
+            project_slug,
+            visitor_id,
+            session_id,
+            first_seen_at,
+        ),
+    )
+
+
+def _ensure_browser_session_history(
+    connection: sqlite3.Connection,
+    *,
+    project_slug: str,
+    visitor_id: str,
+) -> None:
+    marker = connection.execute(
+        """
+        SELECT 1
+        FROM traffic_browser_session_backfills
+        WHERE project_slug = ?
+          AND visitor_id = ?
+        LIMIT 1
+        """,
+        (
+            project_slug,
+            visitor_id,
+        ),
+    ).fetchone()
+
+    if marker:
+        return
+
+    rows = connection.execute(
+        """
+        SELECT
+            session_id,
+            MIN(received_at) AS first_seen_at
+        FROM traffic_browser_events INDEXED BY idx_traffic_browser_events_visitor_received
+        WHERE visitor_id = ?
+          AND project_slug = ?
+          AND session_id <> ''
+        GROUP BY session_id
+        """,
+        (
+            visitor_id,
+            project_slug,
+        ),
+    ).fetchall()
+
+    connection.executemany(
+        """
+        INSERT OR IGNORE INTO traffic_browser_sessions (
+            project_slug,
+            visitor_id,
+            session_id,
+            first_seen_at
+        ) VALUES (?, ?, ?, ?)
+        """,
+        [
+            (
+                project_slug,
+                visitor_id,
+                str(row["session_id"] or ""),
+                str(row["first_seen_at"] or ""),
+            )
+            for row in rows
+            if str(row["session_id"] or "").strip()
+        ],
+    )
+
+    connection.execute(
+        """
+        INSERT OR REPLACE INTO traffic_browser_session_backfills (
+            project_slug,
+            visitor_id,
+            backfilled_at
+        ) VALUES (?, ?, ?)
+        """,
+        (
+            project_slug,
+            visitor_id,
+            iso_now(),
+        ),
+    )
 
 
 def _clean_text(value: Any, max_len: int = _MAX_TEXT) -> str:
@@ -322,6 +443,20 @@ def record_browser_event(
     if not PERSIST_ENABLED:
         return {"ok": True, "stored": False, "reason": "persistence_disabled", "generated_at": iso_now()}
 
+    synthetic_marker = _clean_text(
+        headers.get("x-aoe2war-synthetic")
+        or headers.get("X-AoE2WAR-Synthetic"),
+        80,
+    )
+    if synthetic_marker:
+        return {
+            "ok": True,
+            "stored": False,
+            "reason": "synthetic_observer",
+            "marker": synthetic_marker,
+            "generated_at": iso_now(),
+        }
+
     if not isinstance(payload, dict):
         raise ValueError("payload must be an object")
 
@@ -402,6 +537,16 @@ def record_browser_event(
             """,
             row,
         )
+
+        if event_type == "page_view":
+            _record_browser_session(
+                connection,
+                project_slug=row["project_slug"],
+                visitor_id=row["visitor_id"],
+                session_id=row["session_id"],
+                first_seen_at=received_at,
+            )
+
         connection.commit()
         event_id = int(cursor.lastrowid)
 
@@ -519,6 +664,14 @@ def record_authenticated_presence(payload: dict[str, Any]) -> dict[str, Any]:
                 ),
             )
             event_id = int(cursor.lastrowid)
+
+        _record_browser_session(
+            connection,
+            project_slug=project.get("slug") or "unknown",
+            visitor_id=visitor_id,
+            session_id=session_id,
+            first_seen_at=received_at,
+        )
 
         connection.commit()
 
@@ -1580,6 +1733,227 @@ def list_recent_browser_events(
     return events[:limit]
 
 
+
+def list_browser_visitor_audience(
+    *,
+    project_slug: str,
+    since_hours: int = 24,
+    limit: int = 120,
+    exclude_authenticated_uids: Iterable[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Return recent browser identities for a product-owned analytics join.
+
+    Traffic remains the authority for browser/session identity. Classification
+    is resolved from a bounded recent window first so known operators and
+    non-human observers are discarded before any all-time repeat-count query.
+    """
+    if not PERSIST_ENABLED:
+        return []
+
+    cleaned_project = _clean_text(project_slug, 80)
+    if not cleaned_project:
+        raise ValueError("project_slug is required")
+
+    excluded_uids = {
+        _clean_text(value, 120)
+        for value in (exclude_authenticated_uids or [])
+        if _clean_text(value, 120)
+    }
+    since_hours = max(1, min(int(since_hours or 24), 168))
+    limit = max(1, min(int(limit or 120), 300))
+    candidate_limit = min(max(limit * 10, 500), 5000)
+    cutoff = (
+        _traffic_dt.datetime.now(_traffic_dt.timezone.utc)
+        - _traffic_dt.timedelta(hours=since_hours)
+    ).isoformat()
+
+    with _connect() as connection:
+        _ensure_schema(connection)
+        recent = connection.execute(
+            """
+            SELECT
+                visitor_id,
+                MAX(received_at) AS recent_last_seen,
+                COUNT(*) AS recent_event_count
+            FROM traffic_browser_events
+            WHERE project_slug = ?
+              AND visitor_id <> ''
+              AND received_at >= ?
+            GROUP BY visitor_id
+            ORDER BY recent_last_seen DESC
+            LIMIT ?
+            """,
+            (cleaned_project, cutoff, candidate_limit),
+        ).fetchall()
+
+        visitor_ids = [
+            str(row["visitor_id"] or "").strip()
+            for row in recent
+            if str(row["visitor_id"] or "").strip()
+        ]
+        if not visitor_ids:
+            return []
+
+        recent_counts = {
+            str(row["visitor_id"]): int(row["recent_event_count"] or 0)
+            for row in recent
+        }
+        placeholders = ",".join("?" for _ in visitor_ids)
+
+        latest_rows = connection.execute(
+            f"""
+            SELECT e.*
+            FROM traffic_browser_events AS e
+            JOIN (
+                SELECT visitor_id, MAX(id) AS max_id
+                FROM traffic_browser_events
+                WHERE project_slug = ?
+                  AND received_at >= ?
+                  AND visitor_id IN ({placeholders})
+                GROUP BY visitor_id
+            ) AS latest
+              ON latest.max_id = e.id
+            """,
+            (cleaned_project, cutoff, *visitor_ids),
+        ).fetchall()
+
+        auth_rows = connection.execute(
+            f"""
+            SELECT e.*
+            FROM traffic_browser_events AS e
+            JOIN (
+                SELECT visitor_id, MAX(id) AS max_id
+                FROM traffic_browser_events
+                WHERE project_slug = ?
+                  AND event_type = 'auth_presence'
+                  AND received_at >= ?
+                  AND visitor_id IN ({placeholders})
+                GROUP BY visitor_id
+            ) AS latest
+              ON latest.max_id = e.id
+            """,
+            (cleaned_project, cutoff, *visitor_ids),
+        ).fetchall()
+
+        latest = {
+            str(row["visitor_id"]): _enrich_browser_event_row(row)
+            for row in latest_rows
+        }
+        auth = {
+            str(row["visitor_id"]): _enrich_browser_event_row(row)
+            for row in auth_rows
+        }
+
+        output: list[dict[str, Any]] = []
+        for visitor_id in visitor_ids:
+            event = latest.get(visitor_id)
+            if event is None:
+                continue
+
+            auth_event = auth.get(visitor_id) or {}
+            known_kind = str(
+                auth_event.get("known_visitor_kind")
+                or event.get("known_visitor_kind")
+                or ""
+            ).strip()
+            known_label = str(
+                auth_event.get("known_visitor_label")
+                or event.get("known_visitor_label")
+                or ""
+            ).strip()
+            authenticated_uid = str(
+                auth_event.get("authenticated_uid")
+                or event.get("authenticated_uid")
+                or ""
+            ).strip()
+            nonhuman = _story_event_is_nonhuman(event)
+            cloud_browser = is_known_singapore_cloud_browser(
+                str(event.get("ip") or ""),
+                str(event.get("country_code") or ""),
+                str(event.get("country") or ""),
+                str(event.get("user_agent") or ""),
+            )
+
+            exclude_reason = ""
+            if authenticated_uid and authenticated_uid in excluded_uids:
+                exclude_reason = "operator_uid"
+            elif known_kind == "owner":
+                exclude_reason = "operator_owner"
+            elif known_kind in {"known_automation", "crawler"}:
+                exclude_reason = "known_automation"
+            elif cloud_browser:
+                exclude_reason = "known_cloud_browser"
+            elif nonhuman:
+                exclude_reason = "nonhuman"
+
+            # Excluded observers do not need expensive historical aggregation.
+            if exclude_reason:
+                continue
+
+            _ensure_browser_session_history(
+                connection,
+                project_slug=cleaned_project,
+                visitor_id=visitor_id,
+            )
+
+            aggregate = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS visit_count,
+                    MIN(first_seen_at) AS first_seen_at
+                FROM traffic_browser_sessions
+                WHERE project_slug = ?
+                  AND visitor_id = ?
+                """,
+                (cleaned_project, visitor_id),
+            ).fetchone()
+
+            if aggregate is None:
+                continue
+
+            visit_count = max(1, int(aggregate["visit_count"] or 0))
+            last_seen_at = str(event.get("received_at") or "")
+            last_seen = _event_datetime(last_seen_at)
+            active_now = bool(
+                last_seen
+                and (
+                    _traffic_dt.datetime.now(_traffic_dt.timezone.utc)
+                    - last_seen
+                ).total_seconds()
+                <= 180
+            )
+
+            output.append(
+                {
+                    "traffic_visitor_id": visitor_id,
+                    "visit_count": visit_count,
+                    "return_count": max(0, visit_count - 1),
+                    "event_count": recent_counts.get(visitor_id, 0),
+                    "recent_event_count": recent_counts.get(visitor_id, 0),
+                    "first_seen_at": str(aggregate["first_seen_at"] or ""),
+                    "last_seen_at": last_seen_at,
+                    "active_now": active_now,
+                    "current_path": str(event.get("path") or ""),
+                    "country": str(event.get("country") or ""),
+                    "area": str(event.get("area") or ""),
+                    "city": str(event.get("city") or ""),
+                    "known_visitor_label": known_label,
+                    "known_visitor_kind": known_kind,
+                    "authenticated_uid": authenticated_uid,
+                    "automation_family": str(event.get("automation_family") or ""),
+                    "request_classification": str(
+                        event.get("request_classification") or ""
+                    ),
+                    "exclude_from_human_analytics": False,
+                    "exclude_reason": "",
+                }
+            )
+
+    output.sort(
+        key=lambda row: str(row.get("last_seen_at") or ""),
+        reverse=True,
+    )
+    return output[:limit]
 
 def build_beacon_javascript() -> str:
     return r'''

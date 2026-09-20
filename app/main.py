@@ -17,6 +17,7 @@ from fastapi.responses import Response, StreamingResponse
 from app.services.traffic.overview import clear_session_snapshot_cache, warm_session_snapshots
 from app.services.traffic.browser_events import (
     build_beacon_javascript,
+    list_browser_visitor_audience,
     list_recent_browser_events,
     record_authenticated_presence,
     record_browser_event,
@@ -602,6 +603,35 @@ async def api_ingest_browser_event(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/internal/browser-visitor-audience")
+def api_internal_browser_visitor_audience(
+    payload: dict = Body(...),
+    _: None = Depends(require_identity_ingest_key),
+) -> dict:
+    try:
+        raw_excluded_uids = payload.get("exclude_authenticated_uids")
+        excluded_uids = (
+            [str(value) for value in raw_excluded_uids[:50]]
+            if isinstance(raw_excluded_uids, list)
+            else []
+        )
+
+        visitors = list_browser_visitor_audience(
+            project_slug=str(payload.get("project_slug") or "aoe2hdbets"),
+            since_hours=int(payload.get("since_hours") or 24),
+            limit=int(payload.get("limit") or 120),
+            exclude_authenticated_uids=excluded_uids,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "ok": True,
+        "generated_at": iso_now(),
+        "visitors": visitors,
+    }
 
 
 @app.post("/api/internal/auth-presence")
