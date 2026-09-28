@@ -671,6 +671,100 @@ def _bootstrap_incremental_project(
     }
 
 
+def _rebuild_project_history_and_seed_incremental(
+    conn: sqlite3.Connection,
+    *,
+    project_slug: str,
+    hosts: list[str],
+    first_raw_day: date,
+    latest_raw_day: date,
+    through_rowid: int,
+    reason: str,
+) -> dict:
+    """
+    Rebuild canonical daily history after incremental-state authority changes.
+
+    Host-set changes and a raw-store rewind invalidate more than the active-day
+    compact cache. Recompute the complete project history once, then seed the
+    newest day's compact state and watermark so later timer runs are cheap again.
+    """
+    _clear_incremental_project_state(
+        conn,
+        project_slug,
+    )
+    conn.execute(
+        """
+        DELETE FROM traffic_project_daily_rollups
+        WHERE project_slug = ?
+        """,
+        (project_slug,),
+    )
+    conn.commit()
+
+    processed = 0
+    total_visitors = 0
+    total_events = 0
+
+    for bucket_day in day_range(
+        first_raw_day,
+        latest_raw_day,
+    ):
+        visitors, events = compute_project_day(
+            conn,
+            hosts=hosts,
+            bucket_day=bucket_day,
+        )
+        upsert_project_day_with_retry(
+            conn,
+            project_slug=project_slug,
+            bucket_day=bucket_day,
+            visitors=visitors,
+            events=events,
+        )
+        processed += 1
+        total_visitors += visitors
+        total_events += events
+
+        print(
+            f"{project_slug}: "
+            f"{bucket_day.isoformat()} "
+            f"visitors={visitors} "
+            f"events={events}",
+            flush=True,
+        )
+
+    _replace_day_path_state(
+        conn,
+        project_slug=project_slug,
+        hosts=hosts,
+        bucket_day=latest_raw_day,
+        through_rowid=through_rowid,
+    )
+    _store_rollup_state(
+        conn,
+        project_slug=project_slug,
+        hosts_key=_hosts_key(hosts),
+        last_entry_rowid=through_rowid,
+    )
+    _prune_incremental_path_state(
+        conn,
+        project_slug=project_slug,
+        newest_day=latest_raw_day,
+    )
+    conn.commit()
+
+    return {
+        "project_slug": project_slug,
+        "mode": "incremental_reseed",
+        "reason": reason,
+        "start_day": first_raw_day.isoformat(),
+        "end_day": latest_raw_day.isoformat(),
+        "days": processed,
+        "visitors": total_visitors,
+        "events": total_events,
+        "watermark_rowid": through_rowid,
+    }
+
 def refresh_project_incremental(
     conn: sqlite3.Connection,
     *,
@@ -690,17 +784,49 @@ def refresh_project_incremental(
         project_slug,
     )
 
-    if (
-        state is None
-        or str(state["hosts_key"]) != hosts_key
-        or int(state["last_entry_rowid"] or 0) > current_max_rowid
-    ):
+    if state is None:
         return _bootstrap_incremental_project(
             conn,
             project_slug=project_slug,
             hosts=hosts,
             latest_raw_day=latest_raw_day,
             through_rowid=current_max_rowid,
+        )
+
+    stored_hosts_key = str(
+        state["hosts_key"] or "",
+    )
+    stored_rowid = int(
+        state["last_entry_rowid"] or 0,
+    )
+
+    reseed_reason: str | None = None
+    if stored_hosts_key != hosts_key:
+        reseed_reason = "host_set_changed"
+    elif stored_rowid > current_max_rowid:
+        reseed_reason = "raw_store_rewound"
+
+    if reseed_reason:
+        first_raw_day, _ = raw_day_bounds(
+            conn,
+            hosts,
+        )
+        if first_raw_day is None:
+            return {
+                "project_slug": project_slug,
+                "mode": "noop",
+                "reason": "no_raw_rows",
+                "days": 0,
+            }
+
+        return _rebuild_project_history_and_seed_incremental(
+            conn,
+            project_slug=project_slug,
+            hosts=hosts,
+            first_raw_day=first_raw_day,
+            latest_raw_day=latest_raw_day,
+            through_rowid=current_max_rowid,
+            reason=reseed_reason,
         )
 
     previous_rowid = int(
@@ -999,6 +1125,33 @@ def refresh_project(
             f"events={events}",
             flush=True,
         )
+
+    if mode == "rebuild":
+        # A deliberate full rebuild should leave the next scheduled incremental
+        # run ready to consume only newly appended raw rows.
+        current_max_rowid = _project_max_rowid(
+            conn,
+            hosts,
+        )
+        _replace_day_path_state(
+            conn,
+            project_slug=project_slug,
+            hosts=hosts,
+            bucket_day=latest_raw_day,
+            through_rowid=current_max_rowid,
+        )
+        _store_rollup_state(
+            conn,
+            project_slug=project_slug,
+            hosts_key=_hosts_key(hosts),
+            last_entry_rowid=current_max_rowid,
+        )
+        _prune_incremental_path_state(
+            conn,
+            project_slug=project_slug,
+            newest_day=latest_raw_day,
+        )
+        conn.commit()
 
     return {
         "project_slug": project_slug,

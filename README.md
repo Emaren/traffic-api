@@ -51,7 +51,7 @@ Traffic notifications follow this pipeline:
 - `POST /api/internal/browser-visitor-audience` is the authenticated product join for recent browser identities, distinct visit counts, return counts, presence, route, and conservative operator/nonhuman exclusion signals; it uses the same `X-Identity-Key` authority as authenticated-presence ingest
 - AoE2WAR synthetic browser harnesses stamp `X-AoE2WAR-Synthetic`; browser-event ingest accepts the request but deliberately does not persist it, preventing Speed OS and other explicitly marked observer traffic from entering human audience truth
 - browser-event ingest also fails closed before persistence for unmistakable browser-automation user agents (including HeadlessChrome, CodexBrowser, Playwright, Puppeteer, and Selenium), so unload/sendBeacon paths cannot contaminate raw browser-event truth when a custom synthetic header is unavailable
-- project daily rollups use a durable raw-row watermark plus compact per-day/IP/path state: the first incremental run bootstraps the active day once, later runs consume only newly appended project rows, and a late event rebuilds only its affected historical day; raw Traffic history remains authoritative
+- project daily rollups use a durable raw-row watermark plus compact per-day/IP/path state: the first incremental run bootstraps the active day once, later runs consume only newly appended project rows, and a late event rebuilds only its affected historical day; a configured-host change or raw-store rewind deliberately rebuilds complete project history once and reseeds the watermark; raw Traffic history remains authoritative
 
 ## UseTab / AscendAI reporting contract
 
