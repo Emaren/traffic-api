@@ -279,6 +279,7 @@ def _clear_incremental_project_state(
     conn: sqlite3.Connection,
     project_slug: str,
 ) -> None:
+    ensure_incremental_state_schema(conn)
     conn.execute(
         """
         DELETE FROM traffic_project_daily_path_state
@@ -1066,8 +1067,9 @@ def main() -> None:
         "--incremental",
         action="store_true",
         help=(
-            "Recompute the newest existing rollup day and "
-            "fill forward through the newest raw Traffic day."
+            "Consume only raw rows newer than the stored project watermark; "
+            "bootstrap the active day once and rebuild only a specific historical "
+            "day when a late row targets pruned compact state."
         ),
     )
 
