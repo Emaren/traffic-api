@@ -197,7 +197,51 @@ def ensure_incremental_state_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _eligible_path_rows_to_totals(rows) -> tuple[int, int]:    return _eligible_path_rows_to_totals(rows)
+def _eligible_path_rows_to_totals(rows) -> tuple[int, int]:
+    stats = defaultdict(
+        lambda: {
+            "events": 0,
+            "paths": Counter(),
+            "core": 0,
+            "player": 0,
+            "game": 0,
+        }
+    )
+
+    prefix_ips: dict[str, set[str]] = defaultdict(set)
+
+    for row in rows:
+        ip = str(row["ip"] or "")
+        path = str(row["normalized_path"] or "")
+        hits = int(row["hits"] or 0)
+
+        if not ip or hits <= 0:
+            continue
+
+        item = stats[ip]
+        item["events"] += hits
+        item["paths"][path] += hits
+
+        if is_core_page(path):
+            item["core"] += hits
+
+        if path.startswith("/players/"):
+            item["player"] += hits
+
+        if path.startswith("/game-stats/"):
+            item["game"] += hits
+
+        prefix_ips[ip_prefix(ip)].add(ip)
+
+    visitors = 0
+    events = 0
+
+    for ip, item in stats.items():
+        if strict_human_shape(ip, item, prefix_ips):
+            visitors += 1
+            events += item["events"]
+
+    return visitors, events
 
 
 def _project_max_rowid(
@@ -782,100 +826,12 @@ def compute_project_day(
     hosts: list[str],
     bucket_day: date,
 ) -> tuple[int, int]:
-    placeholders = ",".join("?" for _ in hosts)
-
-    start_at = datetime.combine(
-        bucket_day,
-        datetime.min.time(),
-        tzinfo=timezone.utc,
+    rows = _load_raw_day_path_rows(
+        conn,
+        hosts=hosts,
+        bucket_day=bucket_day,
     )
-    end_at = start_at + timedelta(days=1)
-
-    # Aggregate by IP/path inside SQLite first. This preserves the existing
-    # strict-human shape math while avoiding one Python object per raw request.
-    rows = conn.execute(
-        f"""
-        SELECT
-            ip,
-            normalized_path,
-            COUNT(*) AS hits
-        FROM traffic_entries
-        WHERE host IN ({placeholders})
-          AND timestamp >= ?
-          AND timestamp < ?
-          AND status BETWEEN 200 AND 399
-          AND method = 'GET'
-          AND ua LIKE '%Mozilla%'
-          AND normalized_path NOT LIKE '/api/%'
-          AND normalized_path NOT LIKE '/rpc-%'
-          AND normalized_path NOT LIKE '/rest-%'
-          AND normalized_path NOT LIKE '/_next/%'
-          AND normalized_path NOT LIKE '/assets/%'
-          AND normalized_path NOT LIKE '/static/%'
-          AND normalized_path NOT LIKE '/wp-%'
-          AND normalized_path NOT LIKE '/wp/%'
-          AND normalized_path NOT LIKE '/.env%'
-          AND normalized_path NOT LIKE '/xmlrpc%'
-          AND normalized_path NOT LIKE '/server-status%'
-          AND normalized_path NOT IN (
-            '/robots.txt',
-            '/favicon.ico',
-            '/manifest.webmanifest',
-            '/admin-manifest.webmanifest'
-          )
-        GROUP BY ip, normalized_path
-        """,
-        [
-            *hosts,
-            start_at.isoformat(),
-            end_at.isoformat(),
-        ],
-    ).fetchall()
-
-    stats = defaultdict(
-        lambda: {
-            "events": 0,
-            "paths": Counter(),
-            "core": 0,
-            "player": 0,
-            "game": 0,
-        }
-    )
-
-    prefix_ips: dict[str, set[str]] = defaultdict(set)
-
-    for row in rows:
-        ip = str(row["ip"] or "")
-        path = str(row["normalized_path"] or "")
-        hits = int(row["hits"] or 0)
-
-        if not ip or hits <= 0:
-            continue
-
-        item = stats[ip]
-        item["events"] += hits
-        item["paths"][path] += hits
-
-        if is_core_page(path):
-            item["core"] += hits
-
-        if path.startswith("/players/"):
-            item["player"] += hits
-
-        if path.startswith("/game-stats/"):
-            item["game"] += hits
-
-        prefix_ips[ip_prefix(ip)].add(ip)
-
-    visitors = 0
-    events = 0
-
-    for ip, item in stats.items():
-        if strict_human_shape(ip, item, prefix_ips):
-            visitors += 1
-            events += item["events"]
-
-    return visitors, events
+    return _eligible_path_rows_to_totals(rows)
 
 
 def upsert_project_day(
