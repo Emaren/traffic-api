@@ -1764,6 +1764,7 @@ def list_browser_visitor_audience(
     exclude_authenticated_uids: Iterable[str] | None = None,
     all_time: bool = False,
     path_limit: int = 18,
+    include_operators: bool = False,
 ) -> list[dict[str, Any]]:
     """Return browser identities for a product-owned analytics join.
 
@@ -2024,9 +2025,13 @@ def list_browser_visitor_audience(
             )
 
             exclude_reason = ""
-            if authenticated_uid and authenticated_uid in excluded_uids:
+            if (
+                not include_operators
+                and authenticated_uid
+                and authenticated_uid in excluded_uids
+            ):
                 exclude_reason = "operator_uid"
-            elif known_kind == "owner":
+            elif not include_operators and known_kind == "owner":
                 exclude_reason = "operator_owner"
             elif known_kind in {"known_automation", "crawler"}:
                 exclude_reason = "known_automation"
