@@ -2102,14 +2102,52 @@ def list_browser_visitor_audience(
             )
 
     if all_time:
-        output.sort(
+        live_rows = sorted(
+            (
+                row
+                for row in output
+                if row.get("active_now")
+            ),
+            key=lambda row: str(row.get("last_seen_at") or ""),
+            reverse=True,
+        )
+        member_rows = sorted(
+            (
+                row
+                for row in output
+                if not row.get("active_now")
+                and str(row.get("authenticated_uid") or "").strip()
+            ),
             key=lambda row: (
-                1 if row.get("active_now") else 0,
                 int(row.get("visit_count") or 0),
                 str(row.get("last_seen_at") or ""),
             ),
             reverse=True,
         )
+        anonymous_rows = sorted(
+            (
+                row
+                for row in output
+                if not row.get("active_now")
+                and not str(row.get("authenticated_uid") or "").strip()
+            ),
+            key=lambda row: (
+                int(row.get("visit_count") or 0),
+                str(row.get("last_seen_at") or ""),
+            ),
+            reverse=True,
+        )
+
+        # The product consumer performs its own display ranking, but the
+        # bounded producer payload must not evict an authenticated member
+        # merely because anonymous repeat traffic consumed the whole limit.
+        # Live presence is always retained first, then signed-in identities,
+        # then the anonymous repeat/recency cohort fills the remaining room.
+        output = [
+            *live_rows,
+            *member_rows,
+            *anonymous_rows,
+        ]
     else:
         output.sort(
             key=lambda row: str(row.get("last_seen_at") or ""),
