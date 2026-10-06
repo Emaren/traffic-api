@@ -1831,6 +1831,25 @@ def list_browser_visitor_audience(
             add_visitor_id(row["visitor_id"])
 
         if all_time:
+            historical_authenticated = connection.execute(
+                """
+                SELECT
+                    visitor_id,
+                    MAX(received_at) AS latest_auth_at
+                FROM traffic_browser_events
+                WHERE project_slug = ?
+                  AND event_type = 'auth_presence'
+                  AND visitor_id <> ''
+                GROUP BY visitor_id
+                ORDER BY latest_auth_at DESC
+                LIMIT ?
+                """,
+                (cleaned_project, historical_candidate_limit),
+            ).fetchall()
+
+            for row in historical_authenticated:
+                add_visitor_id(row["visitor_id"])
+
             historical = connection.execute(
                 """
                 SELECT
