@@ -1762,12 +1762,19 @@ def list_browser_visitor_audience(
     since_hours: int = 24,
     limit: int = 120,
     exclude_authenticated_uids: Iterable[str] | None = None,
+    all_time: bool = False,
+    path_limit: int = 18,
+    include_operators: bool = False,
 ) -> list[dict[str, Any]]:
-    """Return recent browser identities for a product-owned analytics join.
+    """Return browser identities for a product-owned analytics join.
 
-    Traffic remains the authority for browser/session identity. Classification
-    is resolved from a bounded recent window first so known operators and
-    non-human observers are discarded before any all-time repeat-count query.
+    Traffic remains the authority for browser/session identity. The ordinary
+    mode preserves the bounded recent-window behavior. all_time adds the
+    highest-repeat historical browser identities to the recent cohort so a
+    product dashboard can keep durable top visitors visible without losing
+    active/recent humans. Every returned identity may carry a bounded exact
+    page-view trail for operator drill-down; it never exposes arbitrary payload
+    JSON, IP history, or cross-site identity.
     """
     if not PERSIST_ENABLED:
         return []
@@ -1783,7 +1790,9 @@ def list_browser_visitor_audience(
     }
     since_hours = max(1, min(int(since_hours or 24), 168))
     limit = max(1, min(int(limit or 120), 300))
-    candidate_limit = min(max(limit * 10, 500), 5000)
+    path_limit = max(0, min(int(path_limit or 0), 40))
+    recent_candidate_limit = min(max(limit * 6, 240), 2400)
+    historical_candidate_limit = min(max(limit * 4, 160), 1200)
     cutoff = (
         _traffic_dt.datetime.now(_traffic_dt.timezone.utc)
         - _traffic_dt.timedelta(hours=since_hours)
@@ -1791,6 +1800,7 @@ def list_browser_visitor_audience(
 
     with _connect() as connection:
         _ensure_schema(connection)
+
         recent = connection.execute(
             """
             SELECT
@@ -1805,14 +1815,44 @@ def list_browser_visitor_audience(
             ORDER BY recent_last_seen DESC
             LIMIT ?
             """,
-            (cleaned_project, cutoff, candidate_limit),
+            (cleaned_project, cutoff, recent_candidate_limit),
         ).fetchall()
 
-        visitor_ids = [
-            str(row["visitor_id"] or "").strip()
-            for row in recent
-            if str(row["visitor_id"] or "").strip()
-        ]
+        visitor_ids: list[str] = []
+        seen_ids: set[str] = set()
+
+        def add_visitor_id(value: Any) -> None:
+            visitor_id = str(value or "").strip()
+            if visitor_id and visitor_id not in seen_ids:
+                seen_ids.add(visitor_id)
+                visitor_ids.append(visitor_id)
+
+        for row in recent:
+            add_visitor_id(row["visitor_id"])
+
+        if all_time:
+            historical = connection.execute(
+                """
+                SELECT
+                    visitor_id,
+                    COUNT(*) AS visit_count,
+                    MIN(first_seen_at) AS first_seen_at,
+                    MAX(first_seen_at) AS latest_session_at
+                FROM traffic_browser_sessions
+                WHERE project_slug = ?
+                  AND visitor_id <> ''
+                GROUP BY visitor_id
+                ORDER BY
+                    visit_count DESC,
+                    latest_session_at DESC
+                LIMIT ?
+                """,
+                (cleaned_project, historical_candidate_limit),
+            ).fetchall()
+
+            for row in historical:
+                add_visitor_id(row["visitor_id"])
+
         if not visitor_ids:
             return []
 
@@ -1820,7 +1860,10 @@ def list_browser_visitor_audience(
             str(row["visitor_id"]): int(row["recent_event_count"] or 0)
             for row in recent
         }
+
         placeholders = ",".join("?" for _ in visitor_ids)
+        latest_time_clause = "" if all_time else "AND received_at >= ?"
+        latest_time_params: tuple[Any, ...] = () if all_time else (cutoff,)
 
         latest_rows = connection.execute(
             f"""
@@ -1830,13 +1873,17 @@ def list_browser_visitor_audience(
                 SELECT visitor_id, MAX(id) AS max_id
                 FROM traffic_browser_events
                 WHERE project_slug = ?
-                  AND received_at >= ?
+                  {latest_time_clause}
                   AND visitor_id IN ({placeholders})
                 GROUP BY visitor_id
             ) AS latest
               ON latest.max_id = e.id
             """,
-            (cleaned_project, cutoff, *visitor_ids),
+            (
+                cleaned_project,
+                *latest_time_params,
+                *visitor_ids,
+            ),
         ).fetchall()
 
         auth_rows = connection.execute(
@@ -1848,13 +1895,17 @@ def list_browser_visitor_audience(
                 FROM traffic_browser_events
                 WHERE project_slug = ?
                   AND event_type = 'auth_presence'
-                  AND received_at >= ?
+                  {latest_time_clause}
                   AND visitor_id IN ({placeholders})
                 GROUP BY visitor_id
             ) AS latest
               ON latest.max_id = e.id
             """,
-            (cleaned_project, cutoff, *visitor_ids),
+            (
+                cleaned_project,
+                *latest_time_params,
+                *visitor_ids,
+            ),
         ).fetchall()
 
         latest = {
@@ -1866,7 +1917,83 @@ def list_browser_visitor_audience(
             for row in auth_rows
         }
 
+        for visitor_id in visitor_ids:
+            _ensure_browser_session_history(
+                connection,
+                project_slug=cleaned_project,
+                visitor_id=visitor_id,
+            )
+
+        aggregate_rows = connection.execute(
+            f"""
+            SELECT
+                visitor_id,
+                COUNT(*) AS visit_count,
+                MIN(first_seen_at) AS first_seen_at,
+                MAX(first_seen_at) AS latest_session_at
+            FROM traffic_browser_sessions
+            WHERE project_slug = ?
+              AND visitor_id IN ({placeholders})
+            GROUP BY visitor_id
+            """,
+            (cleaned_project, *visitor_ids),
+        ).fetchall()
+
+        aggregates = {
+            str(row["visitor_id"]): row
+            for row in aggregate_rows
+        }
+
+        trails: dict[str, list[dict[str, str]]] = {
+            visitor_id: []
+            for visitor_id in visitor_ids
+        }
+
+        if path_limit > 0:
+            trail_rows = connection.execute(
+                f"""
+                SELECT visitor_id, session_id, received_at, path
+                FROM (
+                    SELECT
+                        visitor_id,
+                        session_id,
+                        received_at,
+                        path,
+                        id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY visitor_id
+                            ORDER BY received_at DESC, id DESC
+                        ) AS trail_rank
+                    FROM traffic_browser_events
+                    WHERE project_slug = ?
+                      AND event_type = 'page_view'
+                      AND visitor_id IN ({placeholders})
+                ) ranked
+                WHERE trail_rank <= ?
+                ORDER BY visitor_id ASC, received_at ASC, id ASC
+                """,
+                (
+                    cleaned_project,
+                    *visitor_ids,
+                    path_limit,
+                ),
+            ).fetchall()
+
+            for row in trail_rows:
+                visitor_id = str(row["visitor_id"] or "")
+                if visitor_id not in trails:
+                    continue
+                trails[visitor_id].append(
+                    {
+                        "session_id": str(row["session_id"] or ""),
+                        "seen_at": str(row["received_at"] or ""),
+                        "path": str(row["path"] or ""),
+                    }
+                )
+
         output: list[dict[str, Any]] = []
+        now = _traffic_dt.datetime.now(_traffic_dt.timezone.utc)
+
         for visitor_id in visitor_ids:
             event = latest.get(visitor_id)
             if event is None:
@@ -1888,6 +2015,7 @@ def list_browser_visitor_audience(
                 or event.get("authenticated_uid")
                 or ""
             ).strip()
+
             nonhuman = _story_event_is_nonhuman(event)
             cloud_browser = is_known_singapore_cloud_browser(
                 str(event.get("ip") or ""),
@@ -1897,9 +2025,13 @@ def list_browser_visitor_audience(
             )
 
             exclude_reason = ""
-            if authenticated_uid and authenticated_uid in excluded_uids:
+            if (
+                not include_operators
+                and authenticated_uid
+                and authenticated_uid in excluded_uids
+            ):
                 exclude_reason = "operator_uid"
-            elif known_kind == "owner":
+            elif not include_operators and known_kind == "owner":
                 exclude_reason = "operator_owner"
             elif known_kind in {"known_automation", "crawler"}:
                 exclude_reason = "known_automation"
@@ -1908,28 +2040,10 @@ def list_browser_visitor_audience(
             elif nonhuman:
                 exclude_reason = "nonhuman"
 
-            # Excluded observers do not need expensive historical aggregation.
             if exclude_reason:
                 continue
 
-            _ensure_browser_session_history(
-                connection,
-                project_slug=cleaned_project,
-                visitor_id=visitor_id,
-            )
-
-            aggregate = connection.execute(
-                """
-                SELECT
-                    COUNT(*) AS visit_count,
-                    MIN(first_seen_at) AS first_seen_at
-                FROM traffic_browser_sessions
-                WHERE project_slug = ?
-                  AND visitor_id = ?
-                """,
-                (cleaned_project, visitor_id),
-            ).fetchone()
-
+            aggregate = aggregates.get(visitor_id)
             if aggregate is None:
                 continue
 
@@ -1938,11 +2052,7 @@ def list_browser_visitor_audience(
             last_seen = _event_datetime(last_seen_at)
             active_now = bool(
                 last_seen
-                and (
-                    _traffic_dt.datetime.now(_traffic_dt.timezone.utc)
-                    - last_seen
-                ).total_seconds()
-                <= 180
+                and (now - last_seen).total_seconds() <= 180
             )
 
             output.append(
@@ -1956,6 +2066,7 @@ def list_browser_visitor_audience(
                     "last_seen_at": last_seen_at,
                     "active_now": active_now,
                     "current_path": str(event.get("path") or ""),
+                    "path_trail": trails.get(visitor_id, []),
                     "country": str(event.get("country") or ""),
                     "area": str(event.get("area") or ""),
                     "city": str(event.get("city") or ""),
@@ -1971,11 +2082,23 @@ def list_browser_visitor_audience(
                 }
             )
 
-    output.sort(
-        key=lambda row: str(row.get("last_seen_at") or ""),
-        reverse=True,
-    )
+    if all_time:
+        output.sort(
+            key=lambda row: (
+                1 if row.get("active_now") else 0,
+                int(row.get("visit_count") or 0),
+                str(row.get("last_seen_at") or ""),
+            ),
+            reverse=True,
+        )
+    else:
+        output.sort(
+            key=lambda row: str(row.get("last_seen_at") or ""),
+            reverse=True,
+        )
+
     return output[:limit]
+
 
 def build_beacon_javascript() -> str:
     return r'''

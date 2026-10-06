@@ -623,6 +623,9 @@ def api_internal_browser_visitor_audience(
             since_hours=int(payload.get("since_hours") or 24),
             limit=int(payload.get("limit") or 120),
             exclude_authenticated_uids=excluded_uids,
+            all_time=bool(payload.get("all_time")),
+            path_limit=int(payload.get("path_limit") or 0),
+            include_operators=bool(payload.get("include_operators")),
         )
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
