@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 from threading import Event, Lock, Thread
@@ -781,6 +782,11 @@ LIVE_SESSION_RESPONSE_KEYS = {
     "burst_ip_prefix",
     "burst_sample_ips",
     "burst_paths",
+    "is_network_actor_cluster",
+    "network_actor_member_count",
+    "network_actor_ip_count",
+    "network_actor_sample_ips",
+    "network_actor_paths",
     "referrer",
     "source",
     "entry_page",
@@ -822,6 +828,8 @@ LIVE_SESSION_RESPONSE_KEYS = {
 LIVE_SESSION_ARRAY_LIMITS = {
     "burst_sample_ips": 12,
     "burst_paths": 12,
+    "network_actor_sample_ips": 12,
+    "network_actor_paths": 12,
     "page_sequence": 6,
     "route_trail": 8,
     "browser_route_trail": 8,
@@ -1470,7 +1478,9 @@ def _collapse_nonhuman_preview(
 
         group = dict(latest)
         group.update({
-            "session_id": "nonhuman-preview-cluster|" + "|".join(key[:-1]).replace("|", "-") + "|" + bucket,
+            "session_id": "nonhuman-preview-cluster|" + hashlib.blake2s(
+                "\x1f".join(key).encode("utf-8"), digest_size=12
+            ).hexdigest(),
             "visitor_alias": f"{place} · {family}",
             "ip": f"{len(ips)} IPs",
             "started_at": earliest.get("started_at") or latest.get("started_at"),
@@ -1659,7 +1669,7 @@ def build_live_visitors(
     security_preview = _collapse_nonhuman_preview(
         _collapse_security_preview(security_candidates), limit=auxiliary_limit
     )
-    chain_signal_preview = sorted(chain_signal_candidates, key=live_session_sort_key)[:auxiliary_limit]
+    chain_signal_preview = _collapse_nonhuman_preview(chain_signal_candidates, limit=auxiliary_limit)
     app_activity_preview = sorted(app_activity_candidates, key=live_session_sort_key)[:auxiliary_limit]
     watcher_funnel_preview = sorted(watcher_funnel_candidates, key=live_session_sort_key)[:auxiliary_limit]
 
