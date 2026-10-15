@@ -779,6 +779,8 @@ LIVE_SESSION_RESPONSE_KEYS = {
     "burst_path_count",
     "burst_window_seconds",
     "burst_ip_prefix",
+    "burst_sample_ips",
+    "burst_paths",
     "referrer",
     "source",
     "entry_page",
@@ -818,6 +820,8 @@ LIVE_SESSION_RESPONSE_KEYS = {
 }
 
 LIVE_SESSION_ARRAY_LIMITS = {
+    "burst_sample_ips": 12,
+    "burst_paths": 12,
     "page_sequence": 6,
     "route_trail": 8,
     "browser_route_trail": 8,
@@ -1398,6 +1402,105 @@ def _collapse_security_preview(sessions: list[dict[str, Any]]) -> list[dict[str,
     return sorted(singles + collapsed, key=live_session_sort_key)[:len(sessions)]
 
 
+
+def _collapse_nonhuman_preview(
+    sessions: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Summarize known nonhuman fleets *before* applying the wire preview limit.
+
+    Raw history and per-session classification remain authoritative. Only explicitly
+    automated/scripted sessions can be collapsed; uncertain and known-human
+    sessions remain individual so a false positive cannot swallow a visitor.
+    Groups are scoped to project, host, city, exact UA, verdict, and UTC hour.
+    """
+    groups: dict[tuple[str, ...], list[dict[str, Any]]] = defaultdict(list)
+    singles: list[dict[str, Any]] = []
+
+    for session in sessions:
+        state = str(session.get("classification_state") or "")
+        kind = str(session.get("known_visitor_kind") or "")
+        if (
+            state not in AUTOMATED_OR_SCRIPT_STATES
+            or session.get("authenticated")
+            or session.get("human_confirmed")
+            or (session.get("known_visitor_confirmed") and kind not in {"known_automation", "crawler"})
+            or session.get("is_burst_cluster")
+            or session.get("is_network_actor_cluster")
+        ):
+            singles.append(session)
+            continue
+
+        family = str(session.get("automation_family") or "").strip()
+        if not family:
+            family = "Browser script" if state in {"browser_script", "script_burst"} else (
+                "Crawler review" if state == "suspicious" else "Automation"
+            )
+        key = (
+            str(session.get("project_slug") or ""),
+            str(session.get("host") or ""),
+            str(session.get("country_code") or session.get("country") or ""),
+            str(session.get("area") or ""),
+            str(session.get("city") or ""),
+            state,
+            family,
+            str(session.get("user_agent") or "").strip().lower(),
+            _page_burst_bucket(session, minutes=60),
+        )
+        groups[key].append(session)
+
+    for key, members in groups.items():
+        if len(members) < 2:
+            singles.extend(members)
+            continue
+
+        ordered = sorted(members, key=lambda s: str(s.get("ended_at") or s.get("last_seen_at") or ""))
+        earliest, latest = ordered[0], ordered[-1]
+        ips = sorted({str(s.get("ip") or "") for s in members if s.get("ip")})
+        paths = Counter(path for s in members for path in _security_preview_paths(s))
+        top_paths = [path for path, _count in paths.most_common(12)]
+        total_events = sum(max(0, int(s.get("event_count") or 0)) for s in members)
+        place = str(latest.get("city") or latest.get("area") or latest.get("country") or "Unknown")
+        family = key[6]
+        bucket = key[-1]
+        start = _parse_session_time(earliest.get("started_at") or earliest.get("first_seen_at"))
+        end = _parse_session_time(latest.get("ended_at") or latest.get("last_seen_at"))
+        span = max(0, int((end - start).total_seconds())) if start and end else 0
+
+        group = dict(latest)
+        group.update({
+            "session_id": "nonhuman-preview-cluster|" + "|".join(key[:-1]).replace("|", "-") + "|" + bucket,
+            "visitor_alias": f"{place} · {family}",
+            "ip": f"{len(ips)} IPs",
+            "started_at": earliest.get("started_at") or latest.get("started_at"),
+            "first_seen_at": earliest.get("first_seen_at") or latest.get("first_seen_at"),
+            "ended_at": latest.get("ended_at") or latest.get("last_seen_at"),
+            "last_seen_at": latest.get("last_seen_at") or latest.get("ended_at"),
+            "is_burst_cluster": True,
+            "burst_member_count": len(members),
+            "burst_ip_count": len(ips),
+            "burst_path_count": len(paths),
+            "burst_window_seconds": span,
+            "burst_sample_ips": ips[:12],
+            "burst_paths": top_paths,
+            "event_count": total_events,
+            "page_sequence": top_paths[:6],
+            "known_visitor_confirmed": False,
+            "human_confirmed": False,
+            "authenticated": False,
+            "classification_summary": (
+                f"{len(members)} {family.lower()} sessions from {len(ips)} IPs, "
+                f"{len(paths)} distinct paths and {total_events} requests, "
+                f"observed in one UTC hour. Expand for representative IPs and paths. "
+                "Original individual records remain in Traffic history."
+            ),
+        })
+        singles.append(group)
+
+    return sorted(singles, key=live_session_sort_key)[:limit]
+
+
 def build_live_visitors(
     *,
     limit: int = LIVE_TILE_LIMIT,
@@ -1549,9 +1652,13 @@ def build_live_visitors(
     chain_signal_candidates = [session for session in chain_signal_candidates if not_page_burst_member(session)]
 
     tower = sorted(tower_candidates, key=live_session_sort_key)[:limit]
-    browser_script_preview = sorted(browser_script_candidates, key=live_session_sort_key)[:auxiliary_limit]
-    automation_preview = sorted(automation_candidates, key=live_session_sort_key)[:auxiliary_limit]
-    security_preview = _collapse_security_preview(sorted(security_candidates, key=live_session_sort_key)[:auxiliary_limit])
+    # Collapse entire nonhuman candidate cohorts before truncating previews.
+    # Otherwise distributed crawlers occupy the first eight slots as singles.
+    browser_script_preview = _collapse_nonhuman_preview(browser_script_candidates, limit=auxiliary_limit)
+    automation_preview = _collapse_nonhuman_preview(automation_candidates, limit=auxiliary_limit)
+    security_preview = _collapse_nonhuman_preview(
+        _collapse_security_preview(security_candidates), limit=auxiliary_limit
+    )
     chain_signal_preview = sorted(chain_signal_candidates, key=live_session_sort_key)[:auxiliary_limit]
     app_activity_preview = sorted(app_activity_candidates, key=live_session_sort_key)[:auxiliary_limit]
     watcher_funnel_preview = sorted(watcher_funnel_candidates, key=live_session_sort_key)[:auxiliary_limit]
