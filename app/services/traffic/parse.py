@@ -85,17 +85,18 @@ def client_ip_from_json_payload(
         or ""
     ).strip()
 
-    if (
-        remote
-        and forwarded
-        and _is_cloudflare_proxy(remote)
-    ):
-        candidate = _valid_ip(
-            forwarded.split(",", 1)[0]
-        )
+    # Only a verified Cloudflare socket peer can authenticate these headers.
+    # Prefer Cloudflare's single-address client header when it is actually
+    # recorded by Nginx; preserve trusted XFF fallback for historical logs.
+    if remote and _is_cloudflare_proxy(remote):
+        connecting = _valid_ip(str(payload.get("cf_connecting_ip") or ""))
+        if connecting:
+            return connecting
 
-        if candidate:
-            return candidate
+        if forwarded:
+            candidate = _valid_ip(forwarded.split(",", 1)[0])
+            if candidate:
+                return candidate
 
     return remote
 
