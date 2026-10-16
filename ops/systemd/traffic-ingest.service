@@ -1,0 +1,24 @@
+[Unit]
+Description=Ingest Traffic Nginx access logs into durable SQLite
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=tony
+Group=tony
+RuntimeDirectory=traffic-ingest
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+WorkingDirectory=/var/www/Traffic/traffic-api
+EnvironmentFile=/etc/traffic-api.env
+Environment=PYTHONUNBUFFERED=1
+Nice=15
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUQuota=50%
+MemoryHigh=512M
+MemoryMax=1024M
+MemorySwapMax=256M
+OOMPolicy=stop
+TimeoutStartSec=600
+ExecStart=/usr/bin/flock -n -E 75 /run/traffic-ingest/sync.lock /var/www/Traffic/traffic-api/.venv/bin/python3 scripts/sync_traffic_logs.py
