@@ -31,7 +31,7 @@ class GraphBuilderDiagnosticsTests(unittest.TestCase):
             self.assertIn("raw_buckets_s", fmt)
             self.assertIn("session_signals_s", fmt)
             self.assertIn("project_output_s", fmt)
-            self.assertEqual(args[:6], ("all", 5.5, 1.0, 1.0, 1.0, 2.5))
+            self.assertEqual(args[:6], ["all", 5.5, 1.0, 1.0, 1.0, 2.5])
             self.assertEqual(args[6:], [0, 0])
             self.assertNotIn("ip", fmt.lower())
             self.assertNotIn("visitor", fmt.lower())
