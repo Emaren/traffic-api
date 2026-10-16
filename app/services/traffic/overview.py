@@ -254,11 +254,36 @@ def _rebuild_session_snapshot(
     window_hours: int | None,
     project_slugs: set[str] | None = None,
 ) -> dict[str, Any]:
+    started = perf_counter()
     entries, source_mode = collect_recent_entries_with_source(
         window_hours=window_hours,
         project_slugs=project_slugs,
     )
+    loaded = perf_counter()
+    if loaded - started >= 2.0:
+        logging.getLogger("uvicorn.error").warning(
+            "traffic_snapshot_load_slow window_hours=%s scoped=%s source=%s "
+            "entries=%d duration_s=%.3f",
+            window_hours,
+            bool(project_slugs),
+            source_mode,
+            len(entries),
+            loaded - started,
+        )
+
     sessions = build_sessions(entries)
+    built = perf_counter()
+    if built - loaded >= 2.0:
+        logging.getLogger("uvicorn.error").warning(
+            "traffic_snapshot_sessions_slow window_hours=%s scoped=%s "
+            "entries=%d sessions=%d duration_s=%.3f",
+            window_hours,
+            bool(project_slugs),
+            len(entries),
+            len(sessions),
+            built - loaded,
+        )
+
     return _store_session_snapshot(
         window_hours,
         project_slugs=project_slugs,
