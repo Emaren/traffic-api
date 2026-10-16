@@ -2492,13 +2492,21 @@ def _is_page_interest_graph_session(session: dict[str, Any]) -> bool:
     return True
 
 
-def _raw_request_bucket_counts_by_project(
+def _raw_bucket_counts_by_project(
     *,
     project_slugs: set[str] | None,
     first_bucket: datetime,
     last_bucket: datetime,
     bucket_minutes: int,
-) -> dict[str, Counter]:
+) -> tuple[dict[str, Counter], dict[str, Counter]]:
+    """Count raw requests and per-bucket unique IPs in ONE SQLite scan.
+
+    These are separate graph lines with different semantics: request counts
+    include empty-IP entries; unique IP counts ignore empty IPs and dedupe
+    within a project/bucket even when the same IP visits multiple hosts.
+    The existing host/time index supplies bounded source rows. Stream the
+    cursor to avoid allocating two large lists of SQLite rows on a hot VPS.
+    """
     host_to_slug: dict[str, str] = {}
     allowed_slugs = set(project_slugs or [])
 
@@ -2510,47 +2518,81 @@ def _raw_request_bucket_counts_by_project(
             if host:
                 host_to_slug[str(host).lower()] = slug
 
+    request_counts: dict[str, Counter] = defaultdict(Counter)
+    ip_sets: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
     if not host_to_slug:
-        return defaultdict(Counter)
+        return request_counts, defaultdict(Counter)
 
     placeholders = ",".join("?" for _ in host_to_slug)
     query_end = last_bucket + timedelta(minutes=bucket_minutes)
     params = [*host_to_slug.keys(), first_bucket.isoformat(), query_end.isoformat()]
 
-    counters: dict[str, Counter] = defaultdict(Counter)
-
     try:
         with _connect() as connection:
             _ensure_schema(connection)
-            rows = connection.execute(
+            cursor = connection.execute(
                 f"""
-                SELECT host, timestamp
+                SELECT host, ip, timestamp
                 FROM traffic_entries
                 WHERE host IN ({placeholders})
                   AND timestamp >= ?
                   AND timestamp < ?
                 """,
                 params,
-            ).fetchall()
+            )
+            for row in cursor:
+                slug = host_to_slug.get(str(row["host"] or "").lower())
+                if not slug:
+                    continue
+
+                try:
+                    timestamp = datetime.fromisoformat(
+                        str(row["timestamp"]).replace("Z", "+00:00")
+                    )
+                    if timestamp.tzinfo is None:
+                        timestamp = timestamp.replace(tzinfo=timezone.utc)
+                    bucket = _align_bucket(
+                        timestamp.astimezone(timezone.utc), bucket_minutes
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    continue
+
+                if not (first_bucket <= bucket <= last_bucket):
+                    continue
+
+                bucket_iso = bucket.isoformat()
+                request_counts[slug][bucket_iso] += 1
+                ip = str(row["ip"] or "").strip()
+                if ip:
+                    ip_sets[slug][bucket_iso].add(ip)
     except Exception:
-        return counters
+        # Preserve existing resilience when the durable raw store is unavailable:
+        # the human-signal lines can still render with zero raw-counter lines.
+        return defaultdict(Counter), defaultdict(Counter)
 
-    for row in rows:
-        slug = host_to_slug.get(str(row["host"] or "").lower())
-        if not slug:
-            continue
-        try:
-            timestamp = datetime.fromisoformat(str(row["timestamp"]).replace("Z", "+00:00"))
-            if timestamp.tzinfo is None:
-                timestamp = timestamp.replace(tzinfo=timezone.utc)
-            bucket = _align_bucket(timestamp.astimezone(timezone.utc), bucket_minutes)
-        except Exception:
-            continue
-        if first_bucket <= bucket <= last_bucket:
-            counters[slug][bucket.isoformat()] += 1
+    unique_ip_counts: dict[str, Counter] = defaultdict(Counter)
+    for slug, buckets in ip_sets.items():
+        for bucket_iso, ips in buckets.items():
+            unique_ip_counts[slug][bucket_iso] = len(ips)
 
-    return counters
+    return request_counts, unique_ip_counts
 
+
+def _raw_request_bucket_counts_by_project(
+    *,
+    project_slugs: set[str] | None,
+    first_bucket: datetime,
+    last_bucket: datetime,
+    bucket_minutes: int,
+) -> dict[str, Counter]:
+    """Compatibility wrapper for consumers requiring only request counts."""
+    requests, _unique_ips = _raw_bucket_counts_by_project(
+        project_slugs=project_slugs,
+        first_bucket=first_bucket,
+        last_bucket=last_bucket,
+        bucket_minutes=bucket_minutes,
+    )
+    return requests
 
 
 def _raw_unique_ip_bucket_counts_by_project(
@@ -2560,66 +2602,14 @@ def _raw_unique_ip_bucket_counts_by_project(
     last_bucket: datetime,
     bucket_minutes: int,
 ) -> dict[str, Counter]:
-    host_to_slug: dict[str, str] = {}
-    allowed_slugs = set(project_slugs or [])
-
-    for project in PROJECTS:
-        slug = str(project.get("slug") or "")
-        if allowed_slugs and slug not in allowed_slugs:
-            continue
-        for host in project.get("hosts", []) or []:
-            if host:
-                host_to_slug[str(host).lower()] = slug
-
-    if not host_to_slug:
-        return defaultdict(Counter)
-
-    placeholders = ",".join("?" for _ in host_to_slug)
-    query_end = last_bucket + timedelta(minutes=bucket_minutes)
-    params = [*host_to_slug.keys(), first_bucket.isoformat(), query_end.isoformat()]
-
-    buckets: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
-
-    try:
-        with _connect() as connection:
-            _ensure_schema(connection)
-            rows = connection.execute(
-                f"""
-                SELECT host, ip, timestamp
-                FROM traffic_entries
-                WHERE host IN ({placeholders})
-                  AND timestamp >= ?
-                  AND timestamp < ?
-                """,
-                params,
-            ).fetchall()
-    except Exception:
-        return defaultdict(Counter)
-
-    for row in rows:
-        slug = host_to_slug.get(str(row["host"] or "").lower())
-        ip = str(row["ip"] or "").strip()
-        if not slug or not ip:
-            continue
-
-        try:
-            timestamp = datetime.fromisoformat(str(row["timestamp"]).replace("Z", "+00:00"))
-            if timestamp.tzinfo is None:
-                timestamp = timestamp.replace(tzinfo=timezone.utc)
-            bucket = _align_bucket(timestamp.astimezone(timezone.utc), bucket_minutes)
-        except Exception:
-            continue
-
-        if first_bucket <= bucket <= last_bucket:
-            buckets[slug][bucket.isoformat()].add(ip)
-
-    counters: dict[str, Counter] = defaultdict(Counter)
-    for slug, bucket_map in buckets.items():
-        for bucket_iso, ips in bucket_map.items():
-            counters[slug][bucket_iso] = len(ips)
-
-    return counters
-
+    """Compatibility wrapper for consumers requiring only unique-IP counts."""
+    _requests, unique_ips = _raw_bucket_counts_by_project(
+        project_slugs=project_slugs,
+        first_bucket=first_bucket,
+        last_bucket=last_bucket,
+        bucket_minutes=bucket_minutes,
+    )
+    return unique_ips
 
 
 def _browser_engagement_key(
@@ -3691,13 +3681,7 @@ def _project_graph_payload(
     first_touch_counter = Counter()
 
     if window_hours is not None and window_hours <= 168:
-        request_counters = _raw_request_bucket_counts_by_project(
-            project_slugs={project_slug},
-            first_bucket=first_bucket,
-            last_bucket=last_bucket,
-            bucket_minutes=bucket_minutes,
-        )
-        unique_ip_counters = _raw_unique_ip_bucket_counts_by_project(
+        request_counters, unique_ip_counters = _raw_bucket_counts_by_project(
             project_slugs={project_slug},
             first_bucket=first_bucket,
             last_bucket=last_bucket,
@@ -3830,13 +3814,7 @@ def build_project_human_series(
     first_touch_points_by_project: dict[str, Counter] = defaultdict(Counter)
 
     if window_hours is not None and window_hours <= 168:
-        request_points_by_project = _raw_request_bucket_counts_by_project(
-            project_slugs=None,
-            first_bucket=first_bucket,
-            last_bucket=last_bucket,
-            bucket_minutes=bucket_minutes,
-        )
-        unique_ip_points_by_project = _raw_unique_ip_bucket_counts_by_project(
+        request_points_by_project, unique_ip_points_by_project = _raw_bucket_counts_by_project(
             project_slugs=None,
             first_bucket=first_bucket,
             last_bucket=last_bucket,
