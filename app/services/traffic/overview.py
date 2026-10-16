@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 from threading import Event, Lock, Thread
-from time import monotonic
+from time import monotonic, perf_counter
 from typing import Any
 
 from app.services.traffic.browser_events import auth_presence_is_fresh
@@ -3772,11 +3773,13 @@ def build_project_human_series(
     range_key: str = "12h",
     bucket_minutes_override: int | None = None,
 ) -> dict[str, Any]:
+    build_started = perf_counter()
     range_config = PROJECT_GRAPH_RANGES.get(range_key, PROJECT_GRAPH_RANGES["12h"])
     window_hours = range_config["window_hours"]
     snapshot = _build_session_snapshot(window_hours=window_hours)
     source_mode = snapshot["source_mode"]
     sessions = snapshot["sessions"]
+    snapshot_ready = perf_counter()
     now = datetime.now(timezone.utc)
     earliest_entry_at = snapshot.get("earliest_entry_at")
     requested_start = (
@@ -3824,6 +3827,7 @@ def build_project_human_series(
         request_points_by_project = defaultdict(Counter)
         unique_ip_points_by_project = defaultdict(Counter)
 
+    buckets_ready = perf_counter()
     live_counts = Counter()
     audience_session_ids = {session.get("session_id") for session in _human_signal_graph_sessions(sessions)}
 
@@ -3847,6 +3851,7 @@ def build_project_human_series(
         if _is_first_touch_graph_session(session):
             first_touch_points_by_project[project_slug][bucket_iso] += 1
 
+    sessions_classified = perf_counter()
     projects_output: list[dict[str, Any]] = []
 
     for project in PROJECTS:
@@ -3909,7 +3914,7 @@ def build_project_human_series(
             "Durable storage is unavailable, so these graphs are currently reading the live log tail."
         )
 
-    return {
+    payload = {
         "ok": True,
         "generated_at": iso_now(),
         "range_key": range_key,
@@ -3926,6 +3931,27 @@ def build_project_human_series(
         "series": _multi_signal_series_definitions(),
         "projects": projects_output,
     }
+
+    finished = perf_counter()
+    total_seconds = finished - build_started
+    if total_seconds >= 2.0:
+        # Aggregate timings only; do not log visitor/IP/session payloads.
+        # This is the *uncached builder*, so it diagnoses the 12h cold path.
+        logging.getLogger("uvicorn.error").warning(
+            "traffic_graph_build_slow range=%s total_s=%.3f "
+            "snapshot_s=%.3f raw_buckets_s=%.3f session_signals_s=%.3f "
+            "project_output_s=%.3f session_count=%d project_count=%d",
+            range_key,
+            total_seconds,
+            snapshot_ready - build_started,
+            buckets_ready - snapshot_ready,
+            sessions_classified - buckets_ready,
+            finished - sessions_classified,
+            len(sessions),
+            len(projects_output),
+        )
+
+    return payload
 
 
 def build_project_graph(
