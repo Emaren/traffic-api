@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -678,12 +679,22 @@ def load_recent_entries(
     if max_rows is not None and max_rows <= 0:
         return []
 
+    sync_started = time.perf_counter()
     try:
         sync_configured_logs_to_persistence(log_paths)
     except Exception:
         # Keep serving the last durable snapshot even if the live log cannot be synced right now.
         pass
+    sync_seconds = time.perf_counter() - sync_started
+    if sync_seconds >= 2.0:
+        logging.getLogger("uvicorn.error").warning(
+            "traffic_snapshot_ingest_slow window_hours=%s scoped=%s duration_s=%.3f",
+            window_hours,
+            hosts is not None,
+            sync_seconds,
+        )
 
+    select_started = time.perf_counter()
     try:
         with _connect() as connection:
             _ensure_schema(connection)
@@ -727,8 +738,29 @@ def load_recent_entries(
                     item["raw"] = row["raw"]
 
                 entries.append(item)
-    except Exception:
+    except Exception as exc:
+        select_seconds = time.perf_counter() - select_started
+        if select_seconds >= 2.0:
+            logging.getLogger("uvicorn.error").warning(
+                "traffic_snapshot_select_slow window_hours=%s scoped=%s "
+                "rows=0 duration_s=%.3f failure=%s",
+                window_hours,
+                hosts is not None,
+                select_seconds,
+                type(exc).__name__,
+            )
         return None
+
+    select_seconds = time.perf_counter() - select_started
+    if select_seconds >= 2.0:
+        logging.getLogger("uvicorn.error").warning(
+            "traffic_snapshot_select_slow window_hours=%s scoped=%s "
+            "rows=%d duration_s=%.3f",
+            window_hours,
+            hosts is not None,
+            len(entries),
+            select_seconds,
+        )
 
     if max_rows is not None:
         entries.reverse()
