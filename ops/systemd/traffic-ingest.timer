@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh durable Traffic access-log ingestion periodically
+
+[Timer]
+OnBootSec=3min
+OnUnitInactiveSec=2min
+AccuracySec=30s
+RandomizedDelaySec=15s
+Unit=traffic-ingest.service
+
+[Install]
+WantedBy=timers.target
