@@ -49,16 +49,19 @@ The timer is **not activated by a repository merge**.
 4. Verify `traffic_ingest status=ok` and compare the ingest-state offset
    against the configured access log. Verify fresh visits appear in the
    observatory through existing API endpoints (allow for response caching).
-5. **Separate stage 2, not in this PR:** provide an explicit gated
+5. **Separate stage 2, not in this PR:** deploy an explicit gated
    `TRAFFIC_...` setting to make API hot session reads avoid synchronous
-   log ingestion only after the timer's freshness is proven. Include
-   contract tests and a rollback path that restores inline ingestion first
-   if the worker fails.
-6. Only after the stage-2 cutover and verification, enable
-   `traffic-ingest.timer` on the VPS. Monitor timer last/next schedules,
-   status, backlog and log errors, and confirm no duplicated expensive
-   ingest/retention contention. Avoid running the timer continuously while
-   the API still synchronizes on every cold request.
+   log ingestion. Keep that setting **off** initially. Include contract
+   tests and an immediately reversible fallback to inline ingestion.
+6. Enable the ingestion timer for a **brief supervised overlap** while the
+   API still ingests inline, checking at least two successful runs, ingest
+   offsets, new-visit freshness, timing and resource pressure. If the timer
+   is unhealthy, disable it and leave inline ingestion untouched.
+7. If the new writer has proven fresh and reliable, switch the stage-2
+   setting to use the timer and cease synchronous API ingest. Monitor timer
+   last/next schedules, offsets, failures, dashboard freshness and latency.
+   Restore inline ingestion **before** disabling or rolling back the timer
+   if any health or data-freshness check fails.
 
 ### Safeguards
 
