@@ -145,6 +145,7 @@ def collect_recent_entries_with_source(
     else:
         source_entries = persisted_entries
 
+    filtering_started = perf_counter()
     for parsed in source_entries:
         if not is_allowed_host(parsed["host"]):
             continue
@@ -166,6 +167,18 @@ def collect_recent_entries_with_source(
             continue
 
         recent_entries.append(parsed)
+
+    filter_seconds = perf_counter() - filtering_started
+    if filter_seconds >= 2.0:
+        logging.getLogger("uvicorn.error").warning(
+            "traffic_snapshot_filter_slow window_hours=%s scoped=%s "
+            "source_rows=%d kept_rows=%d duration_s=%.3f",
+            window_hours,
+            bool(project_slugs),
+            len(source_entries),
+            len(recent_entries),
+            filter_seconds,
+        )
 
     return recent_entries, source_mode
 
