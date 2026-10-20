@@ -252,6 +252,12 @@ def run(args: argparse.Namespace) -> int:
                 "publication_authorized": False,
             })
             return 0
+        except Exception as exc:
+            record(receipt_fd, {
+                "event": "FAIL", "at": utc(), "error_type": type(exc).__name__,
+                "publication_authorized": False,
+            })
+            raise
         finally:
             os.close(receipt_fd)
     finally:
