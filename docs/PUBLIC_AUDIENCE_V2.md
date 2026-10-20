@@ -401,3 +401,101 @@ unauthorized for publication pending user acceptance, atomic/idempotent
 publication design, and completed-day maintenance. The old 06:15 public
 full-forge timer remains disabled. Never turn the incoming raw-log retention
 policy into a guarantee of infinite replay history.
+
+## Protected public-audience publication candidate (not authorized)
+
+The real VPS verified a **completed independent checkpoint backup** at
+`canary-oocB0WuA/completed-pass2-21618093.sqlite3` (593,838,080 bytes,
+mode 0600), identical metadata and source pass-one/pass-two SHA
+`6606f0277cf7c94249f73d4ffce83826068aa00fd78212014fa1422dc46c0f33`,
+and identical full private daily checksum
+`30701fe697faca6098cb72c82c98b8b1fed8e9effeffa9190bc104cde643b61d`.
+The read-only retention-aware release manifest returned
+`CANDIDATE_ONLY` for 131 full days June 11–October 19, with
+Total/Potential/Confirmed sessions [756,819, 86,956, 37,399], candidate
+SHA `84150e4921197efd925fa2d9abccee37154d45a68b6f72e25df57dfc4e2d07b4`,
+legacy SHA `61de508cb57292ca006f0beb7b535ec91d6ab84f9da1a9e2f9e0251a822bd38b`,
+125 full legacy comparisons, no eligible late event, legacy public timer
+inactive/disabled, distinct project rollup timer active/enabled, volume
+38GiB available, Git clean at `97703819c7555bdead18a18d4806860f4c255fd8`.
+This is sufficient evidence to *prepare* a publisher, **not** proof of
+actual publication, complete source immutability, or a maintenance plan.
+
+`scripts/public_audience_v2_atomic_publish.py` (candidate, source-only)
+defaults to `PREVIEW_ONLY`. It validates both independent completed
+checkpoint files and their exact source/private/candidate hashes. Preview
+checks current legacy public audience table checksum without modifying
+it. Its separately operator-approved `--apply` mode additionally checks
+pinned clean code SHA, original complete frozen source and active visibility
+rule identity, late event exclusion and source retention floor, active
+project timer/disabled old timer, idle service and exclusive on-disk
+project-rollup and canary locks. Inside a short `BEGIN IMMEDIATE`
+transaction it performs a compare-and-swap against the exact 128-row
+legacy matrix hash; first fsyncs a mode-0600 **complete old public table
+preimage JSON backup**, then deletes/replaces only AoE2WAR's public
+audience rows with the 131 certified full-day rows. It verifies the
+131-row post-write SHA and commits once; any DB or backup failure rolls
+back. Exact repeated publication returns an explicit no-op without
+changing existing `updated_at`. Changed public data fails closed.
+
+**HOLD:** no operator has authorized publishing the **narrower**
+131-day window in place of requested May 22–Oct19 151 dates. Do not run
+`--apply`, supply the approval phrase, restart the API, or activate a
+timer without explicit authorization and an independently reviewed
+VPS dry-run, original-row backup and rollback exercise. Existing
+131-day candidate ends Oct19, and needs a separate correctly bounded
+UTC completed-day incremental maintenance architecture before it may
+be described as live/current. This publisher does not implement that
+architecture. Missing raw days must remain **unknown**, not zero.
+
+## First protected historical cutover: operator deployment and rollback
+
+This source branch adds a standalone `scripts/public_audience_v2_atomic_rollback.py`
+to restore the exact 128 historic prepublication rows and original
+`updated_at` timestamps from the output `backup_file` JSON of the initial
+cutover. Rollback verifies the whole private 0600 receipt (128 dates, source
+matrix SHA, rows SHA, row types and historical range); requires explicit
+`--approval-phrase 'RESTORE AOE2WAR PRE-PUBLICATION 128-DAY AUDIENCE'`,
+pinned clean Git release, correct live database, good timer/resource state,
+exclusive locks on canary and existing project rollup lock, and atomic
+`BEGIN IMMEDIATE` compare-and-swap against the 131-day published
+candidate SHA before restoring 128 exact old rows. It refuses to override
+a subsequently updated/mismatched archive; repeat identical rollback is
+read-only. This fallback deliberately restores the **stale 128-day archive**
+rather than claiming that it repairs underlying live raw history.
+
+The separate read-only
+`scripts/public_audience_v2_verify_published.py` requires consistent
+**131 dates with the exact approved daily checksum across the SQLite public
+table, local FastAPI endpoint and AoE2WAR public JSON endpoint**
+(`https://aoe2war.com/api/traffic/public`). It refuses absent dates,
+duplicates, unverified partial days, hierarchy violations, wrong count
+matrices and backend rows published before midnight at UTC end-of-day.
+Successful output is `VERIFIED_PUBLISHED` and is not proof of the
+long-term daily maintenance. The AoE2WAR Next.js `app/traffic/page.tsx`
+loads this data dynamically from `lib/publicTraffic.ts`; neither
+frontend source promotion nor traffic-api service restart is required
+**provided** the live endpoint remains on the same configured SQLite
+source and the public network response verifies it.
+
+Operator steps must remain a two-paste workflow:
+(1) fast-forward from the previously exact clean Traffic SHA, check
+exact reviewed files, full unit tests on actual VPS venv, hold the old
+public timer, verify the legitimate project timer, read-only manifest
+and publisher PREVIEW, and record old/current candidate hash; (2) on
+the explicitly operator-approved *narrower* 131-day historical window,
+call publisher `--apply --approval-phrase` once while project worker is
+idle, preserve printed `backup_file` path and receipt, and validate the
+real DB/FastAPI/AoE2WAR web APIs using the read-only publication verifier.
+The public API's cache may retain an old response for a short interval;
+do not undo an otherwise valid SQLite publication merely because an
+edge cache has not refreshed yet. Operator should inspect any stale
+result and re-verify after cache expiry before deciding to rollback.
+
+Do **not** enable the 06:15 failed legacy full-forge timer, do **not**
+confuse the enabled 30-minute project rollup timer with audience
+maintenance, and do **not** call June11–Oct19 a continuously current
+traffic series until a separate source-equivalent 00:05 UTC completed-day
+incremental maintenance mechanism is implemented, benchmarked and
+production proven. A full-series backfill from a pruned 120-day raw
+source will not reproduce the existing certified 131-day shadow history.
