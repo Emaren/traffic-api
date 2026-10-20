@@ -127,26 +127,46 @@ def raw_day_bounds(
     conn: sqlite3.Connection,
     hosts: list[str],
 ) -> tuple[date | None, date | None]:
-    placeholders = ",".join("?" for _ in hosts)
+    """
+    Find the first and last day with twelve bounded host/timestamp probes
+    (six project hosts), not one MIN/MAX aggregate over millions of rows.
 
-    row = conn.execute(
-        f"""
-        SELECT
-            MIN(timestamp) AS first_seen,
-            MAX(timestamp) AS latest_seen
-        FROM traffic_entries
-        WHERE host IN ({placeholders})
-        """,
-        hosts,
-    ).fetchone()
-
-    if not row or not row["first_seen"] or not row["latest_seen"]:
+    The existing (host, timestamp) index supports ORDER BY/LIMIT 1 for each
+    host. Filtering only after a single mixed-host MIN/MAX prevents SQLite
+    from taking that fast path. Empty hosts do not contribute.
+    """
+    if not hosts:
         return None, None
 
-    return (
-        date.fromisoformat(str(row["first_seen"])[:10]),
-        date.fromisoformat(str(row["latest_seen"])[:10]),
-    )
+    earliest: str | None = None
+    latest: str | None = None
+    for host in sorted(set(hosts)):
+        first = conn.execute(
+            """
+            SELECT timestamp FROM traffic_entries
+            WHERE host = ? ORDER BY timestamp ASC LIMIT 1
+            """,
+            (host,),
+        ).fetchone()
+        if not first:
+            continue
+        last = conn.execute(
+            """
+            SELECT timestamp FROM traffic_entries
+            WHERE host = ? ORDER BY timestamp DESC LIMIT 1
+            """,
+            (host,),
+        ).fetchone()
+        first_seen = str(first[0])
+        last_seen = str(last[0])
+        if earliest is None or first_seen < earliest:
+            earliest = first_seen
+        if latest is None or last_seen > latest:
+            latest = last_seen
+
+    if earliest is None or latest is None:
+        return None, None
+    return date.fromisoformat(earliest[:10]), date.fromisoformat(latest[:10])
 
 
 
@@ -248,14 +268,20 @@ def _project_max_rowid(
     conn: sqlite3.Connection,
     hosts: list[str],
 ) -> int:
-    placeholders = ",".join("?" for _ in hosts)
+    """
+    Bound append-only ingestion by the entire raw-store high-water mark.
+
+    ROWID is assigned globally, so a snapshot ceiling covering all hosts
+    includes every project row visible at this invocation. The actual
+    readers still filter by the exact project host set. This avoids a
+    full host-index scan just to establish MAX(rowid). It can advance the
+    stored watermark on unrelated hosts, but cannot omit future appends.
+    A lower global ceiling still triggers the existing rewind safeguard.
+    """
+    if not hosts:
+        return 0
     row = conn.execute(
-        f"""
-        SELECT COALESCE(MAX(rowid), 0) AS max_rowid
-        FROM traffic_entries
-        WHERE host IN ({placeholders})
-        """,
-        hosts,
+        "SELECT COALESCE(MAX(rowid), 0) AS max_rowid FROM traffic_entries"
     ).fetchone()
     return int(row["max_rowid"] or 0) if row else 0
 
