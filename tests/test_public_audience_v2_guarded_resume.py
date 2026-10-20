@@ -57,7 +57,13 @@ class RecoveryGuardsTests(unittest.TestCase):
             db.execute(
                 "UPDATE metadata SET value=? WHERE key='p2_accepted'", ("71344",)
             )
-        return ({"total_raw": 71344}, 2.5, 80368)
+        return ({"total_raw": 71344, "performance": {
+            "max_closed_session_events": 42,
+            "max_close_collect_seconds": 0.08,
+            "max_close_classify_seconds": 0.01,
+            "max_flushed_bucket_sessions": 4,
+            "max_bucket_classify_seconds": 0.02,
+        }}, 2.5, 80368)
 
     def protections(self):
         return (
@@ -95,6 +101,8 @@ class RecoveryGuardsTests(unittest.TestCase):
         events = [json.loads(line) for line in receipts[0].read_text().splitlines()]
         self.assertEqual([r["event"] for r in events], ["START", "STEP", "STOP"])
         self.assertEqual(events[1]["total_raw"], 71344)
+        self.assertEqual(events[1]["performance"]["max_closed_session_events"], 42)
+        self.assertNotIn("private-ip", receipts[0].read_text())
         self.assertEqual(events[2]["reason"], "max_steps")
         self.assertFalse(any(r["publication_authorized"] for r in events))
         self.assertEqual(runner.checkpoint_info(self.state)["p2_raw"], "71344")

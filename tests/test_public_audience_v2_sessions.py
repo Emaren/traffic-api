@@ -113,6 +113,11 @@ class CanonicalStreamingParityTests(unittest.TestCase):
             if result["phase"] == "PASS2_COMPLETE":
                 break
         self.assertEqual(stage2.shadow_daily(self.checkpoint), expected)
+        self.assertGreaterEqual(result["performance"]["max_closed_session_events"], 1)
+        self.assertGreaterEqual(result["performance"]["max_close_collect_seconds"], 0)
+        self.assertGreaterEqual(result["performance"]["max_close_classify_seconds"], 0)
+        self.assertGreaterEqual(result["performance"]["max_flushed_bucket_sessions"], 1)
+        self.assertGreaterEqual(result["performance"]["max_bucket_classify_seconds"], 0)
         self.assertEqual(result["total_finalized"], stats["finalized_sessions"])
         self.assertEqual(result["total_page_sessions"], stats["page_sessions"])
         with self.assertRaisesRegex(RuntimeError, "already complete"):
