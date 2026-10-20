@@ -110,7 +110,7 @@ class HistoricalRollbackTests(unittest.TestCase):
     def test_preimage_tamper_denied(self):
         preimage = self.build_preimage()
         record = json.loads(preimage.read_text())
-        record["rows"][0]["total"] = 1
+        record["rows"][0]["total"] += 1
         preimage.write_text(json.dumps(record))
         with patch.object(publication, "EXPECTED_LEGACY_SHA", self.old_sha):
             with self.assertRaisesRegex(RuntimeError, "content proof"):
