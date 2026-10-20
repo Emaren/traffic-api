@@ -619,3 +619,39 @@ active/enabled. When `future-ledger` command catches an eligible late
 source event before October20, it fails closed and requires an explicit
 evidence reconciliation, never inventing data or altering certified
 131-day values.
+
+## Pending live service sandbox fix (do not enable timer before probe)
+
+On the real VPS, manual source-only checkout at `60d8ebf71bb3503a1d2acb180f69b8073d2c71ff`
+passed 181/181 tests, private ledger read-only preflight, 3k canonical
+raw-input private bootstrap write (0600 ledger), and `VERIFIED_PUBLISHED`
+131 historic days end-to-end. Two new private-only systemd units were
+installed and `systemd-analyze verify` passed, but the **first
+systemctl start failed**: Python SAFE STOP `sqlite3.OperationalError:
+unable to open database file` (exit 2). Because of `set -e`, the
+timer is still DISABLED and INACTIVE. Follow-up sandbox reproduction
+confirmed live Traffic source SQLite mode=ro FAILED, both private SQLite
+files READ PASS, private canary write PASS. Thus, the systemd mount
+protection likely denies the **WAL shared-memory sidecar** write/read
+needed by SQLite's read-only data access.
+
+Proposed narrow fix: retain `ProtectSystem=strict` and private directory
+`ReadWritePaths`, but add **only** optional existing
+`/mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3-shm`
+in `ReadWritePaths` for SQLite WAL shared-memory coordination.
+The canonical source `.sqlite3` and `-wal` files and the parent
+`traffic-db/` remain read-only under systemd. SQLite's source DB
+connection remains opened `mode=ro` with `PRAGMA query_only=ON`.
+The `-shm` file is an auxiliary live WAL coordination structure, and
+may be written, not application audience data. If the file is absent,
+the fail-closed optional mount permits no broader access; service may
+still fail until an authorized writer supplies that sidecar.
+
+**HOLD until real VPS sandbox probe** with this one-file exception can
+read the exact live SQLite source AND all three confirmed 131-day
+public values remain unaffected. Do not change systemd units, restart
+Traffic, loosen the whole data directory, or enable timers on
+assumption. If the sandbox probe passes, guarded promote ONLY the
+source service/test/docs change, retest the manually installed service
+and only then separately enable the PRIVATE ledger timer; this does
+not implement automatic audience-day publication (#31).
