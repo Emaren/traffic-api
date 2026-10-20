@@ -619,3 +619,47 @@ active/enabled. When `future-ledger` command catches an eligible late
 source event before October20, it fails closed and requires an explicit
 evidence reconciliation, never inventing data or altering certified
 131-day values.
+
+## Resolved WAL sandbox diagnosis (release gate for PRIVATE capture only)
+
+The VPS operator reproduced the strict sandbox failure with the live
+`traffic_history.sqlite3` using SQLite `mode=ro`: its first attempted
+read failed with an SQLite "unable to open database file" error when
+only the canary directory was writable. Private checkpoint, ledger and
+canary write probes succeeded. The original source is WAL mode, and a
+separate probe confirmed its `-shm` auxiliary file was **absent**. An
+exception for an existing `-shm` file alone is therefore not a stable
+solution (closed/unmerged draft PR #35). SQLite can create/remove
+`-wal` and `-shm` when its last connection closes.
+
+A later *actual VPS* ephemeral same-sandbox probe added
+`ReadWritePaths=<private-canary> <traffic-db-dir>` and
+`ReadOnlyPaths=<traffic_history.sqlite3> -<traffic_history.sqlite3-wal>`.
+This **PASSED**, including an explicit `os.open(main.db, O_WRONLY)`
+**DENIED**, actual `PRAGMA journal_mode=wal` and a read of **131**
+published public days. It made no audience updates, changed no permanent
+service settings, and confirmed the private timer remained disabled.
+
+The production candidate service now mirrors that observed config. The
+explicit scope tradeoff: source directory is writable in the *service's
+private mount namespace* so SQLite can manage transient WAL sidecars;
+the primary DB file is read-only, and `-wal` is read-only **only if
+present when the namespace mounts are constructed**. If `-wal` is
+absent or recreated later, this mount rule is NOT a continuous filename
+write-protection guarantee; this is a residual risk. SQLite itself opens
+the live source as `mode=ro` and `PRAGMA query_only=ON`. The service
+can write only its private ledger via application SQL. A stricter future
+architecture would isolate WAL coordination in a separately controlled
+reader namespace or service, avoiding directory-wide write mounts.
+
+Any operator promoting this candidate MUST pin source Git SHA,
+review/verify exact service-file contents and temporary unit
+`systemd-analyze verify`, replace only the installed private service
+unit, explicitly confirm the timer inactive/disabled, perform
+`systemctl daemon-reload`, `systemctl reset-failed`, and ONE
+`systemctl start ...service` with an inspected JSON journal receipt,
+then run independent three-layer public 131-day SHA verifier.
+Only after a successful hardened service test and reviewed risks may
+the operator explicitly enable the PRIVATE 5-minute source-capture
+timer. The main 131-day audience counts and timer remain unchanged;
+automatic canonical day publication is a distinct unfinished task #31.
