@@ -535,3 +535,58 @@ Cloudflare settings nor the site; if edge JSON is stale or rejected,
 verification still fails closed. Deploy just source changes and tests, then
 require live `VERIFIED_PUBLISHED` before marking three-layer cutover closed.
 Future completed-day maintenance is still outstanding in issue #31.
+
+## Forward-only audience evidence ledger — explicit private shadow stage
+
+The one-time historic audience recovery is **fully verified in production**
+(131/131 days 2026-06-11..2026-10-19, SQLite + Traffic API + AoE2WAR
+public JSON, 173/173 unit tests). The original V2 sealed source snapshot
+had maximum rowid **44,247,247**, and end-exclusive timestamp
+`2026-10-20T00:00:00Z`. Critically the snapshot high rowid was taken
+*after* October 20 had already begun: events dated October 20 with
+`rowid <= 44,247,247` were **intentionally excluded from the 131-day
+historic calculation**. Therefore a naive incremental scanner starting
+at `rowid > 44,247,247` would irretrievably lose early October20 events!
+
+`scripts/public_audience_v2_forward_ledger.py` is a **PRIVATE input
+evidence capture** for the separate #31 daily-maintenance effort. Its
+bootstrap scans just the October20 timestamp window with the canonical
+`idx_traffic_entries_timestamp_line_offset` keyset, restricted to rows
+with the original rowid ceiling. Only when bootstrap is complete does it
+switch to rowid-ordered seek from `rowid > 44,247,247` to capture
+future/late source events. It uses the original canonical host and
+browser/firehose selector and normalizer, sealed active visibility rules,
+and the protected source identity. Accepted raw canonical inputs are
+stored as private 0600 event JSON in an isolated SQLite evidence ledger,
+never emitted in terminal output; state, raw-source digest and bounded
+cursor commit atomically to permit crash-safe reruns. An **eligible**
+later raw event timestamp earlier than October20 is a hard STOP rather
+than silently revising the verified 131 historical days. The issuer
+requires the historical checkpoint still PASS2_COMPLETE, original
+canonical/host/visibility-policy signatures, unchanged public 131-day
+matrix SHA, private directory/lock, idle independent rollup worker,
+resource-safe row cap <=10k and explicit `--approve-private-write`.
+Default CLI invocation is read-only. No writes at all to the original
+source DB, audience/public tables, financial tables or systemd config.
+
+**IMPORTANT SCOPE**: This ledger is *input preservation*, NOT daily
+human-session classification, complete-day eligibility certification,
+or permission to publish a new day. It does not run itself on a timer.
+It makes the future semantic work safer by retaining original normalized
+event inputs before the live 120-day raw retention removes them.
+The next steps still require exactly the original canonical global
+host/IP behaviour, 30min cross-day sessionization, 60sec burst collapse,
+full-day watermark and lateness proof, independent two-day shadow parity,
+and a separate guarded atomic next-day publisher. The historic 131-day
+hash and old 128-day rollback receipt remain untouched. **Do not enable
+the failed full-history forge timer.** The consumer cannot claim daily
+audience data is current until the new worker is proven and enabled.
+
+Manual, source-only VPS preflight after a pinned code release:
+`python -m scripts.public_audience_v2_forward_ledger --source <traffic-db>
+--checkpoint <completed-checkpoint> --ledger <private-future-ledger>`
+(default: proof only, no file creation). Each explicit 10k-row-or-smaller
+`--advance --approve-private-write` captures at most one bounded page,
+prints aggregate counters only, and returns `publish_authorized=false`.
+Review counts/budgets/host idle before further calls. Never automatically
+loop over thousands of pages or enable an untested timer.
