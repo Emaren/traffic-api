@@ -9,7 +9,13 @@ import sqlite3
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
+import sys
 from typing import Any
+
+# Support both 'python -m scripts.public_audience_v2_parity' and direct-script use.
+# A direct script starts with scripts/ on sys.path, not the repository root.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services.traffic.config import PERSIST_DB_PATH
 from scripts import public_audience_v2_checkpoint as v2

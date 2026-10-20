@@ -31,14 +31,14 @@ The fixtures create and destroy temporary databases. A real Traffic database is 
 The CLI supports bounded shadow-only recovery, but **do not run it against the 18M-row VPS database** until an approved resource and provenance preflight is complete. Local fixture example:
 
 ```bash
-python3 scripts/public_audience_v2_campaign.py cycle \
+python3 -m scripts.public_audience_v2_campaign cycle \
   --source /path/to/isolated-fixture.sqlite3 \
   --state /private/shadow-checkpoint.sqlite3 \
   --start 2026-05-22T00:00:00+00:00 \
   --end 2026-10-20T00:00:00+00:00 \
   --rows-per-step 2000 --step-budget 15 --wall-seconds 120 --max-steps 80
 
-python3 scripts/public_audience_v2_campaign.py status \
+python3 -m scripts.public_audience_v2_campaign status \
   --state /private/shadow-checkpoint.sqlite3
 ```
 
@@ -51,7 +51,7 @@ production source checkout by a clean fast-forward (do **not** enable timers):
 
 ```bash
 cd /var/www/Traffic/traffic-api
-.venv/bin/python3 scripts/public_audience_v2_preflight.py \
+.venv/bin/python3 -m scripts.public_audience_v2_preflight \
   --source /mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3
 ```
 
@@ -68,7 +68,7 @@ currently authorized.
 After a complete shadow replay, obtain a read-only cross-check:
 
 ```bash
-.venv/bin/python3 scripts/public_audience_v2_parity.py \
+.venv/bin/python3 -m scripts.public_audience_v2_parity \
   --source /mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3 \
   --state /private/reviewed-traffic-v2-checkpoint.sqlite3
 ```
