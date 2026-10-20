@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import sqlite3
+import time
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services.traffic.config import PERSIST_DB_PATH
+from app.services.traffic.persistence import _non_browser_chain_firehose_sql
 from scripts import public_audience_v2_checkpoint as v2
 from scripts import public_audience_v2_sessions as sessions
 from scripts import rebuild_public_audience_archive as canonical
@@ -62,6 +64,44 @@ def read_existing(conn: sqlite3.Connection) -> dict[str, list[int]]:
     }
 
 
+def has_late_eligible_source_rows(
+    live: sqlite3.Connection, *, start: str, end: str,
+    watermark: int, hosts: list[str], rules: list[dict[str, Any]],
+    max_candidates: int = 100_000, budget_seconds: float = 10,
+) -> bool:
+    """Find post-snapshot, in-window *canonical* events, not unrelated app logs.
+
+    Candidate scan uses an ascending rowid seek and a strict wall/candidate cap.
+    When a safety limit is reached, fail closed rather than claim no late arrivals.
+    """
+    if watermark < 0 or not hosts or max_candidates < 1 or budget_seconds <= 0:
+        raise RuntimeError("STOP: invalid late-arrival search parameters")
+    placeholders = ",".join("?" for _ in hosts)
+    query = f"""
+        SELECT rowid AS source_rowid, event_id, timestamp, ip, line_offset,
+               raw_path, normalized_path, referrer_host, ua, host
+        FROM traffic_entries
+        WHERE rowid > ? AND timestamp >= ? AND timestamp < ?
+          AND host IN ({placeholders})
+          AND ({_non_browser_chain_firehose_sql()})
+        ORDER BY rowid ASC
+    """
+    started = time.monotonic()
+    live.set_progress_handler(
+        lambda: int(time.monotonic() - started > budget_seconds), 1000,
+    )
+    try:
+        rows = live.execute(query, (watermark, start, end, *hosts))
+        for idx, row in enumerate(rows):
+            if idx >= max_candidates or time.monotonic() - started > budget_seconds:
+                raise RuntimeError("STOP: late-arrival scan budget exceeded")
+            if canonical.normalize_row(row, rules=rules) is not None:
+                return True
+        return False
+    finally:
+        live.set_progress_handler(None, 0)
+
+
 def preview(source: Path, state: Path) -> dict[str, Any]:
     if source.resolve() == state.resolve() or state.is_symlink():
         raise RuntimeError("STOP: private checkpoint source alias")
@@ -76,16 +116,17 @@ def preview(source: Path, state: Path) -> dict[str, Any]:
     if info["p1_digest"] != info["p2_digest"]:
         raise RuntimeError("STOP: raw source digest mismatch")
     with v2.source_connection(source) as live:
-        late = live.execute(
-            "SELECT rowid FROM traffic_entries WHERE rowid>? AND timestamp<? LIMIT 1",
-            (int(info["watermark"]), info["end"]),
-        ).fetchone()
+        late = has_late_eligible_source_rows(
+            live, start=info["start"], end=info["end"],
+            watermark=int(info["watermark"]), hosts=verified[0],
+            rules=verified[1],
+        )
         existing = read_existing(live)
     historical = compare_history(shadow, existing)
     completed = (
         historical["status"] == "MATCH"
         and bool(shadow)
-        and late is None
+        and not late
         and all(day < info["end"][:10] for day in shadow)
     )
     result = {
@@ -96,7 +137,8 @@ def preview(source: Path, state: Path) -> dict[str, Any]:
         "raw_rows_p1": int(info["raw_scanned"]),
         "raw_rows_p2": int(info["p2_raw"]),
         "input_pass_digest_equal": info["p1_digest"] == info["p2_digest"],
-        "late_source_rows_below_end_detected": late is not None,
+        "late_source_rows_below_end_detected": late,
+        "late_eligible_aoe2war_events_detected": late,
         "history": historical,
         "shadow_days": len(shadow),
         "shadow_checksum": hashlib.sha256(json.dumps(
