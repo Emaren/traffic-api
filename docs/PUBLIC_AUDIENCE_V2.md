@@ -360,3 +360,44 @@ public rows, plus independent proof that the AoE2WAR frontend renders
 the dates correctly. Daily 00:05 UTC maintenance and missed-day
 handling require their own canonical-equivalence design. Keep the
 failed full-forge timer disabled; never zero-fill missing source days.
+
+## Live retention confirmation and no false immutable-source guard
+
+After the October 20 first full-day manifest was deployed (pinned
+`d21a54586e09a2de2696961d2f41ae8fcb747dae`), its exact earliest-live-row
+assertion correctly fail-closed. Operator inspection confirmed source
+`traffic_history.sqlite3` had same device/inode (2064/131074),
+but earliest live raw timestamp advanced from
+`2026-06-10T13:41:50+00:00` to `2026-06-10T13:48:00+00:00`.
+The current earliest live rowid was 10,591,495, still below the frozen
+watermark 44,247,247. Latest live rowid was 44,305,099, reflecting
+ongoing ingestion. The deployed production source explicitly contains
+`_prune_old_entries_bounded`: DELETE oldest timestamp-selected rows in
+5,000-row batches, checked approximately every 300 seconds, with
+`PERSIST_RETENTION_DAYS` default 120 (effective VPS env still
+requires independent confirmation). Therefore a stable earliest *live*
+timestamp is **not** a valid prerequisite for a persisted, separately
+computed frozen 151-day source snapshot.
+
+The correction validates the current earliest timestamp as offset-aware UTC,
+monotonically **not earlier** than the independently observed frozen source
+boundary and **before** the frozen end-exclusive UTC date. It records both
+the original and current boundaries in the private/public-safe manifest
+receipt and whether retention advanced. Any source event timestamp earlier
+than the original earliest, a missing source, or a future-only source still
+fails closed. This is a guard on drift direction, **not** a proof that no
+interior frozen rows were mutated. That broader protection derives from the
+complete, checkpointed two-pass frozen raw input digest and canonical
+historical agreement, along with a separate bounded post-watermark
+late-eligible scan. Do not rerun the frozen two-pass job against a
+retention-pruned source, and do not blindly lift or suspend ingestion
+retention. Before authorizing any public migration, create a 0600
+completed-checkpoint backup using SQLite's online backup API under
+the private shared lock, verify metadata and the complete shadow day SHA,
+and retain receipt/digest along with rollback evidence.
+
+The candidate is **still** June11–Oct19 only, and still explicitly
+unauthorized for publication pending user acceptance, atomic/idempotent
+publication design, and completed-day maintenance. The old 06:15 public
+full-forge timer remains disabled. Never turn the incoming raw-log retention
+policy into a guarantee of infinite replay history.
