@@ -128,7 +128,11 @@ def pass2_step(raw: Path, checkpoint: Path, *, max_rows: int = 2000,
                 "p2_pages": "0", "p2_version": "0",
                 "p2_now": datetime.now(timezone.utc).isoformat(),
             }
-            db.executemany("INSERT INTO metadata VALUES(?,?)", additions.items())
+            db.executemany(
+                "INSERT INTO metadata VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                additions.items(),
+            )
             info.update(additions)
         cursor_info = {
             **info,
