@@ -64,6 +64,24 @@ def read_existing(conn: sqlite3.Connection) -> dict[str, list[int]]:
     }
 
 
+def late_arrival_seek_sql(hosts: list[str]) -> str:
+    """Indexed-rowid-only discovery SQL; safe to explain without scanning."""
+    if not hosts:
+        raise RuntimeError("STOP: missing source hosts")
+    placeholders = ",".join("?" for _ in hosts)
+    return f"""
+        SELECT rowid AS source_rowid, event_id, timestamp, ip, line_offset,
+               raw_path, normalized_path, referrer_host, ua, host
+        -- NOT INDEXED prevents a decades-long timestamp index walk but still
+        -- permits a direct seek on SQLite's intrinsic INTEGER PRIMARY KEY.
+        FROM traffic_entries NOT INDEXED
+        WHERE rowid > ? AND timestamp >= ? AND timestamp < ?
+          AND host IN ({placeholders})
+          AND ({_non_browser_chain_firehose_sql()})
+        ORDER BY rowid ASC
+    """
+
+
 def has_late_eligible_source_rows(
     live: sqlite3.Connection, *, start: str, end: str,
     watermark: int, hosts: list[str], rules: list[dict[str, Any]],
@@ -76,16 +94,7 @@ def has_late_eligible_source_rows(
     """
     if watermark < 0 or not hosts or max_candidates < 1 or budget_seconds <= 0:
         raise RuntimeError("STOP: invalid late-arrival search parameters")
-    placeholders = ",".join("?" for _ in hosts)
-    query = f"""
-        SELECT rowid AS source_rowid, event_id, timestamp, ip, line_offset,
-               raw_path, normalized_path, referrer_host, ua, host
-        FROM traffic_entries
-        WHERE rowid > ? AND timestamp >= ? AND timestamp < ?
-          AND host IN ({placeholders})
-          AND ({_non_browser_chain_firehose_sql()})
-        ORDER BY rowid ASC
-    """
+    query = late_arrival_seek_sql(hosts)
     started = time.monotonic()
     live.set_progress_handler(
         lambda: int(time.monotonic() - started > budget_seconds), 1000,

@@ -284,3 +284,36 @@ and must not start the 06:15Z failed public forge. Keep project 30m
 rollup timer enabled and stable. Inspect STOP reason and full source
 digest before touching public series. Historical audience maintenance
 after October 19 remains a separate engineering/publication task.
+
+## Completed frozen replay and 132-day coverage diagnostic (2026-10-20)
+
+Production operator completed V2 private pass two with 21,618,093 source rows,
+21,618,090 accepted; phase `PASS2_COMPLETE`, exact first/second raw-stream
+digest match. No publication is authorized. Read-only `campaign.audit` found
+132 populated days (2026-06-10 through 2026-10-19), missing 19 calendar days
+2026-05-22 through 2026-06-09; no extra dates, no zero-valued stored buckets,
+no hierarchy violations. Three aggregate series summed 757,806 total sessions,
+86,969 potential-human sessions, 37,405 confirmed-human sessions. These are
+session counts, **not** raw request counts. Full-day October 19 present as
+[10,695, 615, 283]. A missing bucket is not verified zero traffic: **do not
+synthetically insert 19 zero days or imply source coverage was proven.**
+Establish independently whether raw eligible traffic existed before June 10,
+whether historical ingestion was operational then, and what the public graph
+should disclose for an uncovered interval.
+
+The live-vs-shadow preview failed before legacy comparison because its
+post-watermark scan raised `sqlite3.OperationalError: interrupted` at the
+10-second database progress-handler budget. This is an **inconclusive**
+late-eligible-row check, not absence of late arrivals. The remedy forces
+`FROM traffic_entries NOT INDEXED WHERE rowid > watermark` so SQLite uses
+its intrinsic primary-key rowid seek, rather than picking a stale timestamp
+index. The host, end-exclusive UTC window, non-firehose and canonical
+normalizer still gate eligibility; 10-second and candidate budgets remain
+fail-closed. Regression requires EXPLAIN of the *actual query* to indicate
+`INTEGER PRIMARY KEY (rowid>?)` with competing time indexes present.
+Operator must verify real VPS explain and actual preview under exclusive
+private lock before interpreting its `MATCH` or `BLOCKED` result.
+
+Never mutate source, private checkpoint, public audience table, or timer
+in response to this diagnostic alone. All 151-day claims and daily maintenance
+remain independently gated from frozen-source digest parity.
