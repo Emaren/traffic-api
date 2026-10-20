@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -206,6 +206,103 @@ class CanonicalStreamingParityTests(unittest.TestCase):
             if result["phase"] == "PASS2_COMPLETE":
                 break
         self.assertEqual(result["total_raw"], 5)
+
+
+    def test_existing_legacy_open_json_migrates_without_losing_events(self):
+        self.first_pass()
+        stage2.pass2_step(self.raw, self.checkpoint, max_rows=1)
+        with sqlite3.connect(self.checkpoint) as db:
+            legacy_blob = db.execute(
+                "SELECT events_json FROM v2_open_segments"
+            ).fetchone()[0]
+            db.execute("UPDATE v2_open SET events_json=?", (legacy_blob,))
+            db.execute("DELETE FROM v2_open_segments")
+            db.commit()
+        # The next replay step migrates existing JSON within the same txn.
+        stage2.pass2_step(self.raw, self.checkpoint, max_rows=1)
+        with sqlite3.connect(self.checkpoint) as db:
+            self.assertEqual(db.execute(
+                "SELECT events_json FROM v2_open"
+            ).fetchone()[0], "[]")
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM v2_open_segments"
+            ).fetchone()[0], 2)
+        while True:
+            report = stage2.pass2_step(self.raw, self.checkpoint, max_rows=2)
+            if report["phase"] == "PASS2_COMPLETE":
+                break
+        self.assertEqual(stage2.shadow_daily(self.checkpoint), self.golden()[0])
+        with sqlite3.connect(self.checkpoint) as db:
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM v2_open_segments"
+            ).fetchone()[0], 0)
+
+    def test_failed_legacy_migration_step_rolls_back_original_json(self):
+        self.first_pass()
+        stage2.pass2_step(self.raw, self.checkpoint, max_rows=1)
+        with sqlite3.connect(self.checkpoint) as db:
+            blob = db.execute(
+                "SELECT events_json FROM v2_open_segments"
+            ).fetchone()[0]
+            db.execute("UPDATE v2_open SET events_json=?", (blob,))
+            db.execute("DELETE FROM v2_open_segments")
+            db.commit()
+        with patch.object(canonical, "normalize_row", side_effect=RuntimeError("crash")):
+            with self.assertRaisesRegex(RuntimeError, "crash"):
+                stage2.pass2_step(self.raw, self.checkpoint, max_rows=1)
+        with sqlite3.connect(self.checkpoint) as db:
+            self.assertEqual(db.execute(
+                "SELECT events_json FROM v2_open"
+            ).fetchone()[0], blob)
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM v2_open_segments"
+            ).fetchone()[0], 0)
+            self.assertEqual(dict(db.execute(
+                "SELECT key,value FROM metadata"
+            ))["p2_raw"], "1")
+
+    def test_long_open_session_spills_into_small_ordered_chunks(self):
+        with sqlite3.connect(self.raw) as db:
+            db.execute("DELETE FROM traffic_entries")
+            start = datetime.fromisoformat("2026-10-16T00:00:01+00:00")
+            db.executemany(
+                "INSERT INTO traffic_entries VALUES(?,?,?,?,?,?,?,?,?)",
+                [(str(i), (start + timedelta(seconds=i)).isoformat(),
+                  "test-ip", i, "/", "/", "", "Mozilla", "aoe2war.com")
+                 for i in range(700)],
+            )
+        start = datetime.fromisoformat("2026-10-16T00:00:00+00:00")
+        end = datetime.fromisoformat("2026-10-20T00:00:00+00:00")
+        behavior, raw, accepted = canonical.build_ip_behavior(
+            start=start, end=end, snapshot_max_rowid=700,
+        )
+        expected, stats = canonical.stream_sessions(
+            start=start, end=end, behavior=behavior, snapshot_max_rowid=700,
+        )
+        self.assertEqual((raw, accepted), (700, 700))
+        self.first_pass(page=79)
+        while True:
+            result = stage2.pass2_step(
+                self.raw, self.checkpoint, max_rows=19,
+            )
+            with sqlite3.connect(self.checkpoint) as db:
+                self.assertEqual(db.execute(
+                    "SELECT COUNT(*) FROM v2_open WHERE events_json != '[]'"
+                ).fetchone()[0], 0)
+                self.assertEqual(db.execute(
+                    "SELECT COUNT(*) FROM v2_open_segments "
+                    "WHERE length(events_json) > 1000000"
+                ).fetchone()[0], 0)
+            if result["phase"] == "PASS2_COMPLETE":
+                break
+        self.assertEqual(result["total_raw"], 700)
+        self.assertEqual(result["total_finalized"], stats["finalized_sessions"])
+        self.assertEqual(result["total_page_sessions"], stats["page_sessions"])
+        self.assertEqual(stage2.shadow_daily(self.checkpoint), expected)
+        with sqlite3.connect(self.checkpoint) as db:
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM v2_open_segments"
+            ).fetchone()[0], 0)
 
 
 if __name__ == "__main__":

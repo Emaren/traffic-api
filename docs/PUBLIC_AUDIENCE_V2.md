@@ -98,3 +98,62 @@ A production-source first-pass checkpoint reached 3,645,248 selected rows, then 
 ## Explicit-source visibility policy gate
 
 Earlier SSH shadow runs specified `--source` for raw rows but queried visibility rules via the ambient database configuration. The safe visibility helper can hide failures and return an empty rule set, and the ambient connector can write to a wrong database. The updated V2 reader now obtains active visibility policy **read-only from the exact `--source` SQLite database**, with fail-closed schema errors and the existing rules SHA-256 identity check in both passes. Before resuming the original 3,645,248-row checkpoint, compare its recorded `rules_sha256` to the real source rules in a separate read-only operator check. If hashes differ, preserve but do not use the previous checkpoint; it cannot be repaired by changing metadata. No publication or timer enablement is implied.
+
+## Pass-two open-session memory containment (October 20, candidate)
+
+Operator's first production 20,000-row endurance batch finished in 2.57 seconds,
+raising the private replay cursor from 31,344 to 51,344 rows, but peak RSS was
+133,888 KiB, above the 128 MiB **post-batch** investigation threshold. The
+checkpoint remained private, mode 0600, with no public publication. Read-only
+SQL identified 40 open sessions: 14,269,089 bytes total serialized JSON, with
+one 12,713,573-byte session (89.1% of open JSON) and a second 1,488,008-byte
+session. This confirms a repeated-inflation risk, not an OOM diagnosis.
+
+**Candidate source-only mitigation:** add private checkpoint table
+`v2_open_segments` and retain `v2_open` for per-key metadata. The first
+patched replay batch migrates any old `v2_open.events_json` payload into a
+single segment **inside the existing pass-two transaction** without decoding
+it, then checkpoints future pending events in bounded (256-event) append-only
+segments. Only when a session expires or pass two reaches EOF are the full
+ordered segments rehydrated and handed unchanged to canonical
+`build_single_session`. The existing canonical first-seen day, burst collapse,
+classification and SHA-256 replay digest must remain unchanged. An exception
+rolls back both migration and replay cursor; no public data is written.
+
+**Important residual risk:** a genuinely massive, never-idle session must
+still be materialized on close to run the canonical classifier. Disk spill
+removes repeat per-batch expansion, but does not prove low memory or bounded
+finalization of that session. Before installing on VPS, require CI tests for
+legacy checkpoint migration, restart, failure rollback, chunked replay parity,
+and independent real-source staging/performance. Preserve the original
+checkpoint (and do not attempt an unreviewed reverse migration); use
+exclusive shadow lock, resource/disk guards and a controlled first patched
+batch with an explicit stop. Re-check all private state identities and the
+legacy audience timer before activation. The 30-minute Traffic project-rollup
+timer and the public audience production table remain outside scope.
+
+Neither this patch nor successful CI authorizes publishing, timer activation,
+or claiming completed historical reconstruction.
+
+### Isolated old/new checkpoint A/B certification gate
+
+Use the GitHub-reviewed exact PR head in a **detached staging worktree**,
+never the production Traffic checkout. Take one consistent, operator-locked
+SQLite backup of the current private checkpoint and copy it into two mode-0600
+private sibling databases on the data volume. Run one identical bounded pass-two
+step against the *original* (pinned main) source and one against the *candidate*
+source, each operating solely on its disposable private clone. Check project
+worker idle/success and 12 GiB reserve before each step; measure wall/RSS and
+stop on failure, rather than modifying the live checkpoint to test a hypothesis.
+
+`scripts/public_audience_v2_state_compare.py --original <private-old-copy>
+--candidate <private-new-copy>` performs a **read-only**, source-identity-free
+comparison of every metadata key, the complete ordered/open session payload
+(reassembling private chunks), ordered closed sessions, and daily counts.
+Output contains only boolean status, counts and SHA digests; private host/IP/UA
+and paths remain offline. Its MATCH is necessary but **not sufficient**:
+this test cannot prove general future correctness, actual memory ceilings for
+all days, absent late arrivals, semantic equivalence across the entire source,
+or production publication authority. Keep test copies private until the
+comparison and rollback evidence have been reviewed; dispose of copies only
+with an explicit review, preserving the original checkpoint.
