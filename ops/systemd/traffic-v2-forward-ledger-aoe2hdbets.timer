@@ -1,0 +1,12 @@
+[Unit]
+Description=Private forward-evidence capture for AoE2WAR, NEVER an audience publisher
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=5min
+AccuracySec=15s
+RandomizedDelaySec=30s
+Unit=traffic-v2-forward-ledger-aoe2hdbets.service
+
+[Install]
+WantedBy=timers.target

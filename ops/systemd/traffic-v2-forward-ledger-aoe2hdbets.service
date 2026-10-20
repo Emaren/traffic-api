@@ -1,0 +1,28 @@
+[Unit]
+Description=Capture bounded PRIVATE canonical future Traffic events for AoE2WAR (no public writes)
+Wants=traffic-api.service
+After=traffic-api.service
+RequiresMountsFor=/mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/var/www/Traffic/traffic-api
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+Nice=15
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUQuota=35%
+MemoryHigh=256M
+MemoryMax=512M
+MemorySwapMax=128M
+OOMPolicy=stop
+TimeoutStartSec=50s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA
+ExecStart=/var/www/Traffic/traffic-api/.venv/bin/python3 -m scripts.public_audience_v2_forward_ledger --source /mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3 --checkpoint /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/checkpoint.sqlite3 --ledger /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ledger.sqlite3 --max-rows 3000 --budget-seconds 12 --advance --approve-private-write
