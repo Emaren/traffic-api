@@ -317,3 +317,46 @@ private lock before interpreting its `MATCH` or `BLOCKED` result.
 Never mutate source, private checkpoint, public audience table, or timer
 in response to this diagnostic alone. All 151-day claims and daily maintenance
 remain independently gated from frozen-source digest parity.
+
+## Earliest retained source boundary & narrower truthful release candidate
+
+VPS read-only evidence at Traffic SHA `750f458460fad5bb133d8a0e19fcb1a51e63b6b9`
+proved the **earliest surviving event anywhere** is
+`2026-06-10T13:41:50Z`, the earliest matching AoE2WAR source row is
+`2026-06-10T13:43:17Z`, and 0 records remain for June 8–9.
+June 10 has 3,672 retained selected requests starting after 13:43;
+June 11 has 91,506 requests between 00:00:57 and 23:59:56 UTC;
+June 12 has 97,501. The prior October 14 public archive has June 9
+`[90,3,1]`, June 10 `[2939,21,9]`, yet the canonical private
+replay returns no June9 and June10 `[987,13,6]`. All 125 legacy
+**stable complete** June 11–October 13 buckets exactly match.
+Late eligible source rows after original snapshot watermark were absent
+under the canonical normalization policy. The prior historical loss
+mechanism is not proven, and absent events cannot be reconstructed.
+
+The safe immediate public **candidate** would include only 131 complete
+UTC days **2026-06-11 through 2026-10-19**, excluding both the
+pre-source May22–June9 interval and incomplete June10. This is a
+narrower proposition than the originally requested May22 start and
+**requires operator approval**, not a silent substitute. The Traffic
+public audience API already reads ordered rows directly from the
+single canonical `traffic_public_daily_audience_rollups` table,
+so this proposed interval is representable without filling empty days.
+The live frontend still needs separate runtime smoke tests before
+assuming it correctly represents the shorter source coverage.
+
+`scripts/public_audience_v2_release_manifest.py` is a deliberately
+**read-only** candidate gate: frozen raw source/counts/digest/policy;
+verified earliest retained event; bounded post-watermark late eligible
+scan; exactly 132 canonical shadow buckets (including the known June10
+partial); exact 131 positive, monotone full days June11–Oct19;
+expected only June9/June10 legacy mismatches (125/127 matches);
+legacy baseline count/range; SHA256 of the candidate day/value matrix
+and of the current published matrix. No release permission implied.
+It has no apply/write command. After operator approval of the
+**131-day** historical window, separately design, review, test and
+prove an idempotent atomic publisher preserving/restoring the previous
+public rows, plus independent proof that the AoE2WAR frontend renders
+the dates correctly. Daily 00:05 UTC maintenance and missed-day
+handling require their own canonical-equivalence design. Keep the
+failed full-forge timer disabled; never zero-fill missing source days.
