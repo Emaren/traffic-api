@@ -56,6 +56,13 @@ def utc_midnight(value: date) -> datetime:
     return datetime.combine(value, time.min, tzinfo=timezone.utc)
 
 
+def resolve_archive_end(explicit_end: str | None, now: datetime) -> datetime:
+    """Default to the last completed UTC midnight, never a partial current day."""
+    if explicit_end:
+        return datetime.fromisoformat(explicit_end).astimezone(timezone.utc)
+    return utc_midnight(now.astimezone(timezone.utc).date())
+
+
 def project_hosts() -> list[str]:
     project = next(
         item for item in PROJECTS
@@ -858,13 +865,18 @@ def main() -> None:
         )
     )
 
-    end = (
-        datetime.fromisoformat(
-            args.end
-        ).astimezone(timezone.utc)
-        if args.end
-        else datetime.now(timezone.utc)
-    )
+    now = datetime.now(timezone.utc)
+    end = resolve_archive_end(args.end, now)
+    if end <= start:
+        raise SystemExit("STOP: archive end must follow its start.")
+    if args.apply and (
+        end != utc_midnight(end.date())
+        or end > utc_midnight(now.date())
+    ):
+        raise SystemExit(
+            "STOP: published archive requires a completed UTC day boundary; "
+            "never publish a partial day."
+        )
 
     print(
         "database:",
