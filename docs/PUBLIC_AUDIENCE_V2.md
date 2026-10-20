@@ -157,3 +157,50 @@ all days, absent late arrivals, semantic equivalence across the entire source,
 or production publication authority. Keep test copies private until the
 comparison and rollback evidence have been reviewed; dispose of copies only
 with an explicit review, preserving the original checkpoint.
+
+## Source-controlled protected PASS2 runner (candidate)
+
+`scripts/public_audience_v2_guarded_resume.py` is a **PASS2-only**,
+checkpoint-resuming operator command. It refuses to initialize/rebuild pass one,
+publish production audience data, enable any timer, or cross the frozen
+2026-05-22 through 2026-10-19 UTC source epoch. Its mandatory `--require-sha`
+pins the exact deployed source commit and requires a clean checkout.
+
+Preflight checks source identity against the existing checkpoint (including
+host and active visibility rules), exact 21,618,093/21,618,090 counts,
+source rowid 44,247,247, first-pass SHA, private file mode 0600, independent
+30-minute rollup timer enabled/active, disabled legacy timer, and root/attached
+volume capacity. Exclusive `flock` uses the same private
+`.canary.lock` as the exploratory replay commands. Each 20K-row pass-two
+step runs in a new bounded Python process (default internal 25 seconds,
+external 35 seconds) under nice 15, to reclaim large temporary allocations.
+It checks worker priority before and after each step, enforces an 18-second
+and 192MiB **observed post-step** soft stop, and writes mode-0600 fsynced
+START/STEP/STOP/FAIL JSONL receipts containing only counters/provenance.
+The default 900-second/240-step window is finite and restartable; operator
+invokes another window if stopped by time. All state advances remain
+transactional within the private replay checkpoint.
+
+**Important:** an observed RSS stop is not a hard cgroup memory limit. Very
+large, never-expiring sessions still have an unbounded canonical close phase.
+The real operator must inspect actual peak RSS/swap, unit overlap and volume
+pressure during the campaign, and stop if any threshold is hit. Do not schedule
+autonomous recovery or public publication without separate reviewed unit,
+operator approval and production evidence. Treat each proof as specific to
+the code SHA and source epoch used.
+
+Example **operator-approved candidate** invocation after guarded, exact-SHA
+source deployment (replace SHA with reviewed merged GitHub main), with no
+public database write:
+
+```bash
+.venv/bin/python3 -m scripts.public_audience_v2_guarded_resume \\
+  --source /mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3 \\
+  --state /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/checkpoint.sqlite3 \\
+  --require-sha <exact-reviewed-main-sha> \\
+  --wall-seconds 900 --max-steps 240
+```
+
+Only `PASS2_COMPLETE` together with exact full counts and equal digests can
+move the incident to independent historical parity. None of these receipts
+certifies the public graph or authorizes publication.
