@@ -401,3 +401,49 @@ unauthorized for publication pending user acceptance, atomic/idempotent
 publication design, and completed-day maintenance. The old 06:15 public
 full-forge timer remains disabled. Never turn the incoming raw-log retention
 policy into a guarantee of infinite replay history.
+
+## Protected public-audience publication candidate (not authorized)
+
+The real VPS verified a **completed independent checkpoint backup** at
+`canary-oocB0WuA/completed-pass2-21618093.sqlite3` (593,838,080 bytes,
+mode 0600), identical metadata and source pass-one/pass-two SHA
+`6606f0277cf7c94249f73d4ffce83826068aa00fd78212014fa1422dc46c0f33`,
+and identical full private daily checksum
+`30701fe697faca6098cb72c82c98b8b1fed8e9effeffa9190bc104cde643b61d`.
+The read-only retention-aware release manifest returned
+`CANDIDATE_ONLY` for 131 full days June 11–October 19, with
+Total/Potential/Confirmed sessions [756,819, 86,956, 37,399], candidate
+SHA `84150e4921197efd925fa2d9abccee37154d45a68b6f72e25df57dfc4e2d07b4`,
+legacy SHA `61de508cb57292ca006f0beb7b535ec91d6ab84f9da1a9e2f9e0251a822bd38b`,
+125 full legacy comparisons, no eligible late event, legacy public timer
+inactive/disabled, distinct project rollup timer active/enabled, volume
+38GiB available, Git clean at `97703819c7555bdead18a18d4806860f4c255fd8`.
+This is sufficient evidence to *prepare* a publisher, **not** proof of
+actual publication, complete source immutability, or a maintenance plan.
+
+`scripts/public_audience_v2_atomic_publish.py` (candidate, source-only)
+defaults to `PREVIEW_ONLY`. It validates both independent completed
+checkpoint files and their exact source/private/candidate hashes. Preview
+checks current legacy public audience table checksum without modifying
+it. Its separately operator-approved `--apply` mode additionally checks
+pinned clean code SHA, original complete frozen source and active visibility
+rule identity, late event exclusion and source retention floor, active
+project timer/disabled old timer, idle service and exclusive on-disk
+project-rollup and canary locks. Inside a short `BEGIN IMMEDIATE`
+transaction it performs a compare-and-swap against the exact 128-row
+legacy matrix hash; first fsyncs a mode-0600 **complete old public table
+preimage JSON backup**, then deletes/replaces only AoE2WAR's public
+audience rows with the 131 certified full-day rows. It verifies the
+131-row post-write SHA and commits once; any DB or backup failure rolls
+back. Exact repeated publication returns an explicit no-op without
+changing existing `updated_at`. Changed public data fails closed.
+
+**HOLD:** no operator has authorized publishing the **narrower**
+131-day window in place of requested May 22–Oct19 151 dates. Do not run
+`--apply`, supply the approval phrase, restart the API, or activate a
+timer without explicit authorization and an independently reviewed
+VPS dry-run, original-row backup and rollback exercise. Existing
+131-day candidate ends Oct19, and needs a separate correctly bounded
+UTC completed-day incremental maintenance architecture before it may
+be described as live/current. This publisher does not implement that
+architecture. Missing raw days must remain **unknown**, not zero.
