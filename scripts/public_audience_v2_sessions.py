@@ -126,6 +126,7 @@ def pass2_step(raw: Path, checkpoint: Path, *, max_rows: int = 2000,
                 "p2_cursor_rowid": "0",
                 "p2_raw": "0", "p2_accepted": "0", "p2_finalized": "0",
                 "p2_pages": "0", "p2_version": "0",
+                "p2_digest": v2.EMPTY_DIGEST,
                 "p2_now": datetime.now(timezone.utc).isoformat(),
             }
             db.executemany(
@@ -286,6 +287,7 @@ def pass2_step(raw: Path, checkpoint: Path, *, max_rows: int = 2000,
             "p2_finalized": str(int(info["p2_finalized"])+finalized),
             "p2_pages": str(int(info["p2_pages"])+pages),
             "p2_version": str(version),
+            "p2_digest": v2.chain_source_digest(info["p2_digest"], rows),
         }
         if rows:
             updates.update({
@@ -293,6 +295,14 @@ def pass2_step(raw: Path, checkpoint: Path, *, max_rows: int = 2000,
                 "p2_cursor_offset": str(rows[-1]["line_offset"]),
                 "p2_cursor_rowid": str(rows[-1]["source_rowid"]),
             })
+        if complete and (
+            int(updates["p2_raw"]) != int(info["raw_scanned"])
+            or int(updates["p2_accepted"]) != int(info["accepted"])
+            or updates["p2_digest"] != info["p1_digest"]
+        ):
+            raise RuntimeError(
+                "STOP: first and second source passes differ; shadow classification denied"
+            )
         db.executemany(
             "UPDATE metadata SET value=? WHERE key=?",
             [(v, k) for k, v in updates.items()],
@@ -305,6 +315,7 @@ def pass2_step(raw: Path, checkpoint: Path, *, max_rows: int = 2000,
         "total_finalized": int(updates["p2_finalized"]),
         "total_page_sessions": int(updates["p2_pages"]),
         "open_sessions": len(open_map),
+        "raw_source_parity": bool(complete and updates["p2_digest"] == info["p1_digest"]),
         "publication_authorized": False,
         "semantic_equivalence_certified": False,
     }
@@ -318,6 +329,8 @@ def shadow_daily(checkpoint: Path) -> dict[str, list[int]]:
         info = dict(db.execute("SELECT key,value FROM metadata"))
         if info.get("phase") != "PASS2_COMPLETE":
             raise RuntimeError("STOP: daily shadow report requires complete pass two")
+        if info.get("p1_digest") != info.get("p2_digest"):
+            raise RuntimeError("STOP: raw source digest mismatch")
         return {day: [t, s, c] for day, t, s, c in db.execute(
             "SELECT day,total,suspected,confirmed FROM v2_daily ORDER BY day",
         )}

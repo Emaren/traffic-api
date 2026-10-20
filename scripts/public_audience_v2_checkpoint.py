@@ -38,6 +38,23 @@ CREATE TABLE ip_paths (
 );
 """
 VERSION = "public-audience.pass1.shadow.v1"
+RAW_FIELDS = ("source_rowid", "event_id", "timestamp", "ip",
+              "line_offset", "raw_path", "normalized_path",
+              "referrer_host", "ua", "host")
+EMPTY_DIGEST = "0" * 64
+
+
+def chain_source_digest(previous: str, rows: list[sqlite3.Row]) -> str:
+    """Chunk-size independent, restartable, cryptographic raw input proof."""
+    digest = bytes.fromhex(previous)
+    for row in rows:
+        payload = json.dumps(
+            [row[field] for field in RAW_FIELDS],
+            ensure_ascii=False, separators=(",", ":"), default=str,
+        ).encode("utf-8")
+        digest = hashlib.sha256(digest + payload).digest()
+    return digest.hex()
+
 
 
 def source_connection(path: Path) -> sqlite3.Connection:
@@ -152,7 +169,7 @@ def advance(raw: Path, checkpoint: Path, *, start: str, end: str,
                 info.update({
                     "cursor_time": start, "cursor_offset": "-9223372036854775808",
                     "cursor_rowid": "0", "raw_scanned": "0", "accepted": "0",
-                    "phase": "PASS1_RUNNING",
+                    "phase": "PASS1_RUNNING", "p1_digest": EMPTY_DIGEST,
                 })
                 state.executemany("INSERT INTO metadata VALUES(?,?)", info.items())
             else:
@@ -214,6 +231,7 @@ def advance(raw: Path, checkpoint: Path, *, start: str, end: str,
             updates = {
                 "raw_scanned": str(int(info["raw_scanned"]) + len(rows)),
                 "accepted": str(int(info["accepted"]) + accepted),
+                "p1_digest": chain_source_digest(info["p1_digest"], rows),
                 "phase": "PASS1_COMPLETE" if len(rows) < max_rows else "PASS1_RUNNING",
             }
             if rows:
@@ -296,6 +314,7 @@ def status(checkpoint: Path) -> dict[str, Any]:
         "phase": info["phase"], "start": info["start"], "end": info["end"],
         "raw_scanned": int(info["raw_scanned"]),
         "accepted": int(info["accepted"]),
+        "source_digest": info["p1_digest"],
         "source_max_rowid": int(info["watermark"]),
         "publish_authorized": False,
         "semantic_equivalence_certified": False,
