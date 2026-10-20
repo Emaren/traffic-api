@@ -17,8 +17,8 @@ class CampaignTests(unittest.TestCase):
         self.source.write_bytes(b"fixture")
 
     def test_bounded_cycle_transitions_from_pass_one_to_pass_two(self):
-        phase=["PASS1_RUNNING","PASS1_COMPLETE","PASS2_RUNNING","PASS2_COMPLETE"]
-        index={"value": -1}
+        phase=["NEW","PASS1_RUNNING","PASS1_COMPLETE","PASS2_RUNNING","PASS2_COMPLETE"]
+        index={"value": 0}
         def step(*args, **kwargs):
             index["value"]+=1
             return {"phase":phase[index["value"]]}
