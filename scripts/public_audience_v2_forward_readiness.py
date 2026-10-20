@@ -105,8 +105,10 @@ def audit(source: Path, checkpoint: Path, ledger_path: Path) -> dict:
             "SELECT COUNT(*) FROM future_events"
         ).fetchone()[0])
         limits = db.execute(
-            "SELECT MIN(substr(timestamp,1,10)),"
-            "MAX(substr(timestamp,1,10)) FROM future_events"
+            "SELECT (SELECT substr(timestamp,1,10) FROM future_events "
+            "ORDER BY timestamp ASC LIMIT 1),"
+            "(SELECT substr(timestamp,1,10) FROM future_events "
+            "ORDER BY timestamp DESC LIMIT 1)"
         ).fetchone()
     return report(
         meta, retained=retained, source_max_rowid=source_max,
