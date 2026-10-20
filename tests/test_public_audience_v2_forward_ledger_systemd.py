@@ -17,7 +17,20 @@ class PrivateForwardLedgerUnitTests(unittest.TestCase):
         self.assertIn("UMask=0077", content)
         self.assertIn("MemoryMax=512M", content)
         self.assertIn("TimeoutStartSec=50s", content)
-        self.assertIn("ReadWritePaths=/mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA", content)
+        self.assertIn(
+            "ReadWritePaths=/mnt/HC_Volume_105319120/traffic-v2-shadow/"
+            "canary-oocB0WuA /mnt/HC_Volume_105319120/traffic-db",
+            content,
+        )
+        self.assertIn(
+            "ReadOnlyPaths=/mnt/HC_Volume_105319120/traffic-db/"
+            "traffic_history.sqlite3 -/mnt/HC_Volume_105319120/traffic-db/"
+            "traffic_history.sqlite3-wal",
+            content,
+        )
+        self.assertNotIn("ReadWritePaths=/mnt/HC_Volume_105319120/traffic-db\\n", content)
+        self.assertIn("ProtectSystem=strict", content)
+        self.assertIn("NoNewPrivileges=yes", content)
         self.assertIn("--checkpoint ", content)
         self.assertIn("--ledger ", content)
         self.assertIn("--max-rows 3000", content)
