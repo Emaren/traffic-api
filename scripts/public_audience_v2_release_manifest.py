@@ -11,7 +11,7 @@ import hashlib
 import json
 import sqlite3
 from contextlib import closing
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +34,36 @@ def days_between(start: date, end_exclusive: date) -> list[str]:
         days.append(day.isoformat())
         day += timedelta(days=1)
     return days
+
+
+def verify_retained_source_boundary(current: str | None) -> dict[str, Any]:
+    """Prove live source has not gained records preceding the frozen boundary.
+
+    The ingester removes old raw rows in bounded timestamp-ordered batches.
+    A later live minimum is expected; exact equality would penalize healthy
+    retention. The completed two-pass private checksum, not the current
+    first row, certifies the originally processed immutable snapshot.
+    """
+    guard.require(bool(current), "live source has no retained event")
+    try:
+        observed = datetime.fromisoformat(current)
+        frozen = datetime.fromisoformat(FROZEN_EARLIEST)
+        guard.require(observed.tzinfo is not None,
+                      "live earliest timestamp lacks a timezone")
+        observed = observed.astimezone(timezone.utc)
+        frozen = frozen.astimezone(timezone.utc)
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError("STOP: invalid retained earliest timestamp") from exc
+    guard.require(
+        frozen <= observed < datetime(2026, 10, 20, tzinfo=timezone.utc),
+        "retained source boundary outside frozen historical epoch",
+    )
+    return {
+        "frozen_source_earliest_observed_utc": frozen.isoformat(),
+        "live_source_earliest_observed_utc": observed.isoformat(),
+        "live_retention_has_advanced": observed > frozen,
+        "raw_source_is_mutable_retention_window": True,
+    }
 
 
 def sha(value: Any) -> str:
@@ -115,9 +145,8 @@ def inspect(source: Path, state: Path) -> dict[str, Any]:
             "INDEXED BY idx_traffic_entries_timestamp_line_offset "
             "ORDER BY timestamp ASC, line_offset ASC LIMIT 1"
         ).fetchone()
-        guard.require(
-            bool(first) and first["timestamp"] == FROZEN_EARLIEST,
-            "retained earliest source boundary changed",
+        boundary = verify_retained_source_boundary(
+            first["timestamp"] if first else None
         )
         late = parity.has_late_eligible_source_rows(
             db, start=info["start"], end=info["end"],
@@ -133,8 +162,11 @@ def inspect(source: Path, state: Path) -> dict[str, Any]:
         "source_rows": int(info["p2_raw"]),
         "source_accepted_rows": int(info["p2_accepted"]),
         "late_eligible_events_detected": False,
-        "source_earliest_retained_utc": FROZEN_EARLIEST,
-        "first_full_day_reason": "June 10 source starts after 13:41 UTC",
+        **boundary,
+        "first_full_day_reason": (
+            "Frozen source first observed June 10 after 13:41 UTC; "
+            "June 11 is the first complete UTC coverage day"
+        ),
         "source_contract": "canonical page sessions with global IP behavior",
         "record_counts_not_pageviews": True,
         "preview_only": True,
