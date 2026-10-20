@@ -204,3 +204,35 @@ public database write:
 Only `PASS2_COMPLETE` together with exact full counts and equal digests can
 move the incident to independent historical parity. None of these receipts
 certifies the public graph or authorizes publication.
+
+## Aggregate replay hot-path telemetry (2026-10-20 candidate)
+
+After the first governed nine batches, pass two had safely advanced to
+`231,344` selected raw rows; eight batches stayed below 94,000 KiB RSS.
+Batch nine reached 234,896 KiB RSS (6.51s), triggering the 192MiB
+post-batch soft stop. The checkpoint remained `PASS2_RUNNING`, original
+first-pass identity preserved. Read-only checkpoint inspection showed
+24 open sessions; 304 private segments with 33,840,610 serialized bytes,
+including one **27,473,250-byte** open session and another 6,275,281-byte
+session. Therefore the original giant session **did not close**; it
+continued growing. No specific cause of batch nine's transient RSS spike
+has yet been proven. The source cursor was 2026-06-13 03:45:37Z.
+
+To distinguish causes without exposing behavior or adding source-query
+work, the next operator-approved replay adds in-memory aggregate
+`performance` counters to each successful 20K step: maximum event
+count materialized by any closed canonical session, max seconds spent
+collecting a session's private segments, max seconds in canonical
+session classification, maximum session count flushed from one
+distributed-burst bucket, and max seconds spent in a bucket's
+classification. All counters are reset per subprocess and stored in
+mode-0600 private runner receipts. Never report host, IP, path,
+user agent, session IDs or detailed segment contents.
+
+**No change** to normalizer, classification, session boundaries,
+digest chain, checkpoint schema, timer or public publication.
+Counters explain hot-path cost but do not themselves establish peak
+allocator source or prove a giant session can close under the hard
+virtual-memory limit. Any future memory threshold change requires
+independent review of actual RSS and throughput. Keep the legacy
+audience timer disabled, project rollup enabled, and publication held.
