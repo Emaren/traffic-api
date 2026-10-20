@@ -7,7 +7,7 @@
 - traffic-watchdog.timer: checks local/public web, API health, and archive endpoint every 2 minutes
 - traffic-session-archive-aoe2hdbets.timer: rebuilds AoE2 War session archive every 30 minutes
 - traffic-project-daily-rollups-aoe2hdbets.timer: incrementally refreshes bounded AoE2 War daily rollups
-- traffic-public-audience-aoe2hdbets.timer: runs the canonical full-history public-audience forge once daily at 06:15 UTC
+- traffic-public-audience-aoe2hdbets.timer: LEGACY FULL-HISTORY FORGE; intentionally DISABLED since the 2026-10-15 2-hour timeout (18M+ raw rows). Do not enable without new audited release.
 
 ## Important paths
 
@@ -39,7 +39,9 @@ Expected archive response:
 - ok: true
 - coverage_mode: session_archive
 
-## Canonical public-audience forge
+## Canonical public-audience forge — HELD since 2026-10-15
+
+**P1 incident:** [traffic-api #10](https://github.com/Emaren/traffic-api/issues/10). The operator intentionally disabled the legacy daily timer after the full-history job exceeded two hours. The checked-in legacy timer is documentation of its prior schedule, NOT deployment authorization. Source-only fixes for UTC daily boundary and V2 shadow checkpoints do not approve restarting it.
 
 `scripts/rebuild_public_audience_archive.py --apply` intentionally preserves the full canonical audience truth model. It scans the complete AoE2 War Traffic history twice: first to derive IP behavior and then to sessionize against that behavior before replacing the public daily audience rollups.
 
@@ -54,17 +56,11 @@ Because this is a full-history truth rebuild rather than request-time ingest, it
 
 These limits are an operating-safety boundary; they do not change classification, sessionization, historical coverage, or stored audience truth. A resource-limit failure must remain visible as a failed oneshot rather than being treated as a successful skip.
 
-Manual dry-run:
+**Manual full-history dry-run/apply are HELD.** Do not start the legacy service or invoke `rebuild_public_audience_archive.py --apply`; the previous full forge consumed two hours without publishing new data.
 
-    cd /var/www/Traffic/traffic-api
-    .venv/bin/python3 scripts/rebuild_public_audience_archive.py
+V2 development is tracked in [draft PR #17](https://github.com/Emaren/traffic-api/pull/17). Its `public_audience_v2_checkpoint.py`, `public_audience_v2_sessions.py`, and `public_audience_v2_campaign.py` only produce private shadow checkpoint data, no public writes. Full-source parity, shadow classification equivalence, 18M+ resource benchmarks and operator-approved transactional promotion are required before production publication or scheduler re-enablement. See `docs/PUBLIC_AUDIENCE_V2.md`.
 
-Manual canonical apply:
-
-    systemctl start traffic-public-audience-aoe2hdbets.service
-    journalctl -u traffic-public-audience-aoe2hdbets.service -n 100 --no-pager -l
-
-After changing the checked-in systemd unit or timer, copy both files into `/etc/systemd/system/`, run `systemctl daemon-reload`, and verify the timer schedule before starting the service manually.
+After reviewing service configuration, verify effective systemd state and preserve `traffic-public-audience-aoe2hdbets.timer` as disabled/inactive. **Do not copy/re-enable this unit as part of routine restore.** A separate reviewed cutover plan must authorize any future timer.
 
 ## Watchdog
 
@@ -93,8 +89,7 @@ It verifies .venv/bin/python3, uvicorn, and fastapi. If the venv is broken, it r
     cp ops/systemd/traffic-session-archive-aoe2hdbets.timer /etc/systemd/system/
     cp ops/systemd/traffic-project-daily-rollups-aoe2hdbets.service /etc/systemd/system/
     cp ops/systemd/traffic-project-daily-rollups-aoe2hdbets.timer /etc/systemd/system/
-    cp ops/systemd/traffic-public-audience-aoe2hdbets.service /etc/systemd/system/
-    cp ops/systemd/traffic-public-audience-aoe2hdbets.timer /etc/systemd/system/
+    # Do not install/enable the held legacy public-audience full-history timer.
 
     mkdir -p /etc/systemd/system/traffic-api.service.d
     mkdir -p /etc/systemd/system/traffic-web.service.d
@@ -111,8 +106,9 @@ It verifies .venv/bin/python3, uvicorn, and fastapi. If the venv is broken, it r
       traffic-web.service \
       traffic-watchdog.timer \
       traffic-session-archive-aoe2hdbets.timer \
-      traffic-project-daily-rollups-aoe2hdbets.timer \
-      traffic-public-audience-aoe2hdbets.timer
+      traffic-project-daily-rollups-aoe2hdbets.timer
+
+    # Separate explicit HOLD: traffic-public-audience-aoe2hdbets.timer
 
 ## Useful checks
 
