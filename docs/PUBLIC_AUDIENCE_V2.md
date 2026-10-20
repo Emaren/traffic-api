@@ -134,3 +134,26 @@ timer and the public audience production table remain outside scope.
 
 Neither this patch nor successful CI authorizes publishing, timer activation,
 or claiming completed historical reconstruction.
+
+### Isolated old/new checkpoint A/B certification gate
+
+Use the GitHub-reviewed exact PR head in a **detached staging worktree**,
+never the production Traffic checkout. Take one consistent, operator-locked
+SQLite backup of the current private checkpoint and copy it into two mode-0600
+private sibling databases on the data volume. Run one identical bounded pass-two
+step against the *original* (pinned main) source and one against the *candidate*
+source, each operating solely on its disposable private clone. Check project
+worker idle/success and 12 GiB reserve before each step; measure wall/RSS and
+stop on failure, rather than modifying the live checkpoint to test a hypothesis.
+
+`scripts/public_audience_v2_state_compare.py --original <private-old-copy>
+--candidate <private-new-copy>` performs a **read-only**, source-identity-free
+comparison of every metadata key, the complete ordered/open session payload
+(reassembling private chunks), ordered closed sessions, and daily counts.
+Output contains only boolean status, counts and SHA digests; private host/IP/UA
+and paths remain offline. Its MATCH is necessary but **not sufficient**:
+this test cannot prove general future correctness, actual memory ceilings for
+all days, absent late arrivals, semantic equivalence across the entire source,
+or production publication authority. Keep test copies private until the
+comparison and rollback evidence have been reviewed; dispose of copies only
+with an explicit review, preserving the original checkpoint.
