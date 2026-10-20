@@ -101,6 +101,36 @@ class LateEligibleSourceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "budget exceeded"):
                 self.check(max_candidates=1)
 
+    def test_late_arrival_scan_forces_rowid_seek_with_timestamp_index_present(self):
+        self.db.execute(
+            "CREATE INDEX idx_traffic_entries_timestamp_line_offset "
+            "ON traffic_entries(timestamp,line_offset)"
+        )
+        self.db.execute(
+            "CREATE INDEX idx_traffic_entries_host_timestamp "
+            "ON traffic_entries(host,timestamp)"
+        )
+        self.add("2026-06-01")
+        self.add("2026-10-19")
+        plan = [
+            str(row[3]) for row in self.db.execute(
+                "EXPLAIN QUERY PLAN "
+                + parity.late_arrival_seek_sql(["aoe2war.com"]),
+                (1, "2026-05-22T00:00:00+00:00",
+                 "2026-10-20T00:00:00+00:00", "aoe2war.com"),
+            )
+        ]
+        self.assertTrue(
+            any("INTEGER PRIMARY KEY" in step and "rowid>?" in step.lower()
+                for step in plan),
+            plan,
+        )
+        self.assertFalse(any("TIMESTAMP_LINE_OFFSET" in step.upper()
+                             for step in plan), plan)
+        with patch.object(parity.canonical, "normalize_row",
+                          side_effect=self.canonical_normalizer):
+            self.assertTrue(self.check())
+
     def test_rejects_empty_hosts_or_nonpositive_budget(self):
         self.add("2026-10-19")
         with self.assertRaisesRegex(RuntimeError, "invalid late-arrival"):
