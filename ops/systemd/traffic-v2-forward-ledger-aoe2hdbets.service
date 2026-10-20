@@ -24,5 +24,15 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
-ReadWritePaths=/mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA
+# SQLite WAL mode=ro needs to create ephemeral -wal/-shm coordination files
+# when none exist; SQLite unlinks them when the last connection exits.
+# Mount only the Traffic source directory for this unavoidable coordination,
+# then remount the primary database read-only, as independently verified by
+# a same-sandbox VPS probe on 2026-10-20. When present at namespace creation,
+# the live -wal data file also receives a read-only bind.
+# NOTE: the writable directory exception also permits other sidecar paths;
+# the application must *only* use source_connection(...mode=ro/query_only).
+# This unit is NOT an audience publisher or general file mutation service.
+ReadWritePaths=/mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA /mnt/HC_Volume_105319120/traffic-db
+ReadOnlyPaths=/mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3 -/mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3-wal
 ExecStart=/var/www/Traffic/traffic-api/.venv/bin/python3 -m scripts.public_audience_v2_forward_ledger --source /mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3 --checkpoint /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/checkpoint.sqlite3 --ledger /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ledger.sqlite3 --max-rows 3000 --budget-seconds 12 --advance --approve-private-write
