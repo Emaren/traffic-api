@@ -24,5 +24,10 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
+# A SQLite mode=ro reader of a live WAL database may need O_RDWR on its
+# already-created WAL shared-memory index. Keep the main DB, -wal and source
+# directory read-only. The optional -shm path disappears when no writer lives;
+# fail closed rather than allowing writes to the whole Traffic DB directory.
 ReadWritePaths=/mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA
+ReadWritePaths=-/mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3-shm
 ExecStart=/var/www/Traffic/traffic-api/.venv/bin/python3 -m scripts.public_audience_v2_forward_ledger --source /mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3 --checkpoint /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/checkpoint.sqlite3 --ledger /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ledger.sqlite3 --max-rows 3000 --budget-seconds 12 --advance --approve-private-write
