@@ -79,6 +79,58 @@ class CheckpointTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "completed checkpoint"):
             self.step()
 
+    def test_resumed_page_seeks_from_composite_cursor_not_archive_start(self):
+        # This is a query-plan regression, not a benchmark. On the 51GB
+        # production database, 'timestamp >= start' plus the cursor tuple
+        # made SQLite choose the *historical* index bound on late pages.
+        with v2.source_connection(self.source) as src:
+            info = {
+                "start": "2026-10-16T00:00:00+00:00",
+                "end": "2026-10-20T00:00:00+00:00",
+                "watermark": "5",
+                "cursor_time": "2026-10-17T01:00:00+00:00",
+                "cursor_offset": "3",
+                "cursor_rowid": "3",
+            }
+            captured = []
+            src.set_trace_callback(captured.append)
+            result = v2.select_page(src, info, ["aoe2war.com"], 20)
+            src.set_trace_callback(None)
+            self.assertEqual([row["event_id"] for row in result], ["d", "e"])
+            self.assertTrue(captured, "read query must be recorded")
+            explain = list(src.execute("EXPLAIN QUERY PLAN " + captured[0]))
+            details = " | ".join(str(row[3]) for row in explain)
+            self.assertIn("USING INDEX idx_traffic_entries_timestamp_line_offset", details)
+            self.assertIn("(timestamp,line_offset)>(?,?)", details.replace(" ", ""))
+            self.assertNotIn("timestamp>? AND timestamp<?", details)
+
+    def test_old_archive_boundary_is_enforced_by_initial_seek_cursor(self):
+        with sqlite3.connect(self.source) as db:
+            db.execute("INSERT INTO traffic_entries VALUES(?,?,?,?,?,?,?,?,?)",
+                ("before", "2026-10-15T23:59:59+00:00", "8", -5,
+                 "/", "/", "", "Mozilla", "aoe2war.com"))
+            db.execute("INSERT INTO traffic_entries VALUES(?,?,?,?,?,?,?,?,?)",
+                ("exact", "2026-10-16T00:00:00+00:00", "8", -5,
+                 "/", "/", "", "Mozilla", "aoe2war.com"))
+        # The row outside [start, end) is excluded even with no redundant
+        # timestamp>=start SQL condition; exact start, negative offset included.
+        totals = [self.step(), self.step(), self.step(), self.step()]
+        self.assertEqual([r["step_rows"] for r in totals], [2, 2, 2, 0])
+        self.assertEqual(totals[-1]["raw_scanned"], 6)
+
+    def test_cursor_rewind_before_checkpoint_window_fails_closed(self):
+        with v2.source_connection(self.source) as src:
+            info = {
+                "start": "2026-10-16T00:00:00+00:00",
+                "end": "2026-10-20T00:00:00+00:00",
+                "watermark": "5",
+                "cursor_time": "2026-10-15T23:59:59+00:00",
+                "cursor_offset": "0",
+                "cursor_rowid": "0",
+            }
+            with self.assertRaisesRegex(RuntimeError, "cursor outside source UTC bounds"):
+                v2.select_page(src, info, ["aoe2war.com"], 20)
+
     def test_host_policy_change_fails_closed_with_same_cursor(self):
         self.step()
         with patch.object(v2.canonical, "project_hosts", return_value=["other.host"]):
