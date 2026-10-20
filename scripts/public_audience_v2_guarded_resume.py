@@ -232,11 +232,28 @@ def run(args: argparse.Namespace) -> int:
                     require(outcome["total_raw"] == int(after["p2_raw"]),
                             "child receipt/cursor mismatch")
                     steps += 1
+                    performance = outcome.get("performance", {})
+                    require(
+                        isinstance(performance, dict)
+                        and set(performance) == {
+                            "max_closed_session_events",
+                            "max_close_collect_seconds",
+                            "max_close_classify_seconds",
+                            "max_flushed_bucket_sessions",
+                            "max_bucket_classify_seconds",
+                        }
+                        and all(
+                            isinstance(v, (int, float)) and 0 <= v <= 1_000_000
+                            for v in performance.values()
+                        ),
+                        "invalid aggregate session performance receipt",
+                    )
                     record(receipt_fd, {
                         "event": "STEP", "at": utc(), "batch": steps,
                         "rows": delta, "total_raw": int(after["p2_raw"]),
                         "elapsed_seconds": elapsed, "peak_rss_kib": rss,
                         "phase": after["phase"], "publication_authorized": False,
+                        "performance": performance,
                     })
                     if after["phase"] == "PASS2_COMPLETE":
                         reason = "PASS2_COMPLETE"
