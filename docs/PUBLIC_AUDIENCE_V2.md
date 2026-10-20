@@ -590,3 +590,32 @@ Manual, source-only VPS preflight after a pinned code release:
 prints aggregate counters only, and returns `publish_authorized=false`.
 Review counts/budgets/host idle before further calls. Never automatically
 loop over thousands of pages or enable an untested timer.
+
+## Optional safe automatic forward evidence capture (NOT audience publication)
+
+The private source-preservation phase adds two opt-in systemd units:
+`ops/systemd/traffic-v2-forward-ledger-aoe2hdbets.service` and `.timer`.
+The service runs a **single 3,000-row / 12-second budget** step every
+roughly five minutes, with hardened read-only host filesystem and only the
+0600 private canary directory writable, resource limits and a shared
+canary lock; the run requires original 131-day published matrix SHA,
+completed historical checkpoint and original active policy identity.
+The service is executed as root solely because the established private
+0600 completed checkpoint and its canary directory are root-operated;
+hardened systemd mount sandbox confines writes to the private canary path.
+It does not touch public tables or enable/restart the failed legacy forge.
+The SQL remains read-only against the source and only appends private
+canonical event evidence in `future-ledger.sqlite3`. Timer unit defaults
+disabled/inactive until a separate manually observed one-step success
+plus source-read-only audit confirms systemd sandbox compatibility.
+
+**This timer is NOT THE DAILY AUDIENCE MAINTENANCE WORKER**. Only private
+input preservation becomes automatic; calendar/day selection, exact
+global IP behaviour, cross-day sessions, 60-second distributed burst
+handling, and certified incremental publication remain open #31.
+Do not show the public graph as fresh because this timer ran. Preserve
+old public timer disabled/inactive and independent project rollup timer
+active/enabled. When `future-ledger` command catches an eligible late
+source event before October20, it fails closed and requires an explicit
+evidence reconciliation, never inventing data or altering certified
+131-day values.
