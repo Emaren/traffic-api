@@ -39,8 +39,16 @@ CREATE TABLE IF NOT EXISTS v2_daily (
   day TEXT PRIMARY KEY,
   total INTEGER NOT NULL, suspected INTEGER NOT NULL, confirmed INTEGER NOT NULL
 );
+-- Private append-only chunks avoid decoding and rewriting large open sessions
+-- for every resumed batch. Existing v2_open JSON is migrated transactionally.
+CREATE TABLE IF NOT EXISTS v2_open_segments (
+  host TEXT NOT NULL, ip TEXT NOT NULL, ua TEXT NOT NULL,
+  seq INTEGER NOT NULL, events_json TEXT NOT NULL,
+  PRIMARY KEY(host, ip, ua, seq)
+) WITHOUT ROWID;
 """
 ACTIVE_SESSION_LIMIT = 50_000
+EVENT_SEGMENT_ROWS = 256
 
 
 def serialize(value: Any) -> str:
@@ -105,6 +113,75 @@ def verified_state(raw: Path, checkpoint: Path, info: dict[str, str]) -> tuple[l
     return hosts, rules
 
 
+
+def spill_legacy_open_state(db: sqlite3.Connection) -> int:
+    """Convert the original v2_open JSON format without decoding private events.
+
+    Must run *inside* the same checkpoint transaction as the new replay step.
+    An interrupted step rolls back this migration and its source cursor together.
+    """
+    migrated = 0
+    for host, ip, ua, blob in db.execute(
+        "SELECT host,ip,ua,events_json FROM v2_open WHERE events_json != '[]'"
+    ):
+        key = (host, ip, ua)
+        if db.execute(
+            "SELECT 1 FROM v2_open_segments WHERE host=? AND ip=? AND ua=? LIMIT 1",
+            key,
+        ).fetchone():
+            raise RuntimeError("STOP: ambiguous mixed-format private open session")
+        if not blob or not blob.startswith("[") or not blob.endswith("]"):
+            raise RuntimeError("STOP: invalid legacy open-session JSON envelope")
+        db.execute(
+            """INSERT INTO v2_open_segments
+               (host,ip,ua,seq,events_json) VALUES(?,?,?,0,?)""",
+            (*key, blob),
+        )
+        db.execute(
+            "UPDATE v2_open SET events_json='[]' WHERE host=? AND ip=? AND ua=?",
+            key,
+        )
+        migrated += 1
+    return migrated
+
+
+def collect_session_events(
+    db: sqlite3.Connection, key: tuple[str, str, str],
+    pending: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Materialize the full canonical event sequence *only at session close*."""
+    events: list[dict[str, Any]] = []
+    for (blob,) in db.execute(
+        """SELECT events_json FROM v2_open_segments
+           WHERE host=? AND ip=? AND ua=? ORDER BY seq""", key,
+    ):
+        chunk = deserialize(blob)
+        if not isinstance(chunk, list) or not chunk:
+            raise RuntimeError("STOP: corrupt private session segment")
+        events.extend(chunk)
+    events.extend(pending)
+    return events
+
+
+def save_pending_segments(
+    db: sqlite3.Connection, key: tuple[str, str, str],
+    pending: list[dict[str, Any]],
+) -> None:
+    if not pending:
+        return
+    first_seq = int(db.execute(
+        """SELECT COALESCE(MAX(seq), -1) + 1 FROM v2_open_segments
+           WHERE host=? AND ip=? AND ua=?""", key,
+    ).fetchone()[0])
+    for offset in range(0, len(pending), EVENT_SEGMENT_ROWS):
+        db.execute(
+            """INSERT INTO v2_open_segments
+               (host,ip,ua,seq,events_json) VALUES(?,?,?,?,?)""",
+            (*key, first_seq + offset // EVENT_SEGMENT_ROWS,
+             serialize(pending[offset:offset + EVENT_SEGMENT_ROWS])),
+        )
+
+
 def pass2_step(raw: Path, checkpoint: Path, *, max_rows: int = 2000,
                budget_seconds: float = 15) -> dict[str, Any]:
     if not 1 <= max_rows <= 20_000 or not 1 <= budget_seconds <= 120:
@@ -125,6 +202,7 @@ def pass2_step(raw: Path, checkpoint: Path, *, max_rows: int = 2000,
         # Create only private local tables, never the published Traffic rollup.
         db.executescript(SCHEMA)
         db.execute("BEGIN IMMEDIATE")
+        spill_legacy_open_state(db)
         if info["phase"] == "PASS1_COMPLETE":
             additions = {
                 "phase": "PASS2_RUNNING",
@@ -152,10 +230,12 @@ def pass2_step(raw: Path, checkpoint: Path, *, max_rows: int = 2000,
         open_map: dict[tuple[str, str, str], dict[str, Any]] = {}
         expiry: list[tuple[float, int, tuple[str, str, str]]] = []
         open_count: Counter[int] = Counter()
-        for row in db.execute("SELECT * FROM v2_open"):
+        for row in db.execute(
+            "SELECT host,ip,ua,last_time,version,bucket FROM v2_open"
+        ):
             key = (row["host"], row["ip"], row["ua"])
             state = {
-                "events": deserialize(row["events_json"]),
+                "events": [],
                 "last_time": datetime.fromisoformat(row["last_time"]),
                 "version": int(row["version"]),
                 "bucket_id": int(row["bucket"]),
@@ -183,9 +263,9 @@ def pass2_step(raw: Path, checkpoint: Path, *, max_rows: int = 2000,
 
         def close(key: tuple[str, str, str], state: dict[str, Any]) -> None:
             nonlocal finalized
-            events = state["events"]
+            events = collect_session_events(db, key, state["events"])
             if not events:
-                return
+                raise RuntimeError("STOP: open session has no canonical events")
             host_ip = (events[0]["host"], events[0]["ip"])
             if host_ip not in cache:
                 if len(cache) >= 4096:
@@ -198,6 +278,10 @@ def pass2_step(raw: Path, checkpoint: Path, *, max_rows: int = 2000,
             db.execute(
                 "INSERT INTO v2_closed(bucket,session_json) VALUES(?,?)",
                 (bucket, serialize(session)),
+            )
+            db.execute(
+                "DELETE FROM v2_open_segments WHERE host=? AND ip=? AND ua=?",
+                key,
             )
             open_count[bucket] -= 1
             if open_count[bucket] == 0:
@@ -284,9 +368,11 @@ def pass2_step(raw: Path, checkpoint: Path, *, max_rows: int = 2000,
                 raise RuntimeError("STOP: unfinished burst buckets at end-of-input")
         db.execute("DELETE FROM v2_open")
         for (host, ip, ua), state in open_map.items():
+            key = (host, ip, ua)
+            save_pending_segments(db, key, state["events"])
             db.execute(
                 "INSERT INTO v2_open VALUES(?,?,?,?,?,?,?)",
-                (host, ip, ua, serialize(state["events"]),
+                (host, ip, ua, "[]",
                  state["last_time"].isoformat(), state["version"], state["bucket_id"]),
             )
         updates = {
