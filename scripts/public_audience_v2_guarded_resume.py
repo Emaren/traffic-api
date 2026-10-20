@@ -10,6 +10,7 @@ import argparse
 import fcntl
 import json
 import os
+import signal
 import sqlite3
 import stat
 import subprocess
@@ -126,15 +127,23 @@ def run_one(raw: Path, state: Path, *, max_rows: int, budget_seconds: int,
         "advance", "--source", str(raw), "--state", str(state),
         "--max-rows", str(max_rows), "--budget-seconds", str(budget_seconds),
     ]
-    result = subprocess.run(
-        command, cwd=repo, text=True, capture_output=True,
-        timeout=hard_seconds + 8, check=False,
+    # Isolate the entire time/timeout/nice/Python process tree. If the
+    # outside watchdog fires, kill the *group*, never orphan a checkpoint writer.
+    process = subprocess.Popen(
+        command, cwd=repo, text=True, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, start_new_session=True,
     )
-    if result.returncode:
-        raise RuntimeError(f"STOP: replay step exit={result.returncode}; "
+    try:
+        stdout, _stderr = process.communicate(timeout=hard_seconds + 8)
+    except subprocess.TimeoutExpired as exc:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+        raise RuntimeError("STOP: replay process group exceeded outer watchdog") from exc
+    if process.returncode:
+        raise RuntimeError(f"STOP: replay step exit={process.returncode}; "
                            "checkpoint must be inspected before retry")
     try:
-        output = json.loads(result.stdout.strip())
+        output = json.loads(stdout.strip())
         elapsed, rss = metrics_path.read_text().split()
         return output, float(elapsed), int(rss)
     except (ValueError, KeyError, OSError, TypeError) as exc:
