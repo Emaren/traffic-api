@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import subprocess
 import sys
 from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
@@ -25,22 +26,60 @@ def require(condition: bool, reason: str) -> None:
     publisher.require(condition, reason)
 
 
+PUBLIC_AOE2WAR_AUDIENCE_URL = "https://aoe2war.com/api/traffic/public"
+LOCAL_TRAFFIC_AUDIENCE_URL = (
+    "http://127.0.0.1:3345/api/projects/"
+    "aoe2hdbets/public-audience-series"
+)
+MAX_PUBLIC_JSON_BYTES = 5_000_000
+
+
+def parse_public_json(payload: bytes) -> dict:
+    require(len(payload) <= MAX_PUBLIC_JSON_BYTES,
+            "audience API response oversized")
+    obj = json.loads(payload)
+    require(isinstance(obj, dict), "audience API invalid JSON object")
+    return obj
+
+
 def fetch_json(url: str, *, timeout: float = 12) -> dict:
-    require(url.startswith("http://127.0.0.1:")
-            or url.startswith("https://aoe2war.com/"),
-            "unapproved audience API origin")
+    """Read two fixed, operator-owned API endpoints with strict body caps.
+
+    Live VPS verification observed the local FastAPI endpoint return HTTP 200
+    and the owned Cloudflare public endpoint return HTTP 403 for Python
+    urllib, while ordinary curl returned 200. The curl transport only
+    applies to the exact public endpoint; neither the CDN nor its WAF is
+    modified, and the response must still pass 131-day SHA verification.
+    """
+    require(url in (LOCAL_TRAFFIC_AUDIENCE_URL, PUBLIC_AOE2WAR_AUDIENCE_URL),
+            "unapproved audience API origin or path")
+    if url == PUBLIC_AOE2WAR_AUDIENCE_URL:
+        completed = subprocess.run(
+            [
+                "/usr/bin/curl", "--fail", "--silent", "--show-error",
+                "--max-time", str(max(1, int(timeout))),
+                "--connect-timeout", "5",
+                "--max-filesize", str(MAX_PUBLIC_JSON_BYTES),
+                "--proto", "=https", "--max-redirs", "0",
+                url,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout + 3,
+            check=False,
+        )
+        require(completed.returncode == 0,
+                f"public AoE2WAR curl transport failed (exit {completed.returncode})")
+        return parse_public_json(completed.stdout)
     req = Request(url, headers={"Accept": "application/json",
                                 "Cache-Control": "no-cache"})
     with urlopen(req, timeout=timeout) as response:
         require(response.status == 200,
-                "audience API returned non-200 response")
-        require(int(response.headers.get("Content-Length", "0")) < 5_000_000,
-                "audience API response unexpectedly large")
-        payload = response.read(5_000_001)
-        require(len(payload) <= 5_000_000, "audience API response oversized")
-        obj = json.loads(payload)
-        require(isinstance(obj, dict), "audience API invalid JSON object")
-        return obj
+                "local Traffic API returned non-200 response")
+        require(int(response.headers.get("Content-Length", "0"))
+                <= MAX_PUBLIC_JSON_BYTES,
+                "local Traffic API response unexpectedly large")
+        return parse_public_json(response.read(MAX_PUBLIC_JSON_BYTES + 1))
 
 
 def verify_api_points(data: dict, *, frontend: bool) -> dict[str, list[int]]:
@@ -123,9 +162,9 @@ def main() -> int:
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument("--source", type=Path, required=True)
     cli.add_argument(
-        "--backend", default="http://127.0.0.1:3345/api/projects/aoe2hdbets/public-audience-series")
+        "--backend", default=LOCAL_TRAFFIC_AUDIENCE_URL)
     cli.add_argument(
-        "--frontend", default="https://aoe2war.com/api/traffic/public")
+        "--frontend", default=PUBLIC_AOE2WAR_AUDIENCE_URL)
     opts = cli.parse_args()
     try:
         print(json.dumps(verify(opts.source, opts.backend, opts.frontend),
