@@ -150,7 +150,7 @@ def advance(raw: Path, checkpoint: Path, *, start: str, end: str,
                 ).fetchone()[0])
                 info = source_identity(raw, start, end, watermark, hosts, rules)
                 info.update({
-                    "cursor_time": start, "cursor_offset": "-1",
+                    "cursor_time": start, "cursor_offset": "-9223372036854775808",
                     "cursor_rowid": "0", "raw_scanned": "0", "accepted": "0",
                     "phase": "PASS1_RUNNING",
                 })

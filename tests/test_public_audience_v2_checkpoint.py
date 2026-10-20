@@ -128,6 +128,17 @@ class CheckpointTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "incomplete checkpoint initialization"):
             self.step()
 
+    def test_negative_line_offset_at_exact_start_is_not_silently_skipped(self):
+        # SQLite sorts an unexpected negative offset before offset 0; a
+        # synthetic earliest ordering key must include it or fail closed.
+        with sqlite3.connect(self.source) as db:
+            db.execute("INSERT INTO traffic_entries VALUES(?,?,?,?,?,?,?,?,?)",
+                ("edge", "2026-10-16T00:00:00+00:00", "8", -3,
+                 "/", "/", "", "Mozilla", "aoe2war.com"))
+        results = [self.step(), self.step(), self.step()]
+        self.assertEqual([r["step_rows"] for r in results], [2, 2, 2])
+        self.assertEqual(self.step()["raw_scanned"], 6)
+
     def test_raw_db_must_not_alias_state(self):
         with self.assertRaisesRegex(RuntimeError, "checkpoint aliases raw"):
             v2.advance(self.source, self.source,
