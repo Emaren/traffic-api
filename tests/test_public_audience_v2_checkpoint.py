@@ -117,5 +117,63 @@ class CheckpointTests(unittest.TestCase):
         self.assertFalse(self.state.exists())
 
 
+    def test_pass_one_statistics_equal_canonical_full_scan_on_same_source_snapshot(self):
+        from datetime import datetime
+        self.step()
+        self.step()
+        self.step()
+        with patch.object(v2.canonical, "PERSIST_DB_PATH", self.source):
+            behavior, raw, accepted = v2.canonical.build_ip_behavior(
+                start=datetime.fromisoformat("2026-10-16T00:00:00+00:00"),
+                end=datetime.fromisoformat("2026-10-20T00:00:00+00:00"),
+                snapshot_max_rowid=5,
+            )
+        self.assertEqual(raw, 5)
+        self.assertEqual(accepted, 5)
+        with sqlite3.connect(self.state) as db:
+            for (host, ip), expected in behavior.items():
+                count = db.execute(
+                    "SELECT requests,direct_referrers FROM ip_counts WHERE host=? AND ip=?",
+                    (host, ip),
+                ).fetchone()
+                uas = {
+                    row[0] for row in db.execute(
+                        "SELECT ua FROM ip_uas WHERE host=? AND ip=?", (host, ip)
+                    )
+                }
+                paths = {
+                    row[0] for row in db.execute(
+                        "SELECT path FROM ip_paths WHERE host=? AND ip=?", (host, ip)
+                    )
+                }
+                self.assertEqual(count[0], expected["request_count"])
+                self.assertEqual(len(uas), expected["unique_uas"])
+                self.assertEqual(len(paths), expected["unique_paths"])
+                self.assertEqual(sorted(paths), expected["route_bundle_paths"])
+                self.assertEqual(count[1], 4 if ip == "1" else 0)
+
+    def test_visibility_rule_change_invalidates_existing_checkpoint(self):
+        self.step()
+        with patch.object(v2.canonical, "safe_list_visibility_rules",
+                          return_value=[{"rule_type": "fixture", "active": True}]):
+            with self.assertRaisesRegex(RuntimeError, "input identity changed"):
+                self.step()
+        self.assertEqual(v2.status(self.state)["raw_scanned"], 2)
+
+    def test_same_timestamp_and_offset_rows_resume_by_rowid_tiebreak(self):
+        with sqlite3.connect(self.source) as db:
+            db.execute(
+                "UPDATE traffic_entries SET timestamp=?,line_offset=? WHERE event_id='b'",
+                ("2026-10-16T00:00:01+00:00", 1),
+            )
+        one = self.step()
+        self.assertEqual(one["step_rows"], 2)
+        self.assertEqual(self.step()["raw_scanned"], 4)
+        self.assertEqual(self.step()["raw_scanned"], 5)
+        with sqlite3.connect(self.state) as db:
+            self.assertEqual(db.execute("SELECT SUM(requests) FROM ip_counts").fetchone()[0], 5)
+
+
+
 if __name__ == "__main__":
     unittest.main()
