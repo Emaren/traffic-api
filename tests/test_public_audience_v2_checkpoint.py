@@ -105,6 +105,29 @@ class CheckpointTests(unittest.TestCase):
         self.assertEqual(last["raw_scanned"], 5)
         self.assertEqual(last["accepted"], 5)
 
+    def test_future_day_rows_excluded_despite_constant_work_global_watermark(self):
+        with sqlite3.connect(self.source) as db:
+            db.execute("INSERT INTO traffic_entries VALUES(?,?,?,?,?,?,?,?,?)",
+                ("future", "2026-10-21T00:00:00+00:00", "9", 6,
+                 "/", "/", "", "Mozilla", "aoe2war.com"))
+        self.assertEqual(self.step()["source_max_rowid"], 6)
+        self.step()
+        last = self.step()
+        self.assertEqual(last["raw_scanned"], 5)
+
+    def test_does_not_write_private_checkpoint_inside_repository(self):
+        with self.assertRaisesRegex(RuntimeError, "outside the source repository"):
+            v2.advance(self.source, v2.ROOT / "private-checkpoint.sqlite3",
+                start="2026-10-16T00:00:00+00:00",
+                end="2026-10-20T00:00:00+00:00")
+        self.assertFalse((v2.ROOT / "private-checkpoint.sqlite3").exists())
+
+    def test_incomplete_initialization_has_explicit_stop(self):
+        with sqlite3.connect(self.state) as db:
+            db.executescript(v2.SCHEMA)
+        with self.assertRaisesRegex(RuntimeError, "incomplete checkpoint initialization"):
+            self.step()
+
     def test_raw_db_must_not_alias_state(self):
         with self.assertRaisesRegex(RuntimeError, "checkpoint aliases raw"):
             v2.advance(self.source, self.source,

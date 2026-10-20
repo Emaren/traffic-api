@@ -11,3 +11,5 @@ This is the FIRST canonical pass ONLY. It does not yet calculate cross-day sessi
 Next engineering gates: bounded pass-two with durable session and burst-window state; compare exact classification against reference full forge on adversarial fixtures; canonical source immutability and late arrival invalidation; 18M+ scale tests under resource budgets; shadow publication/atomic checksum review; operator-authorized activation of a NEW bounded scheduler; separate public archive freshness checks. No live production execution has been performed by this PR.
 
 Developer-only test: python -m unittest tests.test_public_audience_v2_checkpoint -v
+
+Source snapshot optimization: initial source ceiling uses SQLite's rowid maximum (index-assisted), not an unbounded timestamp-filtered MAX aggregation. The existing UTC end-day predicate continues to select exactly the same eligible rows at capture time. Snapshot rewinds/in-place changes remain uncertified and must be handled before publication. Staging paths inside the Git working tree are refused to reduce accidental inclusion of private IP/UA statistics in Git.

@@ -111,6 +111,8 @@ def advance(raw: Path, checkpoint: Path, *, start: str, end: str,
         raise RuntimeError("STOP: row/time budget outside permitted bounds")
     if raw.resolve() == checkpoint.resolve() or checkpoint.is_symlink():
         raise RuntimeError("STOP: checkpoint aliases raw source or symlink")
+    if checkpoint.resolve().is_relative_to(ROOT.resolve()):
+        raise RuntimeError("STOP: private checkpoint must stay outside the source repository")
     if end <= start or end > canonical.utc_midnight(datetime.now(timezone.utc).date()).isoformat():
         raise RuntimeError("STOP: full UTC days only")
     hosts = canonical.project_hosts()
@@ -138,9 +140,13 @@ def advance(raw: Path, checkpoint: Path, *, start: str, end: str,
                 state.executescript(SCHEMA)
             state.execute("BEGIN IMMEDIATE")
             if new:
+                # O(log N) rowid high-water lookup, rather than scanning
+                # millions of timestamp-filtered rows to compute MAX(rowid).
+                # The timestamp predicate in select_page still excludes
+                # current/future-day rows; both watermarks select exactly
+                # the same eligible rows at the captured snapshot.
                 watermark = int(src.execute(
-                    "SELECT COALESCE(MAX(rowid),0) FROM traffic_entries WHERE timestamp < ?",
-                    (end,),
+                    "SELECT COALESCE(MAX(rowid),0) FROM traffic_entries"
                 ).fetchone()[0])
                 info = source_identity(raw, start, end, watermark, hosts, rules)
                 info.update({
@@ -151,6 +157,11 @@ def advance(raw: Path, checkpoint: Path, *, start: str, end: str,
                 state.executemany("INSERT INTO metadata VALUES(?,?)", info.items())
             else:
                 info = _metadata(state)
+                if not info:
+                    raise RuntimeError(
+                        "STOP: incomplete checkpoint initialization; quarantine this "
+                        "shadow file and start a fresh checkpoint path."
+                    )
                 expected = source_identity(
                     raw, start, end, int(info["watermark"]), hosts, rules
                 )
