@@ -44,6 +44,41 @@ python3 scripts/public_audience_v2_campaign.py status \
 
 No user-facing Traffic statistic is populated by these commands.
 
+## Read-only VPS staging preflight
+
+After the exact merged commit is reviewed and installed on the Traffic API
+production source checkout by a clean fast-forward (do **not** enable timers):
+
+```bash
+cd /var/www/Traffic/traffic-api
+.venv/bin/python3 scripts/public_audience_v2_preflight.py \
+  --source /mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3
+```
+
+This performs indexed read-only SQLite queries; `canary_ready=true` means
+only that the source, required free space and held legacy timer were observed.
+It is not performance or historical parity certification.
+
+**Run the full campaign first on a separately approved copy/fixture.** The
+`cycle` command is resumable and wall-bounded, but the real production source
+contains millions of events, can contend with the active 30-minute worker, and
+may produce substantial private checkpoint storage. No automated schedule is
+currently authorized.
+
+After a complete shadow replay, obtain a read-only cross-check:
+
+```bash
+.venv/bin/python3 scripts/public_audience_v2_parity.py \
+  --source /mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3 \
+  --state /private/reviewed-traffic-v2-checkpoint.sqlite3
+```
+
+The parity check refuses changes in previously completed historical buckets,
+reports the old last bucket separately, checks for new before-cutoff rows after
+the frozen source watermark, and **always** returns
+`publication_authorized=false`. Even `SHADOW_COMPARABLE` does not prove full
+source immutability or certify a public release.
+
 ## Required remaining certification before live audience recovery
 
 1. Prove a representative real input sample has **unchanged canonical visitor/session and burst classifications** and reconcile every output bucket against a separately computed trusted oracle, not merely structural equality under fixture mocks.
