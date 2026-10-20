@@ -499,3 +499,39 @@ traffic series until a separate source-equivalent 00:05 UTC completed-day
 incremental maintenance mechanism is implemented, benchmarked and
 production proven. A full-series backfill from a pruned 120-day raw
 source will not reproduce the existing certified 131-day shadow history.
+
+## Production historical cutover completed; Cloudflare urllib false-negative verification
+
+On October 20 the operator performed the authorized one-time 131 complete-day
+historical cutover against the exact pinned Traffic production code. SQLite
+reported `COMMITTED`, wrote exactly 131 June11–October19 rows, and verified
+the full published matrix digest
+`84150e4921197efd925fa2d9abccee37154d45a68b6f72e25df57dfc4e2d07b4`.
+The prior 128-row matrix SHA was
+`61de508cb57292ca006f0beb7b535ec91d6ab84f9da1a9e2f9e0251a822bd38b`,
+and the original mode-0600 rollback preimage remains
+`canary-oocB0WuA/v2-public-audience-preimage-20261020T213655198475Z.json`.
+The operator independently read all live SQLite published values, verified 131
+correct UTC dates and totals [756819,86956,37399], and excluded October20
+partial. `/traffic` returned HTTP 200; legitimate project worker timer stayed
+active/enabled, old failed public forge timer inactive/disabled. No full replay
+or public service restart was required.
+
+The original three-layer verifier failed at HTTP **403** from the Cloudflare
+public edge. Follow-up operator read-only diagnostics isolated the issue:
+local canonical FastAPI returned HTTP200 with **all 131 dates and pinned
+checksum PASS** for Python and curl; public AoE2WAR API returned
+HTTP403 specifically to Python `urllib`, with header `Server: cloudflare`,
+but curl from the same server returned HTTP200. Therefore the **database and
+local backend are verified**, while curl's HTTP200 alone did not certify the
+edge JSON. There was no evidence supporting rollback or republish.
+
+The read-only verifier now uses narrowly scoped, HTTPS-only native curl for
+the **exact** `https://aoe2war.com/api/traffic/public` endpoint, retaining
+Python for the exact loopback FastAPI endpoint. It rejects redirects,
+HTTP errors, excessive body size, invalid JSON, unexpected dates/counts,
+and anything lacking the precise 131-day SHA match. This changes neither
+Cloudflare settings nor the site; if edge JSON is stale or rejected,
+verification still fails closed. Deploy just source changes and tests, then
+require live `VERIFIED_PUBLISHED` before marking three-layer cutover closed.
+Future completed-day maintenance is still outstanding in issue #31.
