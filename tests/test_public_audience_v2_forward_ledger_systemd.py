@@ -18,6 +18,24 @@ class PrivateForwardLedgerUnitTests(unittest.TestCase):
         self.assertIn("MemoryMax=512M", content)
         self.assertIn("TimeoutStartSec=50s", content)
         self.assertIn("ReadWritePaths=/mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA", content)
+        # The only live-source exception is the existing WAL shared-memory
+        # sidecar; never give write permission to the source database or dir.
+        self.assertIn(
+            "ReadWritePaths=-/mnt/HC_Volume_105319120/traffic-db/"
+            "traffic_history.sqlite3-shm", content,
+        )
+        self.assertNotIn(
+            "ReadWritePaths=/mnt/HC_Volume_105319120/traffic-db\\n",
+            content,
+        )
+        self.assertNotIn(
+            "ReadWritePaths=/mnt/HC_Volume_105319120/traffic-db/"
+            "traffic_history.sqlite3\\n", content,
+        )
+        self.assertNotIn(
+            "ReadWritePaths=/mnt/HC_Volume_105319120/traffic-db/"
+            "traffic_history.sqlite3-wal", content,
+        )
         self.assertIn("--checkpoint ", content)
         self.assertIn("--ledger ", content)
         self.assertIn("--max-rows 3000", content)
