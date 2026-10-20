@@ -696,3 +696,62 @@ Manual example once merged and deployed:
   --checkpoint /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/checkpoint.sqlite3 \
   --ledger /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ledger.sqlite3
 ```
+
+## Private canonical global-IP behaviour — future PASS1 shadow
+
+`scripts/public_audience_v2_forward_ip_shadow.py` is the next
+incremental building block of issue #31. It updates a separate private
+`future-ip-shadow.sqlite3` (0600) with counts, distinct browser user
+agents, distinct normalized paths and direct-referrer counts for
+**canonical accepted future input events** preserved in
+`future-ledger.sqlite3`. State updates are bounded (default 3,000
+events), transactional, crash-resumable and guarded by the same exclusive
+canary lock as the evidence collector, with the historical source
+checkpoint, canonical rule/code/host hashes, and unchanged public 131-day
+checksum reverified before processing. No published daily counts or
+source raw entries are ever written by this tool.
+
+**Critical ordering barrier:** the forward-ledger BOOTSTRAP scans input
+in timestamp order and may append older source row IDs after newer
+ones. A durable `WHERE source_rowid > cursor` checkpoint is not safe
+until the future collector has completed that bootstrap. Therefore the
+new program's default (read-only) status is
+`BLOCKED_BOOTSTRAP`, and `--advance` **fails closed** until forward
+metadata says `phase=LIVE`. Once phase=LIVE, all pre-cutoff source
+row IDs have been captured and subsequent capture is exclusively in
+ascending source row ID. The shadow can then use idempotent bounded
+rowid pagination without skipping input events. **Never override this
+gate**, including to make a new day appear on the graph sooner.
+
+The actual canonical IP behaviour for a future shadow epoch is the
+**union** of distinct historical+future user agents and paths, while
+additive request/referrer counts sum. This is not the same as adding
+the two epochs' unique-UA and unique-path cardinalities. The sealed
+historical pass-one tables stay immutable; helper
+`merged_ip_behavior(historical, future, host, ip)` implements that
+union and the original framework-route-spam heuristic. The helper is
+for privately validated classification code and must never output
+identifiable host/IP/UA/path details in production receipts.
+Global IP behaviour may reclassify historical sessions when future
+inputs arrive: preserve the certified 131-day sealed contract rather
+than silently revising those days. A fully retroactive canonical
+counterfactual is NOT yet proven.
+
+To inspect safely after deployment (defaults to readonly):
+```bash
+.venv/bin/python3 -m scripts.public_audience_v2_forward_ip_shadow \
+  --source /mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3 \
+  --checkpoint /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/checkpoint.sqlite3 \
+  --ledger /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ledger.sqlite3 \
+  --shadow /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ip-shadow.sqlite3
+```
+
+After the read-only result is `READY_PRIVATE_PASS1`, explicit
+`--advance --approve-private-write --max-rows 3000` processes exactly
+one private bounded batch. Do **not** schedule this tool automatically
+until shadow/backlog behaviour, performance, resource reserves and
+canonical parity fixtures have been independently reviewed.
+This is **not** a full future-day session processor, UTC-day
+completeness test, or public publisher: cross-midnight 30-minute
+sessions, 60-second burst collapse, fixed-now identity semantics and
+late-ingest/dedup proofs still precede any daily publication.
