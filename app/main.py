@@ -1418,6 +1418,7 @@ def api_project_public_audience_series(
         "project_slug": project_slug,
         "coverage_started_at": rows[0]["bucket_day"],
         "coverage_ended_at": rows[-1]["bucket_day"],
+        "archive_calculated_at": rows[-1]["updated_at"],
         "generated_at": iso_now(),
         "semantics": {
             "total_traffic": "Canonical page sessions",
@@ -1432,6 +1433,7 @@ def api_project_public_audience_series(
         "points": [
             {
                 "date": row["bucket_day"],
+                "calculatedAt": row["updated_at"],
                 "values": {
                     "totalTraffic": int(row["total_traffic"]),
                     "suspectedHuman": int(row["suspected_human"]),
