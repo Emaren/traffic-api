@@ -236,3 +236,51 @@ allocator source or prove a giant session can close under the hard
 virtual-memory limit. Any future memory threshold change requires
 independent review of actual RSS and throughput. Keep the legacy
 audience timer disabled, project rollup enabled, and publication held.
+
+## Bounded foreground multi-window PASS2 supervisor
+
+October 20 operator run with existing protected runner, pinned Traffic
+SHA `37733e750a07abdb4f738f9c0a3a4c5577e8da79`, reached
+`p2_raw=4,471,344` (20.68% of 21,618,093), `p2_pages=53,943`,
+`p2_finalized=69,303`, cursor `2026-07-22T02:18:50Z`, using
+189 successful 20K steps in ~9.7 minutes. Maximum peak RSS 302,916 KiB
+at a canonical close of 191,931 events; below the operator-approved
+320MiB post-step soft stop. The run stopped voluntarily with
+`project_worker_priority` when the 30-minute project rollup worker
+started. That is intended behavior, not an incident.
+
+`scripts/public_audience_v2_guarded_supervisor.py` is an
+**operator-started, foreground-only**, finite multi-window supervisor.
+It invokes the existing locked, guarded PASS2-only runner, waits for
+priority project work to finish, and continues only after a successful
+worker/health status. Each child window still enforces the frozen
+source epoch, digest/counts/policy, clean SHA, private lock, disabled
+legacy timer, root/attached volume reserves, 25s internal/35s external
+batch timeouts, 18s per-batch soft stop, 320MiB observed RSS soft
+stop, and 768MiB inherited Linux process virtual-address-space
+backstop. The supervisor additionally checks MemAvailable >=1GiB
+before windows, validates every new mode-0600 receipt and resulting
+checkpoint cursor, and never automatically retries an RSS soft-stop,
+FAILED run, malformed receipt, changed cursor, or unhealthy worker.
+It limits its total foreground lifespan and worker-wait duration; no
+systemd unit or cron schedule is installed. On SIGINT/SSH disconnect,
+the currently running guarded child must not be left unattended:
+use operator SSH session discipline and inspect private receipts.
+
+Example (only after reviewed, exact-SHA GitHub main is cleanly
+fast-forwarded to the VPS):
+
+```bash
+.venv/bin/python3 -m scripts.public_audience_v2_guarded_supervisor \\
+  --source /mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3 \\
+  --state /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/checkpoint.sqlite3 \\
+  --require-sha <exact-reviewed-main-sha> \\
+  --total-seconds 7200 --window-seconds 900 --max-windows 12
+```
+
+This supervisor cannot authorize production publication, does not
+replace independent source/digest and historical semantic parity,
+and must not start the 06:15Z failed public forge. Keep project 30m
+rollup timer enabled and stable. Inspect STOP reason and full source
+digest before touching public series. Historical audience maintenance
+after October 19 remains a separate engineering/publication task.
