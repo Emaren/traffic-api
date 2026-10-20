@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import sqlite3
 import tempfile
 import unittest
@@ -154,6 +155,24 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(
             supervisor.replay.checkpoint_info(self.state)["p2_raw"], "4491344"
         )
+
+    def test_operator_interrupt_kills_child_process_group(self):
+        class FakeProcess:
+            pid = 88319
+            def poll(self):
+                return None
+            def wait(self, timeout=None):
+                return 0
+
+        original = supervisor._ACTIVE_CHILD
+        try:
+            supervisor._ACTIVE_CHILD = FakeProcess()
+            with patch.object(supervisor.os, "killpg") as kill:
+                with self.assertRaisesRegex(RuntimeError, "interrupted"):
+                    supervisor._handle_operator_interrupt(signal.SIGHUP, None)
+                kill.assert_called_once_with(88319, signal.SIGKILL)
+        finally:
+            supervisor._ACTIVE_CHILD = original
 
     def test_state_mode_and_unknown_cursor_refused_before_subprocess(self):
         os.chmod(self.state, 0o644)
