@@ -241,6 +241,49 @@ def advance(raw: Path, checkpoint: Path, *, start: str, end: str,
     }
 
 
+
+def one_ip_behavior(checkpoint: Path, host: str, ip: str) -> dict[str, Any]:
+    """Fixture/engineering-only exact canonical behavior for a single host/IP."""
+    if checkpoint.is_symlink() or not checkpoint.is_file():
+        raise RuntimeError("STOP: no checkpoint")
+    with sqlite3.connect(f"file:{checkpoint.resolve().as_posix()}?mode=ro",
+                         uri=True) as db:
+        db.row_factory = sqlite3.Row
+        info = _metadata(db)
+        if info.get("phase") != "PASS1_COMPLETE":
+            raise RuntimeError("STOP: behavior cannot be read before pass one completes")
+        count = db.execute(
+            "SELECT requests,direct_referrers FROM ip_counts WHERE host=? AND ip=?",
+            (host, ip),
+        ).fetchone()
+        if count is None:
+            raise KeyError("host/IP absent from checkpoint")
+        uas = {row[0] for row in db.execute(
+            "SELECT ua FROM ip_uas WHERE host=? AND ip=?", (host, ip)
+        )}
+        paths = {row[0] for row in db.execute(
+            "SELECT path FROM ip_paths WHERE host=? AND ip=?", (host, ip)
+        )}
+    requests = int(count["requests"])
+    direct = int(count["direct_referrers"])
+    suspicious = (
+        requests >= canonical.ROTATING_UA_ROUTE_SPAM_MIN_REQUESTS
+        and len(uas) >= canonical.ROTATING_UA_ROUTE_SPAM_MIN_UNIQUE_UAS
+        and canonical.ROTATING_UA_ROUTE_SPAM_MIN_UNIQUE_PATHS
+            <= len(paths) <= canonical.ROTATING_UA_ROUTE_SPAM_MAX_UNIQUE_PATHS
+        and all(canonical._is_framework_route_bundle_path(path) for path in paths)
+        and direct / requests >= canonical.ROTATING_UA_ROUTE_SPAM_DIRECT_RATIO
+    )
+    return {
+        "request_count": requests,
+        "unique_uas": len(uas),
+        "unique_paths": len(paths),
+        "route_bundle_paths": sorted(paths),
+        "route_bundle_spam": suspicious,
+    }
+
+
+
 def status(checkpoint: Path) -> dict[str, Any]:
     if checkpoint.is_symlink() or not checkpoint.is_file():
         raise RuntimeError("STOP: no checkpoint")

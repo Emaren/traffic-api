@@ -185,6 +185,12 @@ class CheckpointTests(unittest.TestCase):
                 self.assertEqual(len(paths), expected["unique_paths"])
                 self.assertEqual(sorted(paths), expected["route_bundle_paths"])
                 self.assertEqual(count[1], 4 if ip == "1" else 0)
+                self.assertEqual(v2.one_ip_behavior(self.state, host, ip), expected)
+
+    def test_incomplete_checkpoint_cannot_claim_finished_ip_behavior(self):
+        self.step()
+        with self.assertRaisesRegex(RuntimeError, "before pass one completes"):
+            v2.one_ip_behavior(self.state, "aoe2war.com", "1")
 
     def test_visibility_rule_change_invalidates_existing_checkpoint(self):
         self.step()
