@@ -18,6 +18,7 @@ def normalized(row, *, rules):
         "host": row["host"], "ip": row["ip"], "ua": row["ua"],
         "category": "human", "route_kind": "page",
         "timestamp": datetime.fromisoformat(row["timestamp"]),
+        "timestamp_iso": row["timestamp"],
         "normalized_path": row["normalized_path"],
         "raw_path": row["raw_path"], "referrer_host": row["referrer_host"],
         "line_offset": int(row["line_offset"]), "event_id": row["event_id"],
