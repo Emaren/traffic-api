@@ -19,6 +19,10 @@ def fixture_db(path: Path) -> None:
         );
         CREATE INDEX idx_traffic_entries_timestamp_line_offset
         ON traffic_entries(timestamp,line_offset);
+        CREATE TABLE traffic_visibility_rules (
+            id INTEGER PRIMARY KEY, rule_type TEXT, match_value TEXT,
+            label TEXT, reason TEXT, active INTEGER, created_at TEXT
+        );
         """)
         db.executemany("INSERT INTO traffic_entries VALUES(?,?,?,?,?,?,?,?,?)", [
             ("a", "2026-10-16T00:00:01+00:00", "1", 1, "/", "/", "", "Mozilla", "aoe2war.com"),
@@ -246,11 +250,38 @@ class CheckpointTests(unittest.TestCase):
 
     def test_visibility_rule_change_invalidates_existing_checkpoint(self):
         self.step()
-        with patch.object(v2.canonical, "safe_list_visibility_rules",
-                          return_value=[{"rule_type": "fixture", "active": True}]):
-            with self.assertRaisesRegex(RuntimeError, "input identity changed"):
-                self.step()
+        with sqlite3.connect(self.source) as db:
+            db.execute("INSERT INTO traffic_visibility_rules VALUES(?,?,?,?,?,?,?)",
+                (1, "path", "/x", "Hidden", "fixture", 1, "2026-10-20T00:00:00+00:00"))
+        with self.assertRaisesRegex(RuntimeError, "input identity changed"):
+            self.step()
         self.assertEqual(v2.status(self.state)["raw_scanned"], 2)
+
+    def test_explicit_raw_source_rules_used_without_ambient_config(self):
+        with (
+            patch.object(v2.canonical, "safe_list_visibility_rules",
+                         side_effect=AssertionError("ambient rule loader forbidden")),
+            patch.object(v2, "PERSIST_DB_PATH", self.state),
+        ):
+            with sqlite3.connect(self.source) as db:
+                db.execute("INSERT INTO traffic_visibility_rules VALUES(?,?,?,?,?,?,?)",
+                    (7, "host", "x.example", "Policy", "test", 1, "2026-10-20T00:00:00+00:00"))
+                db.execute("INSERT INTO traffic_visibility_rules VALUES(?,?,?,?,?,?,?)",
+                    (8, "host", "y.example", "Inactive", "test", 0, "2026-10-19T00:00:00+00:00"))
+            self.assertEqual(v2.source_visibility_rules(self.source), [{
+                "id": 7, "rule_type": "host", "match_value": "x.example",
+                "label": "Policy", "reason": "test", "active": True,
+                "created_at": "2026-10-20T00:00:00+00:00",
+            }])
+
+    def test_missing_visibility_schema_fails_closed_without_writing(self):
+        with sqlite3.connect(self.source) as db:
+            db.execute("DROP TABLE traffic_visibility_rules")
+        with self.assertRaisesRegex(sqlite3.OperationalError,
+                                    "no such table: traffic_visibility_rules"):
+            self.step()
+        self.assertFalse(self.state.exists())
+
 
     def test_same_timestamp_and_offset_rows_resume_by_rowid_tiebreak(self):
         with sqlite3.connect(self.source) as db:

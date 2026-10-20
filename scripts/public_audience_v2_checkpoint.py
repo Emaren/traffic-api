@@ -89,6 +89,28 @@ def source_identity(path: Path, start: str, end: str, watermark: int,
     }
 
 
+def source_visibility_rules(source: Path) -> list[dict[str, Any]]:
+    """Read canonical active rules from the EXACT read-only event source.
+    
+    Never use safe_list_visibility_rules(), which silently returns [] on errors
+    and consults an unrelated ambient PERSIST_DB_PATH, possibly modifying it.
+    """
+    with closing(source_connection(source)) as conn:
+        rows = conn.execute(
+            """SELECT id,rule_type,match_value,label,reason,active,created_at
+               FROM traffic_visibility_rules WHERE active=1
+               ORDER BY active DESC, created_at DESC, id DESC"""
+        ).fetchall()
+    return [
+        {
+            "id": int(r["id"]), "rule_type": r["rule_type"],
+            "match_value": r["match_value"], "label": r["label"],
+            "reason": r["reason"], "active": bool(r["active"]),
+            "created_at": r["created_at"],
+        } for r in rows
+    ]
+
+
 def select_page(source: sqlite3.Connection, info: dict[str, str],
                 hosts: list[str], limit: int) -> list[sqlite3.Row]:
     # The durable keyset cursor is initialized to (start, MIN_INT64, 0)
@@ -144,7 +166,7 @@ def advance(raw: Path, checkpoint: Path, *, start: str, end: str,
     if end <= start or end > canonical.utc_midnight(datetime.now(timezone.utc).date()).isoformat():
         raise RuntimeError("STOP: full UTC days only")
     hosts = canonical.project_hosts()
-    rules = canonical.safe_list_visibility_rules(active_only=True)
+    rules = source_visibility_rules(raw)
     if not hosts:
         raise RuntimeError("STOP: no project hosts")
     new = not checkpoint.exists()

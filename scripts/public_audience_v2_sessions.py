@@ -95,7 +95,7 @@ def verified_state(raw: Path, checkpoint: Path, info: dict[str, str]) -> tuple[l
     if info.get("phase") not in {"PASS1_COMPLETE", "PASS2_RUNNING", "PASS2_COMPLETE"}:
         raise RuntimeError("STOP: full pass-one required before session pass")
     hosts = canonical.project_hosts()
-    rules = canonical.safe_list_visibility_rules(active_only=True)
+    rules = v2.source_visibility_rules(raw)
     expected = v2.source_identity(
         raw, info["start"], info["end"], int(info["watermark"]), hosts, rules,
     )

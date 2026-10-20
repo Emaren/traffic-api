@@ -53,6 +53,10 @@ class CanonicalStreamingParityTests(unittest.TestCase):
                 );
                 CREATE INDEX idx_traffic_entries_timestamp_line_offset
                 ON traffic_entries(timestamp,line_offset);
+                CREATE TABLE traffic_visibility_rules (
+            id INTEGER PRIMARY KEY, rule_type TEXT, match_value TEXT,
+            label TEXT, reason TEXT, active INTEGER, created_at TEXT
+        );
             """)
             rows = [
                 ("a", "2026-10-16T00:00:01+00:00", "1", 1, "/", "/", "", "Mozilla", "aoe2war.com"),
