@@ -257,13 +257,29 @@ def pass2_step(raw: Path, checkpoint: Path, *, max_rows: int = 2000,
         finalized = 0
         pages = 0
         accepted = 0
+        # Metrics never contain IPs, UAs, paths, or serialized events.
+        metrics = {
+            "max_closed_session_events": 0,
+            "max_close_collect_seconds": 0.0,
+            "max_close_classify_seconds": 0.0,
+            "max_flushed_bucket_sessions": 0,
+            "max_bucket_classify_seconds": 0.0,
+        }
         now = datetime.fromisoformat(info["p2_now"])
         gap = timedelta(minutes=SESSION_GAP_MINUTES)
         cache: dict[tuple[str, str], dict[str, Any]] = {}
 
         def close(key: tuple[str, str, str], state: dict[str, Any]) -> None:
             nonlocal finalized
+            collecting = time.monotonic()
             events = collect_session_events(db, key, state["events"])
+            metrics["max_close_collect_seconds"] = max(
+                metrics["max_close_collect_seconds"],
+                round(time.monotonic() - collecting, 4),
+            )
+            metrics["max_closed_session_events"] = max(
+                metrics["max_closed_session_events"], len(events),
+            )
             if not events:
                 raise RuntimeError("STOP: open session has no canonical events")
             host_ip = (events[0]["host"], events[0]["ip"])
@@ -271,8 +287,13 @@ def pass2_step(raw: Path, checkpoint: Path, *, max_rows: int = 2000,
                 if len(cache) >= 4096:
                     cache.clear()
                 cache[host_ip] = ip_behavior(db, *host_ip)
+            classifying = time.monotonic()
             session = canonical.build_single_session(
                 events, now=now, ip_behavior=cache[host_ip],
+            )
+            metrics["max_close_classify_seconds"] = max(
+                metrics["max_close_classify_seconds"],
+                round(time.monotonic() - classifying, 4),
             )
             bucket = state["bucket_id"]
             db.execute(
@@ -312,7 +333,15 @@ def pass2_step(raw: Path, checkpoint: Path, *, max_rows: int = 2000,
                 if not sessions:
                     continue
                 daily: dict[str, list[int]] = {}
+                metrics["max_flushed_bucket_sessions"] = max(
+                    metrics["max_flushed_bucket_sessions"], len(sessions),
+                )
+                classifying_bucket = time.monotonic()
                 pages += canonical.finalize_bucket(sessions, daily)
+                metrics["max_bucket_classify_seconds"] = max(
+                    metrics["max_bucket_classify_seconds"],
+                    round(time.monotonic() - classifying_bucket, 4),
+                )
                 for day, (total, suspected, confirmed) in daily.items():
                     db.execute(
                         """INSERT INTO v2_daily VALUES(?,?,?,?)
@@ -413,6 +442,7 @@ def pass2_step(raw: Path, checkpoint: Path, *, max_rows: int = 2000,
         "raw_source_parity": bool(complete and updates["p2_digest"] == info["p1_digest"]),
         "publication_authorized": False,
         "semantic_equivalence_certified": False,
+        "performance": metrics,
     }
 
 
