@@ -520,7 +520,7 @@ def _load_new_eligible_path_rows(
             ip,
             normalized_path,
             COUNT(*) AS hits
-        FROM traffic_entries
+        FROM traffic_entries NOT INDEXED
         WHERE host IN ({placeholders})
           AND rowid > ?
           AND rowid <= ?
