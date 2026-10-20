@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+import sqlite3
+from unittest.mock import patch
 
 from scripts import public_audience_v2_parity as parity
 
@@ -39,6 +41,74 @@ class ParityRulesTests(unittest.TestCase):
         result=parity.compare_history(shadow,old)
         self.assertEqual(result["status"],"BLOCKED")
         self.assertIn("2026-10-13",result["hierarchy_violations"])
+
+
+class LateEligibleSourceTests(unittest.TestCase):
+    def setUp(self):
+        self.db = sqlite3.connect(":memory:")
+        self.db.row_factory = sqlite3.Row
+        self.db.execute("""
+            CREATE TABLE traffic_entries (
+                event_id TEXT, timestamp TEXT, ip TEXT, line_offset INTEGER,
+                raw_path TEXT, normalized_path TEXT, referrer_host TEXT,
+                ua TEXT, host TEXT
+            )
+        """)
+
+    def tearDown(self):
+        self.db.close()
+
+    def add(self, day, host="aoe2war.com", path="/eligible"):
+        self.db.execute(
+            """INSERT INTO traffic_entries
+               (event_id,timestamp,ip,line_offset,raw_path,normalized_path,
+                referrer_host,ua,host)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            ("id", day + "T12:00:00+00:00", "127.0.0.1", 1,
+             path, path, "", "Mozilla/5.0", host),
+        )
+
+    @staticmethod
+    def canonical_normalizer(row, *, rules):
+        return None if row["raw_path"] == "/hidden" else {"accepted": True}
+
+    def check(self, *, max_candidates=100_000):
+        return parity.has_late_eligible_source_rows(
+            self.db, start="2026-05-22T00:00:00+00:00",
+            end="2026-10-20T00:00:00+00:00", watermark=1,
+            hosts=["aoe2war.com"], rules=[],
+            max_candidates=max_candidates,
+        )
+
+    def test_other_projects_outside_window_and_hidden_events_do_not_block(self):
+        self.add("2026-10-19")  # Original in-window row at frozen watermark.
+        self.add("2026-10-19", "unrelated.example")
+        self.add("2026-10-20")  # Current UTC day is outside frozen history.
+        self.add("2026-05-21")  # Before historical start.
+        self.add("2026-10-19", path="/hidden")
+        with patch.object(parity.canonical, "normalize_row",
+                          side_effect=self.canonical_normalizer):
+            self.assertFalse(self.check())
+            self.add("2026-10-19")
+            self.assertTrue(self.check())
+
+    def test_late_candidate_scan_budget_fails_closed(self):
+        self.add("2026-10-18")
+        self.add("2026-10-19", path="/hidden")
+        self.add("2026-10-19", path="/hidden")
+        with patch.object(parity.canonical, "normalize_row",
+                          side_effect=self.canonical_normalizer):
+            with self.assertRaisesRegex(RuntimeError, "budget exceeded"):
+                self.check(max_candidates=1)
+
+    def test_rejects_empty_hosts_or_nonpositive_budget(self):
+        self.add("2026-10-19")
+        with self.assertRaisesRegex(RuntimeError, "invalid late-arrival"):
+            parity.has_late_eligible_source_rows(
+                self.db, start="2026-05-22T00:00:00+00:00",
+                end="2026-10-20T00:00:00+00:00",
+                watermark=1, hosts=[], rules=[],
+            )
 
 
 if __name__=="__main__":
