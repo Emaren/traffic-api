@@ -10,6 +10,7 @@ from unittest.mock import patch
 from scripts import public_audience_v2_checkpoint as stage1
 from scripts import public_audience_v2_sessions as stage2
 from scripts import rebuild_public_audience_archive as canonical
+from app.services.traffic import sessions as actual_sessions
 
 
 def normalized(row, *, rules):
@@ -111,6 +112,32 @@ class CanonicalStreamingParityTests(unittest.TestCase):
         self.assertEqual(result["total_page_sessions"], stats["page_sessions"])
         with self.assertRaisesRegex(RuntimeError, "already complete"):
             stage2.pass2_step(self.raw, self.checkpoint)
+
+    def test_real_canonical_session_builder_and_burst_rules_match_chunked_replay(self):
+        # Exercise the actual production classifier rather than the deterministic
+        # stub used by the focused restart/cursor tests.
+        def actual_builder(events, *, now, ip_behavior):
+            return actual_sessions.build_single_session(
+                events, now=now, ip_behavior=ip_behavior
+            )
+        with (
+            patch.object(canonical, "build_single_session", side_effect=actual_builder),
+            patch.object(canonical, "collapse_distributed_bursts",
+                         side_effect=actual_sessions.collapse_distributed_bursts),
+            patch.object(canonical, "apply_known_visitor_confirmation",
+                         side_effect=actual_sessions.apply_known_visitor_confirmation),
+            patch.object(canonical, "_is_known_singapore_cloud_fanout",
+                         side_effect=actual_sessions._is_known_singapore_cloud_fanout),
+        ):
+            golden, stats = self.golden()
+            self.first_pass(page=3)
+            while True:
+                result = stage2.pass2_step(self.raw, self.checkpoint, max_rows=2)
+                if result["phase"] == "PASS2_COMPLETE":
+                    break
+            self.assertEqual(stage2.shadow_daily(self.checkpoint), golden)
+            self.assertEqual(result["total_finalized"], stats["finalized_sessions"])
+            self.assertEqual(result["total_page_sessions"], stats["page_sessions"])
 
     def test_failed_mid_batch_keeps_previous_cursor_and_daily_totals(self):
         self.first_pass()
