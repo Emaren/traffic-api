@@ -91,19 +91,29 @@ def source_identity(path: Path, start: str, end: str, watermark: int,
 
 def select_page(source: sqlite3.Connection, info: dict[str, str],
                 hosts: list[str], limit: int) -> list[sqlite3.Row]:
+    # The durable keyset cursor is initialized to (start, MIN_INT64, 0)
+    # and always advances strictly within [start, end). Its composite
+    # comparison already enforces the initial start boundary.
+    #
+    # Do NOT add a second 'timestamp >= start' predicate here:
+    # SQLite 3.12+ may anchor the timestamp/offset index to that old
+    # boundary and re-scan the entire prefix on every resumed page.
+    # EXPLAIN must show an index seek from (timestamp, line_offset).
+    if not (info["start"] <= info["cursor_time"] < info["end"]):
+        raise RuntimeError("STOP: checkpoint cursor outside source UTC bounds")
     placeholders = ",".join("?" for _ in hosts)
     sql = f"""
     SELECT rowid AS source_rowid, event_id, timestamp, ip, line_offset,
            raw_path, normalized_path, referrer_host, ua, host
     FROM traffic_entries INDEXED BY idx_traffic_entries_timestamp_line_offset
-    WHERE timestamp >= ? AND timestamp < ? AND rowid <= ?
+    WHERE timestamp < ? AND rowid <= ?
       AND host IN ({placeholders})
       AND ({_non_browser_chain_firehose_sql()})
       AND (timestamp, line_offset, rowid) > (?, ?, ?)
     ORDER BY timestamp ASC, line_offset ASC, rowid ASC LIMIT ?
     """
     return source.execute(sql, (
-        info["start"], info["end"], int(info["watermark"]), *hosts,
+        info["end"], int(info["watermark"]), *hosts,
         info["cursor_time"], int(info["cursor_offset"]),
         int(info["cursor_rowid"]), limit,
     )).fetchall()
