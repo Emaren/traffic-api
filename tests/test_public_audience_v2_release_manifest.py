@@ -36,6 +36,36 @@ class ReleaseManifestQualificationTests(unittest.TestCase):
         self.assertEqual(report["full_day_totals"], [262, 131, 131])
         self.assertNotIn("2026-06-10", report["candidate_daily"])
 
+    def test_retention_advance_is_not_a_source_falsification(self):
+        report = release.verify_retained_source_boundary(
+            "2026-06-10T13:48:00+00:00"
+        )
+        self.assertTrue(report["live_retention_has_advanced"])
+        self.assertEqual(report["live_source_earliest_observed_utc"],
+                         "2026-06-10T13:48:00+00:00")
+        self.assertEqual(report["frozen_source_earliest_observed_utc"],
+                         release.FROZEN_EARLIEST)
+        self.assertTrue(report["raw_source_is_mutable_retention_window"])
+
+    def test_exact_original_frozen_boundary_still_valid(self):
+        report = release.verify_retained_source_boundary(release.FROZEN_EARLIEST)
+        self.assertFalse(report["live_retention_has_advanced"])
+
+    def test_new_older_source_reappearance_is_not_silently_allowed(self):
+        with self.assertRaisesRegex(RuntimeError, "outside frozen"):
+            release.verify_retained_source_boundary(
+                "2026-06-09T22:00:00+00:00"
+            )
+
+    def test_empty_naive_and_end_outside_source_rejected(self):
+        for candidate in (
+            None, "", "2026-06-10T13:48:00",
+            "2026-10-20T00:00:00+00:00",
+        ):
+            with self.subTest(candidate=candidate):
+                with self.assertRaises(RuntimeError):
+                    release.verify_retained_source_boundary(candidate)
+
     def test_existing_legacy_mismatch_outside_boundary_is_blocked(self):
         legacy = copy.deepcopy(self.legacy)
         legacy["2026-08-02"][0] += 1
