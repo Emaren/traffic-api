@@ -10,6 +10,7 @@ import sqlite3
 import sys
 import time
 from collections import defaultdict
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -146,11 +147,11 @@ def advance(raw: Path, checkpoint: Path, *, start: str, end: str,
         raise RuntimeError("STOP: checkpoint not a file")
 
     tick = time.monotonic()
-    with source_connection(raw) as src:
+    with closing(source_connection(raw)) as src:
         src.set_progress_handler(
             lambda: int(time.monotonic() - tick > budget_seconds), 1000
         )
-        with sqlite3.connect(checkpoint, timeout=0.25) as state:
+        with closing(sqlite3.connect(checkpoint, timeout=0.25)) as state:
             state.row_factory = sqlite3.Row
             if new:
                 # Creates staging tables only. No connection to publication tables.
@@ -193,7 +194,9 @@ def advance(raw: Path, checkpoint: Path, *, start: str, end: str,
                 lambda: {"count": 0, "direct": 0, "uas": set(), "paths": set()}
             )
             accepted = 0
-            for row in rows:
+            for idx, row in enumerate(rows):
+                if idx % 128 == 0 and time.monotonic() - tick > budget_seconds:
+                    raise RuntimeError("STOP: pass-one CPU time budget exhausted")
                 item = canonical.normalize_row(row, rules=rules)
                 if item is None:
                     continue
@@ -264,8 +267,8 @@ def one_ip_behavior(checkpoint: Path, host: str, ip: str) -> dict[str, Any]:
     """Fixture/engineering-only exact canonical behavior for a single host/IP."""
     if checkpoint.is_symlink() or not checkpoint.is_file():
         raise RuntimeError("STOP: no checkpoint")
-    with sqlite3.connect(f"file:{checkpoint.resolve().as_posix()}?mode=ro",
-                         uri=True) as db:
+    with closing(sqlite3.connect(f"file:{checkpoint.resolve().as_posix()}?mode=ro",
+                                 uri=True)) as db:
         db.row_factory = sqlite3.Row
         info = _metadata(db)
         if info.get("phase") != "PASS1_COMPLETE":
@@ -305,8 +308,8 @@ def one_ip_behavior(checkpoint: Path, host: str, ip: str) -> dict[str, Any]:
 def status(checkpoint: Path) -> dict[str, Any]:
     if checkpoint.is_symlink() or not checkpoint.is_file():
         raise RuntimeError("STOP: no checkpoint")
-    with sqlite3.connect(f"file:{checkpoint.resolve().as_posix()}?mode=ro",
-                         uri=True) as state:
+    with closing(sqlite3.connect(f"file:{checkpoint.resolve().as_posix()}?mode=ro",
+                                 uri=True)) as state:
         info = dict(state.execute("SELECT key,value FROM metadata"))
     if info.get("schema") != VERSION:
         raise RuntimeError("STOP: unrecognized state")

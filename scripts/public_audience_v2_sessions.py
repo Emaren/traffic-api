@@ -8,6 +8,7 @@ import json
 import sqlite3
 import time
 from collections import Counter, defaultdict
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -108,7 +109,7 @@ def pass2_step(raw: Path, checkpoint: Path, *, max_rows: int = 2000,
         raise RuntimeError("STOP: cannot use raw source as checkpoint")
 
     tick = time.monotonic()
-    with v2.source_connection(raw) as src, sqlite3.connect(checkpoint, timeout=0.25) as db:
+    with closing(v2.source_connection(raw)) as src, closing(sqlite3.connect(checkpoint, timeout=0.25)) as db:
         src.set_progress_handler(lambda: int(time.monotonic()-tick > budget_seconds), 1000)
         db.row_factory = sqlite3.Row
         info = v2._metadata(db)
@@ -234,7 +235,9 @@ def pass2_step(raw: Path, checkpoint: Path, *, max_rows: int = 2000,
                 db.execute("DELETE FROM v2_closed WHERE bucket=?", (bucket,))
                 open_count.pop(bucket, None)
 
-        for row in rows:
+        for idx, row in enumerate(rows):
+            if idx % 128 == 0 and time.monotonic() - tick > budget_seconds:
+                raise RuntimeError("STOP: pass-two CPU time budget exhausted")
             item = canonical.normalize_row(row, rules=rules)
             if item is None:
                 continue
@@ -324,8 +327,8 @@ def pass2_step(raw: Path, checkpoint: Path, *, max_rows: int = 2000,
 def shadow_daily(checkpoint: Path) -> dict[str, list[int]]:
     if checkpoint.is_symlink() or not checkpoint.is_file():
         raise RuntimeError("STOP: no private checkpoint")
-    with sqlite3.connect(f"file:{checkpoint.resolve().as_posix()}?mode=ro",
-                         uri=True) as db:
+    with closing(sqlite3.connect(f"file:{checkpoint.resolve().as_posix()}?mode=ro",
+                                 uri=True)) as db:
         info = dict(db.execute("SELECT key,value FROM metadata"))
         if info.get("phase") != "PASS2_COMPLETE":
             raise RuntimeError("STOP: daily shadow report requires complete pass two")
