@@ -14,7 +14,7 @@ import os
 import sqlite3
 import stat
 import sys
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -247,15 +247,34 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
     lock = args.state.parent / ".canary.lock"
     with exclusive_file_lock(lock):
         candidate = validate_candidate(args.state, args.backup)
-        with exclusive_file_lock(ROLLUP_LOCK, create=False) if args.apply else closing(None):
+        with exclusive_file_lock(ROLLUP_LOCK, create=False) if args.apply else nullcontext():
             require(guard.worker_idle(), "independent project daily worker busy")
             if args.apply:
-                # First check still-available live source/policy/late arrivals
-                # and ensure legacy 128-row snapshot matches frozen release data.
-                evidence = manifest.inspect(args.source, args.state)
-                require(evidence["full_day_sha256"] == EXPECTED_CANDIDATE_SHA
-                        and evidence["legacy_sha256"] == EXPECTED_LEGACY_SHA,
-                        "release manifest/legacy preimage no longer approved")
+                # The first application requires the *entire* baseline/late-source
+                # release manifest. Repeats may be exact no-ops, but must not
+                # change any already published rows or write timestamps.
+                with closing(sqlite3.connect(
+                    f"file:{args.source.resolve().as_posix()}?mode=ro",
+                    uri=True, timeout=2,
+                )) as existing_db:
+                    previous_sha = manifest.sha(audience_matrix(
+                        public_rows(existing_db)
+                    ))
+                if previous_sha == EXPECTED_LEGACY_SHA:
+                    evidence = manifest.inspect(args.source, args.state)
+                    require(evidence["full_day_sha256"] == EXPECTED_CANDIDATE_SHA
+                            and evidence["legacy_sha256"] == EXPECTED_LEGACY_SHA,
+                            "release manifest/legacy preimage no longer approved")
+                elif previous_sha == EXPECTED_CANDIDATE_SHA:
+                    # A safe repeated invocation only needs to prove the same
+                    # backed-up, frozen candidate remains installed. No writes.
+                    guard.verify_frozen(
+                        args.source, args.state, guard.checkpoint_info(args.state)
+                    )
+                else:
+                    raise RuntimeError(
+                        "STOP: public archive changed; release CAS refused"
+                    )
                 with closing(sqlite3.connect(
                     f"file:{args.source.resolve().as_posix()}?mode=rw",
                     uri=True, timeout=5,
