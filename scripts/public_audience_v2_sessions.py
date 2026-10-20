@@ -264,7 +264,7 @@ def pass2_step(raw: Path, checkpoint: Path, *, max_rows: int = 2000,
                 del open_map[key]
             # canonical stream_sessions closes open sessions at EOF, then
             # flushes all buckets in ascending order.
-            flush(datetime.max.replace(tzinfo=timezone.utc))
+            flush(datetime.fromisoformat(info["end"]) + timedelta(days=1))
             rest = db.execute("SELECT COUNT(*) FROM v2_closed").fetchone()[0]
             if rest:
                 raise RuntimeError("STOP: unfinished burst buckets at end-of-input")
