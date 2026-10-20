@@ -135,6 +135,34 @@ class CanonicalStreamingParityTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "requires complete"):
             stage2.shadow_daily(self.checkpoint)
 
+    def test_changed_raw_row_between_passes_denies_final_shadow_result(self):
+        self.first_pass()
+        with sqlite3.connect(self.raw) as db:
+            db.execute(
+                "UPDATE traffic_entries SET normalized_path=? WHERE event_id=?",
+                ("/historical-rewrite", "c"),
+            )
+        with self.assertRaisesRegex(RuntimeError, "source passes differ"):
+            while True:
+                result=stage2.pass2_step(self.raw, self.checkpoint, max_rows=2)
+                if result["phase"] == "PASS2_COMPLETE":
+                    break
+        with self.assertRaisesRegex(RuntimeError, "requires complete"):
+            stage2.shadow_daily(self.checkpoint)
+
+    def test_changed_source_count_or_digest_after_finished_pass_denies_shadow(self):
+        self.first_pass()
+        while True:
+            report=stage2.pass2_step(self.raw, self.checkpoint, max_rows=3)
+            if report["phase"] == "PASS2_COMPLETE":
+                break
+        expected=stage2.shadow_daily(self.checkpoint)
+        with sqlite3.connect(self.checkpoint) as db:
+            db.execute("UPDATE metadata SET value=? WHERE key='p2_digest'", ("0"*64,))
+        with self.assertRaisesRegex(RuntimeError, "digest mismatch"):
+            stage2.shadow_daily(self.checkpoint)
+        self.assertTrue(expected)
+
     def test_new_append_is_out_of_scope_and_cannot_change_closed_snapshot(self):
         self.first_pass()
         with sqlite3.connect(self.raw) as db:
