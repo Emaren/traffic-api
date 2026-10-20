@@ -447,3 +447,55 @@ VPS dry-run, original-row backup and rollback exercise. Existing
 UTC completed-day incremental maintenance architecture before it may
 be described as live/current. This publisher does not implement that
 architecture. Missing raw days must remain **unknown**, not zero.
+
+## First protected historical cutover: operator deployment and rollback
+
+This source branch adds a standalone `scripts/public_audience_v2_atomic_rollback.py`
+to restore the exact 128 historic prepublication rows and original
+`updated_at` timestamps from the output `backup_file` JSON of the initial
+cutover. Rollback verifies the whole private 0600 receipt (128 dates, source
+matrix SHA, rows SHA, row types and historical range); requires explicit
+`--approval-phrase 'RESTORE AOE2WAR PRE-PUBLICATION 128-DAY AUDIENCE'`,
+pinned clean Git release, correct live database, good timer/resource state,
+exclusive locks on canary and existing project rollup lock, and atomic
+`BEGIN IMMEDIATE` compare-and-swap against the 131-day published
+candidate SHA before restoring 128 exact old rows. It refuses to override
+a subsequently updated/mismatched archive; repeat identical rollback is
+read-only. This fallback deliberately restores the **stale 128-day archive**
+rather than claiming that it repairs underlying live raw history.
+
+The separate read-only
+`scripts/public_audience_v2_verify_published.py` requires consistent
+**131 dates with the exact approved daily checksum across the SQLite public
+table, local FastAPI endpoint and AoE2WAR public JSON endpoint**
+(`https://aoe2war.com/api/traffic/public`). It refuses absent dates,
+duplicates, unverified partial days, hierarchy violations, wrong count
+matrices and backend rows published before midnight at UTC end-of-day.
+Successful output is `VERIFIED_PUBLISHED` and is not proof of the
+long-term daily maintenance. The AoE2WAR Next.js `app/traffic/page.tsx`
+loads this data dynamically from `lib/publicTraffic.ts`; neither
+frontend source promotion nor traffic-api service restart is required
+**provided** the live endpoint remains on the same configured SQLite
+source and the public network response verifies it.
+
+Operator steps must remain a two-paste workflow:
+(1) fast-forward from the previously exact clean Traffic SHA, check
+exact reviewed files, full unit tests on actual VPS venv, hold the old
+public timer, verify the legitimate project timer, read-only manifest
+and publisher PREVIEW, and record old/current candidate hash; (2) on
+the explicitly operator-approved *narrower* 131-day historical window,
+call publisher `--apply --approval-phrase` once while project worker is
+idle, preserve printed `backup_file` path and receipt, and validate the
+real DB/FastAPI/AoE2WAR web APIs using the read-only publication verifier.
+The public API's cache may retain an old response for a short interval;
+do not undo an otherwise valid SQLite publication merely because an
+edge cache has not refreshed yet. Operator should inspect any stale
+result and re-verify after cache expiry before deciding to rollback.
+
+Do **not** enable the 06:15 failed legacy full-forge timer, do **not**
+confuse the enabled 30-minute project rollup timer with audience
+maintenance, and do **not** call June11–Oct19 a continuously current
+traffic series until a separate source-equivalent 00:05 UTC completed-day
+incremental maintenance mechanism is implemented, benchmarked and
+production proven. A full-series backfill from a pruned 120-day raw
+source will not reproduce the existing certified 131-day shadow history.
