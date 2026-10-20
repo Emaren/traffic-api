@@ -25,6 +25,21 @@ MIN_AVAILABLE_KIB = 1_048_576
 AS_LIMIT_BYTES = 786_432 * 1024
 EXPECTED_FIRST_CURSOR = 4_471_344
 
+_ACTIVE_CHILD: subprocess.Popen | None = None
+
+
+def _handle_operator_interrupt(signum: int, _frame: object) -> None:
+    """Never detach a private replay writer from the operator SSH session."""
+    child = _ACTIVE_CHILD
+    if child is not None and child.poll() is None:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait(timeout=10)
+        except (ProcessLookupError, ChildProcessError):
+            pass
+    raise RuntimeError("STOP: operator SSH/session signal interrupted foreground replay")
+
+
 
 def require_memory() -> None:
     for line in Path("/proc/meminfo").read_text().splitlines():
@@ -96,6 +111,7 @@ def wait_for_worker(state: Path, deadline: float, *, max_wait_seconds: int,
 
 
 def run(args: argparse.Namespace) -> int:
+    global _ACTIVE_CHILD
     repo = Path(__file__).resolve().parents[1]
     state = args.state
     source = args.source.resolve(strict=True)
@@ -185,14 +201,18 @@ def run(args: argparse.Namespace) -> int:
             command, cwd=repo, start_new_session=True,
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
         )
+        _ACTIVE_CHILD = proc
         try:
-            _out, stderr = proc.communicate(timeout=args.window_seconds + 65)
-        except subprocess.TimeoutExpired as exc:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.communicate()
-            raise RuntimeError(
-                "STOP: full replay subprocess group exceeded supervised deadline"
-            ) from exc
+            try:
+                _out, _stderr = proc.communicate(timeout=args.window_seconds + 65)
+            except subprocess.TimeoutExpired as exc:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.communicate()
+                raise RuntimeError(
+                    "STOP: full replay subprocess group exceeded supervised deadline"
+                ) from exc
+        finally:
+            _ACTIVE_CHILD = None
         replay.require(proc.returncode == 0,
                        "inner runner failed; inspect private FAIL receipt")
         after = {
@@ -252,6 +272,8 @@ def run(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, _handle_operator_interrupt)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--state", type=Path, required=True)
