@@ -663,3 +663,36 @@ Only after a successful hardened service test and reviewed risks may
 the operator explicitly enable the PRIVATE 5-minute source-capture
 timer. The main 131-day audience counts and timer remain unchanged;
 automatic canonical day publication is a distinct unfinished task #31.
+
+## 2026-10-20 23:26 UTC — private timer recurs normally, forward readiness remains provisional
+
+Production at `786664a2f6b8a3290e6b3f2f3d14fe61afb6a1a6`
+confirmed private evidence capture timer `ActiveState=active`,
+`SubState=waiting`, `UnitFileState=enabled`, last triggered
+`23:24:15 UTC`, **next scheduled `23:29:27 UTC`**. Service was
+successfully executed at `23:24:16 UTC` and retained another 3,000
+source events, for 9,000 cumulative private events, mode 0600.
+Original 131-day historical site/API/checksum remained
+`VERIFIED_PUBLISHED` and old forge timer stays disabled. The earlier
+`NextElapseUSecMonotonic=infinity` displayed immediately after
+activation resolved once the first service completed; no timer fix needed.
+
+The new `scripts/public_audience_v2_forward_readiness.py` is a
+READ-ONLY audit of the protected source, full historical checkpoint,
+private ledger and sealed historical public-day checksum. It verifies
+ledger metadata, number of retained events, canonical source identity
+and bound timestamp-index date range. While `BOOTSTRAP`, live row-ID
+scan coverage is explicitly **unknown**; once phase becomes `LIVE`,
+the tool reports an **unscanned row-ID span upper bound**, *not a count
+of eligible events or an ingestion lateness guarantee*. It cannot
+declare any full UTC day complete or authorize new-day publication.
+Errors fail closed. This is a manual audit/check utility, not a new
+worker, and does not modify systemd units or public SQLite tables.
+
+Manual example once merged and deployed:
+```bash
+.venv/bin/python3 -m scripts.public_audience_v2_forward_readiness \
+  --source /mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3 \
+  --checkpoint /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/checkpoint.sqlite3 \
+  --ledger /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ledger.sqlite3
+```
