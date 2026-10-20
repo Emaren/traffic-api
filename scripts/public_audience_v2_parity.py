@@ -80,7 +80,10 @@ def has_late_eligible_source_rows(
     query = f"""
         SELECT rowid AS source_rowid, event_id, timestamp, ip, line_offset,
                raw_path, normalized_path, referrer_host, ua, host
-        FROM traffic_entries
+        -- Force an INTEGER PRIMARY KEY seek above the frozen rowid,
+        -- rather than a catastrophic timestamp-index scan from May 22.
+        -- NOT INDEXED still permits SQLite's native rowid B-tree lookup.
+        FROM traffic_entries NOT INDEXED
         WHERE rowid > ? AND timestamp >= ? AND timestamp < ?
           AND host IN ({placeholders})
           AND ({_non_browser_chain_firehose_sql()})
