@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
+import subprocess
 import sqlite3
 import tempfile
 import unittest
@@ -126,6 +128,34 @@ class RecoveryGuardsTests(unittest.TestCase):
         events = [json.loads(line) for line in receipts[0].read_text().splitlines()]
         self.assertEqual(events[-1]["reason"], "project_worker_priority")
         self.assertEqual(runner.checkpoint_info(self.state)["p2_raw"], "51344")
+
+    def test_outer_watchdog_kills_entire_replay_process_group(self):
+        class FakeProcess:
+            pid = 12345
+
+            def __init__(self):
+                self.calls = 0
+
+            def communicate(self, timeout=None):
+                self.calls += 1
+                if self.calls == 1:
+                    raise subprocess.TimeoutExpired(cmd="test", timeout=43)
+                return "", ""
+
+        process = FakeProcess()
+        with (
+            patch.object(runner.subprocess, "Popen", return_value=process),
+            patch.object(runner.os, "killpg") as kill,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "process group"):
+                runner.run_one(
+                    self.raw, self.state, max_rows=20000,
+                    budget_seconds=25, hard_seconds=35,
+                    metrics_path=self.dir / "metrics",
+                    repo=self.dir,
+                )
+            kill.assert_called_once_with(12345, signal.SIGKILL)
+        self.assertEqual(process.calls, 2)
 
     def test_world_readable_checkpoint_denied(self):
         os.chmod(self.state, 0o644)
