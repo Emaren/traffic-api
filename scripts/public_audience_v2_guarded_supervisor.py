@@ -81,12 +81,12 @@ def read_window_receipt(path: Path, *, source_sha: str) -> dict:
     }
 
 
-def wait_for_worker(deadline: float, *, max_wait_seconds: int,
+def wait_for_worker(state: Path, deadline: float, *, max_wait_seconds: int,
                     wait_seconds: int) -> bool:
     started = time.monotonic()
     while not replay.worker_idle():
         replay.require_worker_priority()
-        replay.resource_headroom(_STATE, 12, 6)
+        replay.resource_headroom(state, 12, 6)
         require_memory()
         if (time.monotonic() - started >= max_wait_seconds
                 or time.monotonic() + wait_seconds >= deadline):
@@ -95,15 +95,8 @@ def wait_for_worker(deadline: float, *, max_wait_seconds: int,
     return True
 
 
-# Set only during the single supervised run. Used to share source identity
-# with the passive service-wait check without mutating database state.
-_STATE = Path("/dev/null")
-
-
 def run(args: argparse.Namespace) -> int:
-    global _STATE
     repo = Path(__file__).resolve().parents[1]
-    _STATE = args.state
     state = args.state
     source = args.source.resolve(strict=True)
     replay.require(not state.is_symlink() and state.is_file(),
@@ -147,7 +140,7 @@ def run(args: argparse.Namespace) -> int:
     deadline = time.monotonic() + args.total_seconds
     last_cursor = initial
     windows = 0
-    reason = "total_budget"
+    reason = "max_windows"
 
     while windows < args.max_windows:
         if time.monotonic() + args.window_seconds + 60 >= deadline:
@@ -165,7 +158,7 @@ def run(args: argparse.Namespace) -> int:
             break
 
         if not wait_for_worker(
-            deadline, max_wait_seconds=args.worker_wait_seconds,
+            state, deadline, max_wait_seconds=args.worker_wait_seconds,
             wait_seconds=args.worker_poll_seconds,
         ):
             reason = "worker_wait_limit"
@@ -254,7 +247,7 @@ def run(args: argparse.Namespace) -> int:
         "publication_authorized": False,
     }, sort_keys=True), flush=True)
     return 0 if reason in (
-        "PASS2_COMPLETE", "total_budget", "worker_wait_limit",
+        "PASS2_COMPLETE", "total_budget", "max_windows",
     ) else 3
 
 
