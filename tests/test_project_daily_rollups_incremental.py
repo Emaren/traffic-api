@@ -162,6 +162,27 @@ class IncrementalProjectRollupTests(unittest.TestCase):
         self.assertEqual(watermark, 4000)
         self.assertLess(calls[0], 300)
 
+    def test_incremental_range_uses_primary_rowid_not_historical_host_index(self) -> None:
+        self.conn.execute(
+            "CREATE INDEX idx_test_host_timestamp ON traffic_entries(host,timestamp)"
+        )
+        self.insert(host="aoe2war.test")
+        self.insert(host="unrelated.test")
+        plan = self.conn.execute(
+            "EXPLAIN QUERY PLAN SELECT rowid FROM traffic_entries NOT INDEXED "
+            "WHERE host IN (?) AND rowid>? AND rowid<=?",
+            ("aoe2war.test", 0, 2),
+        ).fetchall()
+        details = " ".join(str(row["detail"]) for row in plan)
+        self.assertIn("INTEGER PRIMARY KEY", details)
+        self.assertIn("rowid>?", details)
+        self.assertNotIn("idx_test_host_timestamp", details)
+        fetched = rollups._load_new_eligible_path_rows(
+            self.conn, hosts=self.hosts, after_rowid=0, through_rowid=2,
+        )
+        self.assertEqual(len(fetched), 1)
+        self.assertEqual(fetched[0]["hits"], 1)
+
     def test_bootstrap_then_noop_without_rescanning_active_day(self) -> None:
         self.insert(path="/")
         self.insert(path="/profile")
