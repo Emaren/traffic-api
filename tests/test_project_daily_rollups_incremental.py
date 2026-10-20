@@ -92,6 +92,76 @@ class IncrementalProjectRollupTests(unittest.TestCase):
             latest_raw_day=self.day,
         )
 
+    def test_per_host_day_bounds_equal_original_historical_aggregate(self) -> None:
+        self.insert(day="2026-09-25", host="other.example")
+        self.insert(day="2026-09-27", host=self.hosts[0])
+        self.insert(day="2026-09-28", host=self.hosts[0])
+        self.insert(day="2026-10-01", host="other.example")
+        self.insert(day="2026-10-03", host="aoe2war-secondary.test")
+        hosts = ["missing.example", self.hosts[0], "aoe2war-secondary.test"]
+        actual = rollups.raw_day_bounds(self.conn, hosts)
+        reference = self.conn.execute(
+            "SELECT MIN(timestamp),MAX(timestamp) FROM traffic_entries "
+            "WHERE host IN (?,?,?)", hosts,
+        ).fetchone()
+        self.assertEqual(actual, (
+            date.fromisoformat(reference[0][:10]),
+            date.fromisoformat(reference[1][:10]),
+        ))
+        self.assertEqual(rollups.raw_day_bounds(self.conn, ["missing.example"]), (None, None))
+        self.assertEqual(rollups.raw_day_bounds(self.conn, []), (None, None))
+
+    def test_unrelated_host_highwater_does_not_miss_later_project_append(self) -> None:
+        self.insert(path="/")
+        self.insert(host="unrelated.test", path="/")
+        self.insert(host="unrelated.test", path="/")
+        first = self.refresh()
+        self.assertEqual(first["mode"], "incremental_bootstrap")
+        self.assertEqual(first["watermark_rowid"], 3)
+        self.assertEqual(self.rollup(), (1, 1))
+        self.assertEqual(self.refresh()["mode"], "incremental_noop")
+        self.insert(host="unrelated.test", path="/")
+        unrelated = self.refresh()
+        self.assertEqual(unrelated["mode"], "incremental")
+        self.assertEqual(unrelated["days"], 0)
+        self.assertEqual(unrelated["watermark_rowid"], 4)
+        self.insert(path="/profile")
+        new = self.refresh()
+        self.assertEqual(new["mode"], "incremental")
+        self.assertEqual(new["watermark_rowid"], 5)
+        self.assertEqual(self.rollup(), (1, 2))
+        self.assertEqual(self.refresh()["mode"], "incremental_noop")
+
+    def test_index_probes_and_global_rowid_highwater_do_bounded_work(self) -> None:
+        self.conn.execute(
+            "CREATE INDEX idx_test_host_timestamp ON traffic_entries(host,timestamp)"
+        )
+        # Deliberately much more historical data than one new sample:
+        # an aggregate MIN/MAX(host IN ...) would read all matching rows.
+        self.conn.executemany(
+            "INSERT INTO traffic_entries(timestamp,host,status,method,ua,normalized_path,ip)"
+            " VALUES(?,?,200,'GET','Mozilla/5.0','/','203.0.113.10')",
+            [
+                (f"2026-09-{1 + n % 28:02d}T12:00:00+00:00", self.hosts[0])
+                for n in range(4000)
+            ],
+        )
+        self.conn.commit()
+        calls = [0]
+        def instructions() -> int:
+            calls[0] += 1
+            return 1 if calls[0] > 300 else 0
+        self.conn.set_progress_handler(instructions, 100)
+        try:
+            first, last = rollups.raw_day_bounds(self.conn, self.hosts)
+            watermark = rollups._project_max_rowid(self.conn, self.hosts)
+        finally:
+            self.conn.set_progress_handler(None, 0)
+        self.assertEqual(first, date(2026, 9, 1))
+        self.assertEqual(last, date(2026, 9, 28))
+        self.assertEqual(watermark, 4000)
+        self.assertLess(calls[0], 300)
+
     def test_bootstrap_then_noop_without_rescanning_active_day(self) -> None:
         self.insert(path="/")
         self.insert(path="/profile")
