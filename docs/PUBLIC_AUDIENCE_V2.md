@@ -1048,3 +1048,64 @@ cannot be rewritten; future source row-ID inserts may be backdated,
 and the input collector continues changing global-IP behavior.
 The independent ingestion-lateness certificate, two full UTC
 days and atomic publisher remain explicitly blocked.
+
+## 2026-10-21 — cross-epoch midnight actor-continuity release gate
+
+The operator ran production commit
+`1b87b7f70691310632bf8829b7fcc70eced16493`:
+**248/248** VPS regression tests PASS; independent
+`PRIVATE_CANONICAL_IP_PARITY_VERIFIED` on **145,877** source events
+(3,873 actors / 4,796 UAs / 18,465 paths); and independent
+`PRIVATE_FUTURE_SESSION_AB_PARITY_VERIFIED` against the
+original unchanged canonical `stream_sessions` for the same prefix,
+including **8,135 sessions**, **6,996 page sessions**, and full daily
+classification triples for both represented UTC dates. October 20's
+provisional triple remained `[5800,140,39]`.
+The sealed public historical series, **131 days through 2026-10-19**,
+was independently reverified with unchanged checksum
+`84150e4921197efd925fa2d9abccee37154d45a68b6f72e25df57dfc4e2d07b4`.
+**These proofs do not certify finality or permit publication**.
+
+The immutable prior recovery deliberately stops at
+`2026-10-20T00:00:00+00:00`. A canonical session can continue across
+that midnight when the same **host, IP and lowercase user agent** has
+its final historical event and first future event separated by **at
+most 30 minutes**. The historic rollup's end-of-input close then
+creates a potentially artificial session split at the release
+boundary. This must be checked rather than silently double-counting
+or altering the already published 131 days.
+
+`scripts.public_audience_v2_forward_boundary_audit` performs a
+bounded readonly scan of the final 30 minutes of the sealed raw
+source **under its frozen row-ID watermark** and the first 30 minutes
+of the saved future private ledger **under the shadow's processed
+row-ID prefix**. It applies the same authenticated canonical
+host selection, firehose source predicate, normalizer and visibility
+rules. For each exact normalized actor identity it keeps only the
+last historical timestamp and first future timestamp, compares the
+exact 30-minute inactivity condition (including equality), and emits
+only anonymous aggregate evidence. Both streams have hard
+untruncated 20,000-row defaults, hard cap 100,000, <=45 seconds app
+budget, exclusive private canary lock and project-worker priority.
+
+Existing `tony` VPS shell, root-owned repo, **no `set -e` or nested SSH**:
+```bash
+sudo nice -n 10 timeout -k 5s 65s .venv/bin/python3 \
+  -m scripts.public_audience_v2_forward_boundary_audit \
+  --source /mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3 \
+  --checkpoint /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/checkpoint.sqlite3 \
+  --ledger /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ledger.sqlite3 \
+  --shadow /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ip-shadow.sqlite3 \
+  --max-rows 20000 --budget-seconds 40
+```
+
+A result of `canonical_session_continuations: 0` means **only**
+that no cross-epoch actor continued in the sampled, frozen input
+prefix. A nonzero result is an explicit cross-release semantic
+blocker. Either result remains `historical_cross_epoch_day_certified:
+false` and `publication_authorized:false`. Later forward source
+row-ID inserts with backdated timestamps may change the result;
+the private shadow can temporarily trail capture. A separate
+event-ingestion-lateness/finality policy and at least two consecutive
+independently completed UTC days are still necessary. Do not
+change any existing published date or enable any public timer.
