@@ -1384,3 +1384,67 @@ and contents privately; never paste secrets into chat.**
 Until opt-in activation, the Traffic source and ingestion pipeline
 remain precisely on the old schema/write path, even when the
 instrumentation's source code has been Git-fast-forwarded.
+
+## 2026-10-21 — independent completed-day source-to-ledger identity parity
+
+The operator's latest original canonical stream A/B against the
+segmented future engine on the exact frozen private prefix returned
+`PRIVATE_FUTURE_SESSION_AB_PARITY_VERIFIED` with **156,568**
+canonical accepted source events, **8,804** sessions and **7,638**
+page sessions distributed identically across Oct20/Oct21. The
+cross-midnight-reconciled, **still provisional**, Oct20 triplet
+remains `[5795,139,39]`; nine inherited Oct19 sessions account
+for a `[-5,-1,0]` correction. The private IP forward shadow
+had already caught up to the then-frozen forward ledger prefix.
+This proves the two future-only streaming implementations agree,
+but **does not prove the independent Traffic source and retained
+future-input ledger have identical event identities**.
+
+The new read-only `scripts.public_audience_v2_daily_source_parity`
+checks that missing link **for one specified completed UTC day**:
+it independently scans the original `traffic_entries` with the
+canonical timestamp/host/firehose index and current visibility
+rules, bounded by the private IP shadow's exact verified
+`source_rowid` prefix. In parallel it scans the independently
+captured private `future_events` ledger for the same completed
+day and prefix. Both sides are inserted into **ephemeral
+in-memory SQLite tables**, keyed by source rowid and the SHA-256
+of all ten canonical raw evidence fields. It verifies that each
+side has exactly the same count and exact rowid/fingerprint set
+before emitting a sanitized aggregate SHA-256 of source event
+identities sorted by rowid.
+
+Safety: at most 200,000 events per side, hard <=100-second
+application time, source/ledger/shadow read-only, protected canary
+lock, project worker priority, original 131-day published SHA
+guard, exact historical-source/rules and IP-shadow provenance
+guards. Duplicate, missing, extra or mutated canonical source
+events FAIL. Inputs contain visitor identifiers privately in RAM
+but **no IP, UA, paths, log filenames or event identifiers** are
+written or printed. No temporary on-disk files, DB changes,
+timer changes or publication. A nonzero new source/collector
+rowid lag is reported, **not** misrepresented as a complete
+ingestion watermark.
+
+Operator command from the existing `tony` VPS terminal:
+```bash
+sudo nice -n 10 timeout -k 5s 130s .venv/bin/python3 \
+  -m scripts.public_audience_v2_daily_source_parity \
+  --source /mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3 \
+  --checkpoint /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/checkpoint.sqlite3 \
+  --ledger /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ledger.sqlite3 \
+  --shadow /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ip-shadow.sqlite3 \
+  --day 2026-10-20 --max-rows 180000 --budget-seconds 90
+```
+
+A `PRIVATE_CLOSED_DAY_SOURCE_LEDGER_PARITY_VERIFIED`
+receipt proves **source-vs-private-ledger identity parity at
+the frozen input snapshot**, not remote Nginx delivery
+completeness, per-event absolute ingestion lag, future
+global-IP stability, stitched historical-boundary original
+canonical equivalence, or publication permission. These
+flags stay explicitly **false**. No fake zeroes or partial
+day may be published. Existing `public_audience_v2_verify_published`
+is still intentionally pinned to the 131-day original release.
+A separately reviewed append-only publisher and dynamic verifier
+are required before the first genuinely certified new day.
