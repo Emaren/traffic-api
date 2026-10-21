@@ -28,6 +28,7 @@ from app.services.traffic.config import SESSION_GAP_MINUTES
 from scripts import public_audience_v2_checkpoint as v2
 from scripts import public_audience_v2_forward_ip_shadow as shadow_mod
 from scripts import public_audience_v2_forward_ledger as forward
+from scripts import public_audience_v2_forward_boundary_audit as boundary_audit
 from scripts import public_audience_v2_guarded_resume as guard
 from scripts import public_audience_v2_sessions as historical_sessions
 from scripts import rebuild_public_audience_archive as canonical
@@ -92,6 +93,7 @@ def replay(
     behavior: Callable[[str, str], dict],
     reference_now: datetime,
     deadline: float,
+    inherited_boundary_keys: set[tuple[str, str, str]] | None = None,
 ) -> tuple[dict[str, list[int]], dict[str, int]]:
     """Run canonical session replay with ephemeral memory-only event chunks.
 
@@ -107,6 +109,7 @@ def replay(
         return _replay_bounded(
             items, behavior=behavior, reference_now=reference_now,
             deadline=deadline, spool=temporary,
+            inherited_boundary_keys=inherited_boundary_keys,
         )
 
 
@@ -116,6 +119,7 @@ def _replay_bounded(
     reference_now: datetime,
     deadline: float,
     spool: sqlite3.Connection,
+    inherited_boundary_keys: set[tuple[str, str, str]] | None,
 ) -> tuple[dict[str, list[int]], dict[str, int]]:
     """Match the original 30-minute expiry and complete-bucket finalizer."""
     require(reference_now.tzinfo is not None, "preview now must have timezone")
@@ -134,14 +138,23 @@ def _replay_bounded(
     token_counter = 0
     max_session_length = 0
     segments_written = 0
+    quarantined_sessions = 0
+    quarantined_events = 0
+    inherited = inherited_boundary_keys or set()
+    inherited_seen: set[tuple[str, str, str]] = set()
 
     def append_event(state: dict, item: dict) -> None:
         nonlocal segments_written, max_session_length
         # Global event budget and deadline guard RAM/CPU; never split an
         # exact canonical session because it exceeds a guessed row count.
-        state["pending"].append(item)
         state["size"] += 1
         max_session_length = max(max_session_length, state["size"])
+        if state["inherited"]:
+            # A session whose first event precedes the immutable
+            # historical release boundary already belongs to Oct19.
+            # Keep its time/gap state but neither classify nor spool it.
+            return
+        state["pending"].append(item)
         if len(state["pending"]) >= EVENT_SEGMENT_ROWS:
             spool.execute(
                 "INSERT INTO chunks(token,seq,events_json) VALUES (?,?,?)",
@@ -170,7 +183,13 @@ def _replay_bounded(
         return events
 
     def close(key: tuple[str, str, str], state: dict) -> None:
-        nonlocal finalized
+        nonlocal finalized, quarantined_sessions, quarantined_events
+        if state["inherited"]:
+            quarantined_sessions += 1
+            quarantined_events += state["size"]
+            require(state["chunk_seq"] == 0 and not state["pending"],
+                    "inherited boundary events were unexpectedly buffered")
+            return
         events = materialize_events(state)
         actor = (events[0]["host"], events[0]["ip"])
         if actor not in behavior_cache:
@@ -226,13 +245,18 @@ def _replay_bounded(
         if state is None:
             bucket = canonical.bucket_id(stamp)
             token_counter += 1
+            carried_in = key in inherited and key not in inherited_seen
+            if carried_in:
+                inherited_seen.add(key)
             state = {
                 "pending": [], "size": 0, "chunk_seq": 0,
                 "token": token_counter, "last_time": stamp,
                 "version": version, "bucket": bucket,
+                "inherited": carried_in,
             }
             opened[key] = state
-            open_counts[bucket] += 1
+            if not carried_in:
+                open_counts[bucket] += 1
         else:
             state["last_time"] = stamp
             state["version"] = version
@@ -256,6 +280,9 @@ def _replay_bounded(
         "longest_session_events": max_session_length,
         "ephemeral_event_segments_written": segments_written,
         "ephemeral_database_only": True,
+        "inherited_continuations_quarantined": quarantined_sessions,
+        "inherited_continuation_events_quarantined": quarantined_events,
+        "inherited_actor_keys_seen": len(inherited_seen),
     }
 
 
@@ -412,13 +439,16 @@ def compare_original_stream(
 def preview(source: Path, checkpoint: Path, ledger: Path,
             shadow: Path, *, max_events: int, budget_seconds: int,
             inspect_sizes: bool = False,
-            compare_original: bool = False) -> dict:
+            compare_original: bool = False,
+            estimate_boundary_impact: bool = False) -> dict:
     require(1 <= max_events <= MAX_EVENTS, "invalid private preview event bound")
     require(5 <= budget_seconds <=
             (MAX_AB_SECONDS if compare_original else MAX_SECONDS),
             "invalid private preview time bound")
     require(not (inspect_sizes and compare_original),
             "cannot combine session-size diagnosis with canonical A/B")
+    require(not (estimate_boundary_impact and (inspect_sizes or compare_original)),
+            "boundary estimate is incompatible with other preview modes")
     for path in (source, checkpoint, ledger, shadow):
         require(path.is_file() and not path.is_symlink(),
                 "input or private evidence missing/symlink")
@@ -432,6 +462,19 @@ def preview(source: Path, checkpoint: Path, ledger: Path,
     guard.require_worker_priority()
     require(guard.worker_idle(), "project rollup worker has priority")
 
+    bridging_keys: set[tuple[str, str, str]] = set()
+    boundary_receipt: dict[str, Any] | None = None
+    if estimate_boundary_impact:
+        # Boundary auditor acquires/releases the same canary lock first;
+        # the following preview MUST match its exact durable prefix.
+        boundary_receipt, bridging_keys = boundary_audit.verify(
+            source, checkpoint, ledger, shadow,
+            max_rows=20000, budget_seconds=min(budget_seconds, 40),
+            include_private_keys=True,
+        )
+        require(len(bridging_keys) ==
+                boundary_receipt["canonical_session_continuations"],
+                "boundary actor counts inconsistent")
     start_clock = time.monotonic()
     deadline = start_clock + budget_seconds
     lock_fd = os.open(checkpoint.parent / ".canary.lock",
@@ -477,6 +520,11 @@ def preview(source: Path, checkpoint: Path, ledger: Path,
                     "private pass1 not complete for frozen input prefix")
             require(processed <= max_events,
                     "future input exceeds preview max-events cap")
+            if estimate_boundary_impact:
+                require(boundary_receipt is not None
+                        and boundary_receipt["future_prefix_rowid"] == rowid
+                        and boundary_receipt["future_prefix_processed_events"] == processed,
+                        "boundary impact cannot use mismatched input prefix")
             if inspect_sizes:
                 metrics = diagnose_session_sizes(
                     read_canonical_inputs(
@@ -508,6 +556,55 @@ def preview(source: Path, checkpoint: Path, ledger: Path,
             )
             require(stats["accepted_future_events"] == processed,
                     "canonical preview missed private prefix input")
+            reconciliation: dict[str, Any] = {}
+            if estimate_boundary_impact:
+                adjusted_daily, adjusted_stats = replay(
+                    read_canonical_inputs(
+                        inputs, rules=rules, max_rowid=rowid,
+                        max_events=max_events, deadline=deadline,
+                    ),
+                    behavior=lambda host, actor: shadow_mod.merged_ip_behavior(
+                        history, pass1, host, actor,
+                    ),
+                    reference_now=now, deadline=deadline,
+                    inherited_boundary_keys=bridging_keys,
+                )
+                require(adjusted_stats["accepted_future_events"] == processed,
+                        "quarantine preview input mismatch")
+                require(adjusted_stats["inherited_continuations_quarantined"]
+                        == len(bridging_keys)
+                        == adjusted_stats["inherited_actor_keys_seen"],
+                        "not all boundary continuations were quarantined")
+                require(adjusted_stats["finalized_sessions"] +
+                        adjusted_stats["inherited_continuations_quarantined"]
+                        == stats["finalized_sessions"],
+                        "future session count not conserved across quarantine")
+                adjusted_provisional = {
+                    d: adjusted_daily[d] for d in sorted(adjusted_daily)
+                    if forward.START[:10] <= d < now.date().isoformat()
+                }
+                diff = {
+                    d: [adjusted_daily.get(d, [0,0,0])[i] -
+                        daily.get(d, [0,0,0])[i] for i in range(3)]
+                    for d in sorted(set(adjusted_daily) | set(daily))
+                    if forward.START[:10] <= d < now.date().isoformat()
+                }
+                reconciliation = {
+                    "result": "PRIVATE_BOUNDARY_QUARANTINE_IMPACT_ONLY",
+                    "boundary_continuations_matched": len(bridging_keys),
+                    "quarantined_first_future_sessions":
+                        adjusted_stats["inherited_continuations_quarantined"],
+                    "quarantined_future_events":
+                        adjusted_stats["inherited_continuation_events_quarantined"],
+                    "adjusted_unverified_past_calendar_day_candidates":
+                        adjusted_provisional,
+                    "adjustment_deltas_per_day": diff,
+                    "quarantined_segments_did_not_create_new_sessions": True,
+                    "historical_and_future_stitched_canonical_parity_certified":
+                        False,
+                    "late_ingestion_watermark_certified": False,
+                    "publication_authorized": False,
+                }
             require(time.monotonic() <= deadline,
                     "preview exceeded allowed wall time")
             today = now.date().isoformat()
@@ -546,6 +643,7 @@ def preview(source: Path, checkpoint: Path, ledger: Path,
                 "publication_authorized": False,
                 "private_read_only": True,
                 "independent_stream_ab": comparison,
+                "boundary_quarantine_impact": reconciliation,
                 **stats,
             }
     finally:
@@ -558,6 +656,8 @@ def main() -> int:
         p.add_argument("--" + key, type=Path, required=True)
     p.add_argument("--max-events", type=int, default=160_000)
     p.add_argument("--budget-seconds", type=int, default=30)
+    p.add_argument("--estimate-boundary-impact", action="store_true",
+                   help="Compare raw future-only vs quarantine of Oct19 carry-in, no publication")
     p.add_argument("--compare-historical-stream", action="store_true",
                    help="Compare original canonical stream_sessions, no publishing")
     p.add_argument("--inspect-session-sizes", action="store_true",
@@ -569,6 +669,7 @@ def main() -> int:
             max_events=a.max_events, budget_seconds=a.budget_seconds,
             inspect_sizes=a.inspect_session_sizes,
             compare_original=a.compare_historical_stream,
+            estimate_boundary_impact=a.estimate_boundary_impact,
         ), sort_keys=True))
         return 0
     except (RuntimeError, ValueError, TypeError, KeyError,
