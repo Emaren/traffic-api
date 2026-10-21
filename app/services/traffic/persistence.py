@@ -38,6 +38,18 @@ def ingestion_receipts_enabled() -> bool:
     }
 
 
+def inline_log_sync_disabled() -> bool:
+    """Explicit stage-2 opt-in; normal production requests ingest inline.
+
+    Set only after an independently supervised timer has demonstrated
+    healthy source offsets. Off by default on every Git-only deployment.
+    This must not affect scripts/sync_traffic_logs.py.
+    """
+    return os.getenv("TRAFFIC_DISABLE_INLINE_INGEST", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
 def persistence_enabled() -> bool:
     return PERSIST_ENABLED
 
@@ -722,11 +734,12 @@ def load_recent_entries(
         return []
 
     sync_started = time.perf_counter()
-    try:
-        sync_configured_logs_to_persistence(log_paths)
-    except Exception:
-        # Keep serving the last durable snapshot even if the live log cannot be synced right now.
-        pass
+    if not inline_log_sync_disabled():
+        try:
+            sync_configured_logs_to_persistence(log_paths)
+        except Exception:
+            # Keep serving the last durable snapshot even if live sync fails.
+            pass
     sync_seconds = time.perf_counter() - sync_started
     if sync_seconds >= 2.0:
         logging.getLogger("uvicorn.error").warning(
