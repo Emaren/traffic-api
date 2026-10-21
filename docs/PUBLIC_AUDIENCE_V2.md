@@ -1290,3 +1290,57 @@ stable completed-day independent A/B receipts including the
 Oct19/20 carry-in; and implement an atomic publisher that refuses
 post-seal changes. Do not infer unlimited historical finality
 from snapshot observations.
+
+## New ingestion-time evidence contract — additive, future-only source receipt
+
+The 2026-10-21 insertion-order audit on Traffic VPS code
+`8a7d1e10588865887196b49bbf4b2867866f96c2` passed 276/276
+tests and examined **150,085** accepted future events by their
+monotonic SQLite source row-ID. Zero event-time inversions were
+observed; **3,179** still-eligible raw events remained beyond the
+collector's row-ID cursor, and **4,208** captured events remained
+outside the private IP shadow. None of the inspected raw pending
+eligible events targeted an already completed UTC calendar day
+or the immutable Oct19 release. This is encouraging operational
+evidence, **not** an ingestion-lateness guarantee. The original
+131-day public checksum remained unchanged.
+
+To make eventual bounded finality **measurable rather than assumed**,
+future new Traffic source event rows will carry a nullable
+`traffic_entries.ingested_at_utc` column. The value is generated
+**inside SQLite's actual INSERT statement** via UTC
+`strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')`, not derived from
+the nginx/event timestamp or a source log line offset. Existing
+rows get **NULL**, with absolutely no synthetic backfill.
+`_ensure_schema` adds this nullable column idempotently via
+metadata-only `ALTER TABLE ... ADD COLUMN`, without an index,
+per-row history rewrite or change to existing canonical SELECT
+fields. Duplicate `INSERT OR IGNORE` events retain their
+original recorded insertion time. No new data are exposed to
+public web APIs, and the historical canonical-normalizer file
+SHA remains untouched.
+
+**Activation boundary:** merging Python source into GitHub or
+fast-forwarding a checked-out tree does not itself restart running
+Traffic workers. The additive SQLite migration runs the first
+time the updated persistence writer calls `_ensure_schema`
+in a newly started process. Apply only through the existing
+protected Traffic service rollout procedure, with tested
+code and a verified backup/rollback plan; do not manually run
+`ALTER TABLE`, restart unrelated services, or change ownership
+of protected source DB. Record the **first non-NULL** ingestion
+receipt: days/events before it are fundamentally left-censored
+and cannot be assigned verified historical insertion latency.
+
+**Still not a publication license:** authoritative DB INSERT UTC
+time measures the persistence layer, but does not prove that
+all remote nginx logs have finished arriving or that the log
+sync offset is complete. A later certifier must prove source
+log/rotation progression and define an explicit maximum
+supported event-to-ingestion lateness/grace policy, detect
+violations and fail closed. It must also freeze the global IP
+classifier at a justified temporal policy, reconcile Oct19/20
+carry-in chains, test two stable closed UTC days with
+independent parity, and publish atomically. In particular,
+the Oct20 private counterfactual `[5795,139,39]` remains
+**uncertified and unpublished**.
