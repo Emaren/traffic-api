@@ -139,7 +139,7 @@ def build_observed_browser_insights(
     country_counts.sort(key=lambda p: (-p[1], p[0]))
     pages = sorted(page_counter.items(), key=lambda p: (-p[1], p[0]))[:5]
     average = (
-        round(sum(positive_ms) / len(positive_ms) / 1000)
+        max(1, round(sum(positive_ms) / len(positive_ms) / 1000))
         if positive_ms else None
     )
     return {
