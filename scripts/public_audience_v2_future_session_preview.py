@@ -193,8 +193,75 @@ def replay(
     }
 
 
+
+def diagnose_session_sizes(
+    items: Iterable[dict], *, deadline: float,
+) -> dict[str, Any]:
+    """Count 30-minute host/IP/UA session lengths without classification.
+
+    Keeps one counter per active actor rather than retaining event payloads;
+    identifying actor keys are never included in the result.
+    """
+    gap = timedelta(minutes=SESSION_GAP_MINUTES)
+    active: dict[tuple[str, str, str], tuple[datetime, datetime, int]] = {}
+    sizes: list[int] = []
+    events = 0
+    crossing_midnight = 0
+    largest = 0
+
+    def finish(state: tuple[datetime, datetime, int]) -> None:
+        nonlocal crossing_midnight, largest
+        first, last, length = state
+        sizes.append(length)
+        largest = max(largest, length)
+        if first.date() != last.date():
+            crossing_midnight += 1
+
+    for item in items:
+        events += 1
+        if events % 128 == 0:
+            require(time.monotonic() < deadline,
+                    "session-size diagnostic time budget exceeded")
+        stamp = item["timestamp"]
+        require(stamp.tzinfo is not None,
+                "session-size diagnostic requires aware timestamps")
+        key = (item["host"], item["ip"], (item.get("ua") or "").lower())
+        old = active.get(key)
+        if old is None:
+            active[key] = (stamp, stamp, 1)
+            continue
+        first, last, length = old
+        require(stamp >= last, "session-size input time order regressed")
+        if stamp - last > gap:
+            finish(old)
+            active[key] = (stamp, stamp, 1)
+        else:
+            active[key] = (first, stamp, length + 1)
+
+    for state in active.values():
+        finish(state)
+    require(time.monotonic() < deadline,
+            "session-size diagnostic time budget exceeded")
+    return {
+        "result": "PRIVATE_SESSION_SIZE_DIAGNOSTIC_ONLY",
+        "source_events_examined": events,
+        "sessions_by_exact_30min_gap": len(sizes),
+        "largest_session_event_count": largest,
+        "largest_five_session_event_counts": sorted(sizes, reverse=True)[:5],
+        "sessions_over_20000_events": sum(x > MAX_SESSION_EVENTS for x in sizes),
+        "sessions_over_50000_events": sum(x > 50000 for x in sizes),
+        "cross_midnight_session_chains": crossing_midnight,
+        "private_read_only": True,
+        "individual_identifiers_in_receipt": False,
+        "classification_performed": False,
+        "certified_utc_days": [],
+        "publication_authorized": False,
+    }
+
+
 def preview(source: Path, checkpoint: Path, ledger: Path,
-            shadow: Path, *, max_events: int, budget_seconds: int) -> dict:
+            shadow: Path, *, max_events: int, budget_seconds: int,
+            inspect_sizes: bool = False) -> dict:
     require(1 <= max_events <= MAX_EVENTS, "invalid private preview event bound")
     require(5 <= budget_seconds <= MAX_SECONDS,
             "invalid private preview time bound")
@@ -256,6 +323,24 @@ def preview(source: Path, checkpoint: Path, ledger: Path,
                     "private pass1 not complete for frozen input prefix")
             require(processed <= max_events,
                     "future input exceeds preview max-events cap")
+            if inspect_sizes:
+                metrics = diagnose_session_sizes(
+                    read_canonical_inputs(
+                        inputs, rules=rules, max_rowid=rowid,
+                        max_events=max_events, deadline=deadline,
+                    ), deadline=deadline,
+                )
+                require(metrics["source_events_examined"] == processed,
+                        "session-size diagnostic did not examine full prefix")
+                return {
+                    **metrics,
+                    "frozen_prefix_events": processed,
+                    "prefix_source_rowid": rowid,
+                    "forward_total_captured": int(meta["accepted"]),
+                    "source_prefix_backlog_events": int(meta["accepted"]) - processed,
+                    "pinned_public_through": "2026-10-19",
+                    "pinned_public_sha256": forward.RELEASE_SHA,
+                }
             now = datetime.now(timezone.utc)
             daily, stats = replay(
                 read_canonical_inputs(
@@ -310,11 +395,14 @@ def main() -> int:
         p.add_argument("--" + key, type=Path, required=True)
     p.add_argument("--max-events", type=int, default=160_000)
     p.add_argument("--budget-seconds", type=int, default=30)
+    p.add_argument("--inspect-session-sizes", action="store_true",
+                   help="Read-only aggregate size diagnostic; never build sessions")
     a = p.parse_args()
     try:
         print(json.dumps(preview(
             a.source, a.checkpoint, a.ledger, a.shadow,
             max_events=a.max_events, budget_seconds=a.budget_seconds,
+            inspect_sizes=a.inspect_session_sizes,
         ), sort_keys=True))
         return 0
     except (RuntimeError, ValueError, TypeError, KeyError,
