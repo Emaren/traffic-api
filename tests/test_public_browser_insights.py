@@ -36,6 +36,8 @@ class ObservedBrowserInsightsTests(unittest.TestCase):
                 );
                 CREATE INDEX idx_traffic_browser_events_project_received
                 ON traffic_browser_events(project_slug, received_at DESC);
+                CREATE INDEX idx_traffic_browser_events_project_type_received
+                ON traffic_browser_events(project_slug, event_type, received_at DESC);
             """)
 
     def add(self, visitor="v1", session="s1", view="p1", event="page_view",
@@ -112,6 +114,38 @@ class ObservedBrowserInsightsTests(unittest.TestCase):
         self.assertIsNone(public_path("/reset-password/token"))
         self.assertIsNone(public_path("/lobby"))
         self.assertEqual(public_path("/TRAFFIC?foo=bar"), "/traffic")
+
+    def test_durations_use_max_not_sum_and_do_not_count_phantom_page_views(self):
+        self.add(visitor="real", session="session", view="first", visible=0)
+        self.add(visitor="real", session="session", view="first",
+                 event="heartbeat", visible=10_000)
+        self.add(visitor="real", session="session", view="first",
+                 event="heartbeat", visible=25_000)
+        self.add(visitor="real", session="session", view="first",
+                 event="heartbeat", visible=120_000, ua="HeadlessChrome")
+        self.add(visitor="real", session="session", view="second",
+                 path="/leaderboard", visible=3_000)
+        self.add(visitor="real", session="session", view="phantom",
+                 event="heartbeat", visible=500_000)
+        report = self.build()
+        self.assertEqual(report["coverage"]["browser_page_views"], 2)
+        self.assertEqual(report["coverage"]["rows_scanned"], 6)
+        self.assertEqual(report["coverage"]["positive_duration_sessions"], 1)
+        self.assertEqual(report["average_visible_seconds"], 28)
+        self.assertEqual(
+            {row["path"]: row["page_views"] for row in report["top_pages"]},
+            {"/market": 1, "/leaderboard": 1},
+        )
+
+    def test_total_cohort_includes_non_page_events_before_limit(self):
+        for i in range(4):
+            self.add(view="p", event="heartbeat", visible=1_000)
+        from unittest.mock import patch
+        with patch("app.services.traffic.public_browser_insights.MAX_ROWS", 3):
+            with self.assertRaisesRegex(
+                ObservedInsightsUnavailable, "bounded scan"
+            ):
+                self.build()
 
     def test_missing_database_fails_not_zero(self):
         with self.assertRaises(ObservedInsightsUnavailable):
