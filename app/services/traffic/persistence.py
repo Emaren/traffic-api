@@ -388,7 +388,7 @@ def _insert_entry_batches(
                 event_id, source_path, source_inode, line_offset, timestamp, ip,
                 request, method, raw_path, normalized_path, status, referrer,
                 referrer_host, ua, host, raw, ingested_at_utc
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                       strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
         """
     else:
