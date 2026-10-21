@@ -755,3 +755,53 @@ This is **not** a full future-day session processor, UTC-day
 completeness test, or public publisher: cross-midnight 30-minute
 sessions, 60-second burst collapse, fixed-now identity semantics and
 late-ingest/dedup proofs still precede any daily publication.
+
+## 2026-10-21 — bounded manual IP shadow catch-up after first real pass-one success
+
+Operator observed `future-ledger.sqlite3` at LIVE with 108,764
+retained eligible events. The first private canonical IP pass-one
+(3,000 event cap) succeeded in production at Traffic SHA
+`9c0457fea7b2d31456091a57b29c03e78437002a`; private shadow
+`PRAGMA integrity_check=ok`, 3,000 processed, SUM(requests)=3,000,
+private file mode 0600, row-ID cursor 44,130,669 and 105,764 retained
+events remaining as of the observation. Independent historical audience
+verifier still returned VERIFIED_PUBLISHED, 131 days, SHA
+`84150e4921197efd925fa2d9abccee37154d45a68b6f72e25df57dfc4e2d07b4`.
+Source collector timer remained scheduled; this did NOT produce any
+complete UTC daily audience bucket.
+
+`scripts/public_audience_v2_forward_ip_supervisor.py` provides
+strictly **operator-invoked** bounded private pass-one catch-up.
+It launches the existing individually bounded 3,000-event shadow
+command as a child for up to eight steps (operator caps ≤16), under
+a 120-second default wall budget (hard max 300s) and 25-second default
+child timeout (hard max 40s). Each subprocess independently enforces
+the shared private canary lock, project-worker priority, frozen
+historical checkpoint, canonical visibility rules and source identity
+and the private ledger LIVE phase. The supervisor itself checks exact
+pin SHA/clean checkout, working public/project/private timer states,
+worker idle, and minimum free disk reserves before each batch. A
+failure/timeout aborts immediately; previously committed private
+steps remain restartable. Every step prints only aggregate JSON,
+not IPs, user agents, visitor details or raw source events. It reports
+caught-up, max-steps or time-budget stop, never an audience bucket,
+API value or publication authorization.
+
+Example **after the supervisor release is merged, VPS test-certified and
+the operator has explicitly verified current LIVE/PRIVATE_ONLY status**:
+```bash
+.venv/bin/python3 -m scripts.public_audience_v2_forward_ip_supervisor \
+  --source /mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3 \
+  --checkpoint /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/checkpoint.sqlite3 \
+  --ledger /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ledger.sqlite3 \
+  --shadow /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ip-shadow.sqlite3 \
+  --require-sha <PINNED_APPROVED_RELEASE_SHA> \
+  --max-steps 8 --max-rows 3000 --wall-seconds 120 --step-timeout 25
+```
+
+The supervisor is **not installed as a new timer**, never modifies the
+working private collector, never authorizes new public audience days
+and never substitutes request totals for human sessions. Exact session
+parity, cross-UTC-midnight closure, retroactive global IP effects,
+60-second distributed burst collapse, and delayed ingestion watermark
+certification remain required before the public daily publisher.
