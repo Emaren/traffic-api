@@ -900,3 +900,50 @@ immutability; certify late arrivals/insertion ordering, source ingestion
 watermarks, and day-end 30-minute expiry; confirm exact burst-collapsed
 semantics over more than one fully completed UTC day. This tool is
 NOT a day certifier, session parity attestor, or automatic publisher.
+
+## Live candidate safety stop — continuous sessions larger than 20,000 events
+
+On 2026-10-21, production Traffic release
+`cb55994af4abb37683a7350a594563d7f1791ebc` passed
+all **230/230** VPS regression tests. The initial operator-only,
+read-only future session preview safely stopped with
+`STOP: future session exceeds bounded event limit`.
+No public audience or private input data was modified.
+The original sealed 131-day historical publication remained
+`VERIFIED_PUBLISHED` through 2026-10-19, checksum
+`84150e4921197efd925fa2d9abccee37154d45a68b6f72e25df57dfc4e2d07b4`.
+
+Do NOT simply increase `MAX_SESSION_EVENTS=20_000` or split a session
+arbitrarily; the historical 30-minute inactivity-gap definition
+determines session boundaries. A continuous machine-origin stream can
+legitimately have more than 20,000 raw canonical events for one actor,
+yet must still be treated by the original classifier and burst rules.
+
+Use the new `--inspect-session-sizes` option **before any future
+classifier changes**. It runs the same sealed checkpoint/source/ledger/
+private-shadow read-only preflight and original input ordering, but
+tracks only one bounded-size counter and two timestamps per host/IP/UA
+identity; it does not retain full event payloads, build sessions,
+inspect per-IP output, or assign calendar-day visitors.
+It reports the largest five **counts only**, how many sessions exceed
+20,000/50,000 events, cross-midnight session chains, and input count.
+No actor identifiers are printed or stored. It holds the private
+canary lock for its bounded scan and yields priority to the project worker.
+
+Existing `tony` VPS SSH shell (root-owned repo; use sudo; do not
+run `set -e`, `exit`, nested SSH wrappers, or permission changes):
+
+```bash
+sudo nice -n 10 timeout -k 5s 65s .venv/bin/python3 \
+  -m scripts.public_audience_v2_future_session_preview \
+  --source /mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3 \
+  --checkpoint /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/checkpoint.sqlite3 \
+  --ledger /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ledger.sqlite3 \
+  --shadow /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ip-shadow.sqlite3 \
+  --max-events 160000 --budget-seconds 40 --inspect-session-sizes
+```
+
+Any >20k actor session remains UNCLASSIFIED until a reviewed streaming/
+segmented canonical equivalent is proven; the size diagnostic itself
+does not count real humans, authorize publication, prove midnight
+completeness or substitute for the two-day canonical A/B gate.
