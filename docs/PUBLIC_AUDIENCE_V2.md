@@ -1448,3 +1448,45 @@ day may be published. Existing `public_audience_v2_verify_published`
 is still intentionally pinned to the 131-day original release.
 A separately reviewed append-only publisher and dynamic verifier
 are required before the first genuinely certified new day.
+
+## October 21: read-only daily boundary window
+
+Production independent log ingestion handoff has been verified: the
+two-minute `traffic-ingest.timer` remained enabled and succeeded on
+two more scheduled runs after the API restarted at 14:50:32 UTC
+with `TRAFFIC_DISABLE_INLINE_INGEST=1`. The separate optional
+ingestion-timestamp flag remained OFF. Public historical archive
+remained verified as 131 immutable full UTC days through Oct 19.
+
+New `scripts.public_audience_v2_daily_boundary_readiness` avoids
+the growing *total* future-event replay for **observational**
+cross-midnight event-gap diagnostics. It uses the existing
+`idx_future_events_timestamp` for a target-day count, scans only
+the target day's final 30 minutes and a bounded following window,
+and matches the canonical *strictly greater than* 30-minute
+gap rule. It checks published archive digest, historical
+checkpoint, ledger provenance, protected IP cursor, canary lock
+and project-worker priority. Source and private DBs are all
+read-only. Window scans are each capped at 120,000 events and
+the CLI wall-clock budget is <=80 seconds.
+
+After a separate guarded source-only deploy, a private operator
+may invoke:
+```bash
+sudo nice -n 10 timeout -k 5s 115s .venv/bin/python3 \
+  -m scripts.public_audience_v2_daily_boundary_readiness \
+  --source /mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3 \
+  --checkpoint /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/checkpoint.sqlite3 \
+  --ledger /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ledger.sqlite3 \
+  --shadow /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ip-shadow.sqlite3 \
+  --day 2026-10-20 --lookahead-hours 24 \
+  --max-window-events 90000 --budget-seconds 80
+```
+
+**No publication authorization.** An observed event-time gap is
+not an absolute lateness watermark; this does not certify
+cross-epoch stitched sessions, source completeness, stable
+lifetime global-IP behavior or public human counts. Oct20
+`[5795,139,39]` remains provisional. The protected legacy
+public timer remains disabled. The old whole-future preview's
+200k cap must not simply be raised.
