@@ -1109,3 +1109,68 @@ the private shadow can temporarily trail capture. A separate
 event-ingestion-lateness/finality policy and at least two consecutive
 independently completed UTC days are still necessary. Do not
 change any existing published date or enable any public timer.
+
+## 2026-10-21: read-only Oct19 carry-in quarantine impact preview
+
+Operator production `f7a6fef3a7acfc8965684140ada6bd5520cc7ac8`
+passed **258/258** tests. The release boundary audit found **nine**
+canonical session chains crossing 2026-10-19/20 UTC midnight
+among **thirteen** actor keys seen on both sides, with a nearest
+continuation gap of **three seconds**. The audit scanned
+3,372 sealed historical and 4,101 accepted future events within
+each side's 30-minute midnight window (the future IP processing
+prefix was 145,877 of 147,085 captured events). Exact original
+published 131-day archive SHA remained independently verified.
+
+The separate operator-only `--estimate-boundary-impact` option
+answers **how these observed nine carry-in sessions affect the
+private October 20 candidate**, without rewriting Oct19 or modifying
+any source/private persistent/public files.
+
+1. First runs the independently verified historical/future boundary
+   audit in process, receiving the **nine exact actor keys in memory
+   only**. The audit prints and stores only aggregate counts. The
+   canary lock is released before the subsequent preview.
+2. The session preview then verifies the exact same frozen forward
+   private pass-one cursor and event count. It fails closed if the
+   prefix changed between the two lock acquisitions.
+3. It runs the unchanged normal future-only canonical preview as a
+   baseline, then **a separate, explicitly hypothetical** canonical
+   preview: each bridged (host,IP,lowercase UA) key's **first**
+   future session is quarantined until a canonical >30-minute
+   inactivity gap. New sessions after that gap are counted normally.
+   Quarantined events remain part of previously verified global-IP
+   actor evidence; they are not silently deleted from the ledger.
+   Quarantining a carry-in also keeps it out of new 60-second burst
+   groups, avoiding a synthetic extra post-midnight session.
+4. The output contains only baseline and adjusted provisional
+   UTC-calendar-day aggregate triples, changes in each count,
+   number of quarantined sessions/events and explicit all-false
+   publication/stability/cross-epoch-equivalence flags. The
+   historical archive is never modified, and actor identities are
+   never emitted. Unit tests prove quarantine occurs once, later
+   sessions remain, and distinct user agents remain independent.
+
+Example from existing non-root `tony` VPS shell, with `sudo`,
+**no** `set -e`, `exit`, nested SSH:
+```bash
+sudo nice -n 10 timeout -k 5s 95s .venv/bin/python3 \
+  -m scripts.public_audience_v2_future_session_preview \
+  --source /mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3 \
+  --checkpoint /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/checkpoint.sqlite3 \
+  --ledger /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ledger.sqlite3 \
+  --shadow /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ip-shadow.sqlite3 \
+  --max-events 200000 --budget-seconds 40 \
+  --estimate-boundary-impact
+```
+
+**This is an impact estimate, NOT stitched full-history canonical
+equivalence, day certification, irreversible watermark or authorization
+to publish Oct20.** The immutable Oct19 session may have different
+classifications if reprocessed with future evidence. Late source
+insertions and moving global-IP behavior can still change future
+classification. Thus all existing published dates remain sealed and
+the legacy public publisher remains inactive. Later we must test
+joint historical/new-session semantics, establish an explicit
+bounded ingestion-lateness contract, and verify two fully closed
+days independently before considering publication.
