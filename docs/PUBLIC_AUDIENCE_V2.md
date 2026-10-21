@@ -947,3 +947,48 @@ Any >20k actor session remains UNCLASSIFIED until a reviewed streaming/
 segmented canonical equivalent is proven; the size diagnostic itself
 does not count real humans, authorize publication, prove midnight
 completeness or substitute for the two-day canonical A/B gate.
+
+## 2026-10-21: measured oversized canonical sessions and memory-only segmentation
+
+The read-only production diagnostic on VPS Traffic release
+`a55bd45f06facf9c398513ab016340d10a672176` completed
+**237/237 tests** and inspected a pinned pass-one prefix of
+**129,980 saved canonical inputs** (source captured 142,877; private
+IP prefix backlog 12,897 at that sample). It identified **7,304**
+exact 30-minute inactivity-gap actor sessions, **51** continuing across
+UTC midnight and top-five lengths **29,016; 26,863; 13,893; 13,849;
+12,472**. Exactly **two** sessions exceeded 20,000 events; none
+exceeded 50,000. All data were anonymized aggregates, and the original
+131-day public checksum was again VERIFIED_PUBLISHED unchanged.
+
+The prior preview's 20,000 raw-event per-session guard was a
+resource bound, not canonical visitor semantics. Rather than truncate
+or pretend a long-running script is multiple visitors, the private
+preview now uses **ephemeral SQLite `:memory:` only**, storing
+canonical event payloads in **256-event chunks**, using the same
+serializer and decoder as the sealed historical checkpoint.
+Every session remains one `(host, IP, lowercase UA)` inactivity-gap
+chain. On exact canonical closure, the preview reconstructs **all**
+of that actor's events, calls the *unchanged*
+`canonical.build_single_session` and then
+`canonical.finalize_bucket` for original 60-second distributed burst
+logic; it deletes the temporary in-memory chunks on close. It never
+changes the original `SESSION_GAP_MINUTES`, known-bot rules,
+confidence thresholds, source day ownership or recorded public
+archive. The total 200,000-event source cap, 30,000 active-session
+limit, full-bucket bound, time budget and private canary lock remain
+hard fail-closed limits. This is a temporary classification working
+space **only**; no temp files, source writes, private persistent
+session-state changes or public writes.
+
+Unit fixtures include real measured maximum **29,016** and second
+largest **26,863** lengths, 30-minute equality at midnight,
+UA partition isolation, no source-file writes and time-limit failure.
+The live preview may still stop at a performance bound and then must
+be profiled, never force-run unbounded.
+
+This preview **does not certify** Oct20/Oct21 audience figures:
+the exact October 19/20 historical boundary, independent canonical
+parity, late/backdated ingestion evidence, global-IP future retroactivity
+and publication atomicity remain open. Only after those barriers are
+proved can the public completed-day timer be enabled.
