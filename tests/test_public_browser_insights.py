@@ -107,6 +107,11 @@ class ObservedBrowserInsightsTests(unittest.TestCase):
         self.assertIsNone(public_path("/profile/123"))
         self.assertIsNone(public_path("/scripts/data.json"))
         self.assertEqual(public_path("/market?token=secret"), "/market")
+        self.assertIsNone(public_path("/market/order/private"))
+        self.assertIsNone(public_path("/forum/thread/123"))
+        self.assertIsNone(public_path("/reset-password/token"))
+        self.assertIsNone(public_path("/lobby"))
+        self.assertEqual(public_path("/TRAFFIC?foo=bar"), "/traffic")
 
     def test_missing_database_fails_not_zero(self):
         with self.assertRaises(ObservedInsightsUnavailable):
