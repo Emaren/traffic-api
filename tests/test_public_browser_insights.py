@@ -121,6 +121,40 @@ class ObservedBrowserInsightsTests(unittest.TestCase):
                 now=datetime(2026, 10, 21, tzinfo=timezone.utc),
             )
 
+    def test_managed_sqlite_symlink_alias_reads_same_existing_database(self):
+        self.add(visible=10_000)
+        alias = self.db.with_name("configured.sqlite3")
+        alias.symlink_to(self.db)
+        self.assertTrue(alias.is_symlink())
+        self.assertEqual(alias.resolve(strict=True), self.db)
+        payload = build_observed_browser_insights(
+            "aoe2hdbets",
+            db_path=alias,
+            now=datetime(2026, 10, 21, 21, tzinfo=timezone.utc),
+        )
+        self.assertEqual(payload, self.build())
+        self.assertEqual(payload["coverage"]["browser_page_views"], 1)
+        self.assertEqual(payload["status"], "OBSERVED_ONLY")
+
+    def test_broken_symlink_and_nonfile_target_fail_closed(self):
+        missing_alias = self.db.with_name("broken.sqlite3")
+        missing_alias.symlink_to(self.db.with_name("missing.sqlite3"))
+        directory = Path(self.temp.name) / "not_a_database"
+        directory.mkdir()
+        directory_alias = self.db.with_name("directory_alias.sqlite3")
+        directory_alias.symlink_to(directory, target_is_directory=True)
+        for bad_path in (missing_alias, directory_alias):
+            with self.subTest(path=bad_path):
+                with self.assertRaisesRegex(
+                    ObservedInsightsUnavailable,
+                    "browser evidence database unavailable",
+                ):
+                    build_observed_browser_insights(
+                        "aoe2hdbets",
+                        db_path=bad_path,
+                        now=datetime(2026, 10, 21, 21, tzinfo=timezone.utc),
+                    )
+
     def test_fail_closed_at_window_limit(self):
         # Exercise the bounded cohort check without generating 80,001 rows.
         from unittest.mock import patch
