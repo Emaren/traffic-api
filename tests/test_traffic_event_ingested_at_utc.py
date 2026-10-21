@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 
 from app.services.traffic import persistence
@@ -91,6 +92,34 @@ class TrafficInsertionClockTests(unittest.TestCase):
             "SELECT ingested_at_utc FROM traffic_entries "
             "WHERE event_id='duplicate'"
         ).fetchone()[0], original)
+
+    def test_real_schema_upgrade_keeps_legacy_rows_null(self):
+        legacy_entries(self.conn)
+        self.conn.execute("""
+            INSERT INTO traffic_entries (
+                event_id, source_path, source_inode, line_offset,
+                timestamp, ip, request, method, raw_path,
+                normalized_path, status, referrer, referrer_host,
+                ua, host, raw
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, row("legacy-untouched"))
+        # _ensure_schema must be tested via its actual implementation,
+        # not only the isolated ALTER helper.
+        with patch.object(persistence, "_SCHEMA_READY", False):
+            persistence._ensure_schema(self.conn)
+        cols = {r[1] for r in self.conn.execute(
+            "PRAGMA table_info(traffic_entries)"
+        )}
+        self.assertIn("ingested_at_utc", cols)
+        self.assertIsNone(self.conn.execute(
+            "SELECT ingested_at_utc FROM traffic_entries "
+            "WHERE event_id='legacy-untouched'"
+        ).fetchone()[0])
+        persistence._insert_entry_batches(self.conn, [row("new-after-upgrade")])
+        self.assertIsNotNone(self.conn.execute(
+            "SELECT ingested_at_utc FROM traffic_entries "
+            "WHERE event_id='new-after-upgrade'"
+        ).fetchone()[0])
 
     def test_empty_table_migration_works(self):
         legacy_entries(self.conn)
