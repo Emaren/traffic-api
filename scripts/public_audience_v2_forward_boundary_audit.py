@@ -179,7 +179,11 @@ def verify(source: Path, checkpoint: Path, ledger: Path, shadow: Path,
                 int(info["watermark"]), *hosts, max_rows+1,
             ))
             def historical():
+                raw_seen = 0
                 for row in old_rows:
+                    raw_seen += 1
+                    require(raw_seen <= max_rows,
+                            "historical raw scan cap exceeded")
                     require(time.monotonic() < deadline,
                             "boundary source scan timed out")
                     value = canonical.normalize_row(row, rules=rules)
@@ -195,7 +199,11 @@ def verify(source: Path, checkpoint: Path, ledger: Path, shadow: Path,
                  cursor, max_rows+1),
             )
             def future():
+                raw_seen = 0
                 for rowid, payload in new_rows:
+                    raw_seen += 1
+                    require(raw_seen <= max_rows,
+                            "future raw scan cap exceeded")
                     require(time.monotonic() < deadline,
                             "future boundary scan timed out")
                     fields = json.loads(payload)
