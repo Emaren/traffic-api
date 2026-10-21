@@ -43,7 +43,8 @@ def actor_key(event: dict[str, Any]) -> tuple[str, str, str]:
 
 
 def analyze_boundary(historical: Iterable[dict], future: Iterable[dict], *,
-                     boundary: datetime, max_rows: int) -> dict[str, Any]:
+                     boundary: datetime, max_rows: int,
+                     include_private_keys: bool = False) -> Any:
     """Compute closest possible continuity; no raw actor data in receipt."""
     require(boundary.tzinfo is not None, "UTC boundary must be timezone aware")
     require(1 <= max_rows <= MAX_ROWS, "invalid boundary scan row bound")
@@ -71,6 +72,7 @@ def analyze_boundary(historical: Iterable[dict], future: Iterable[dict], *,
         if key not in new_first or stamp < new_first[key]:
             new_first[key] = stamp
     bridging = 0
+    bridged_keys: set[tuple[str, str, str]] = set()
     exact_30min = 0
     nearest_gap_seconds: int | None = None
     for key in old_last.keys() & new_first.keys():
@@ -82,10 +84,11 @@ def analyze_boundary(historical: Iterable[dict], future: Iterable[dict], *,
             else min(nearest_gap_seconds, seconds)
         )
         if delta <= gap:
+            bridged_keys.add(key)
             bridging += 1
             if delta == gap:
                 exact_30min += 1
-    return {
+    public_result = {
         "historical_boundary_events_examined": history_events,
         "future_boundary_events_examined": future_events,
         "historical_active_actor_keys": len(old_last),
@@ -101,10 +104,16 @@ def analyze_boundary(historical: Iterable[dict], future: Iterable[dict], *,
         "publication_authorized": False,
         "read_only": True,
     }
+    if include_private_keys:
+        # Private actor keys exist in RAM for a short-lived readonly
+        # comparison only; NEVER JSON-serialize them to the CLI receipt.
+        return public_result, bridged_keys
+    return public_result
 
 
 def verify(source: Path, checkpoint: Path, ledger: Path, shadow: Path,
-           *, max_rows: int, budget_seconds: int) -> dict[str, Any]:
+           *, max_rows: int, budget_seconds: int,
+           include_private_keys: bool = False) -> Any:
     require(1 <= max_rows <= MAX_ROWS, "invalid boundary scan cap")
     require(5 <= budget_seconds <= MAX_SECONDS, "invalid boundary time limit")
     for path in (source, checkpoint, ledger, shadow):
@@ -216,12 +225,19 @@ def verify(source: Path, checkpoint: Path, ledger: Path, shadow: Path,
                             "retained future boundary input changed")
                     yield value
 
-            result = analyze_boundary(
+            inspected = analyze_boundary(
                 historical(), future(), boundary=boundary, max_rows=max_rows,
+                include_private_keys=include_private_keys,
             )
+            if include_private_keys:
+                result, bridged_keys = inspected
+                require(result["canonical_session_continuations"] == len(bridged_keys),
+                        "bridging actor key reconciliation disagreement")
+            else:
+                result = inspected
             require(time.monotonic() < deadline,
                     "boundary comparison exceeded time budget")
-            return {
+            receipt = {
                 "result": "PRIVATE_CROSS_EPOCH_BOUNDARY_OBSERVED",
                 "sealed_history_last_day": "2026-10-19",
                 "sealed_history_sha256": forward.RELEASE_SHA,
@@ -231,6 +247,9 @@ def verify(source: Path, checkpoint: Path, ledger: Path, shadow: Path,
                 "future_prefix_backlog_events": int(meta["accepted"])-processed,
                 **result,
             }
+            if include_private_keys:
+                return receipt, bridged_keys
+            return receipt
     finally:
         os.close(lockfd)
 
