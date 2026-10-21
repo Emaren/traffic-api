@@ -59,6 +59,10 @@ from app.services.traffic.notifications import (
     send_test_notification,
     update_notification_settings,
 )
+from app.services.traffic.public_browser_insights import (
+    ObservedInsightsUnavailable,
+    build_observed_browser_insights,
+)
 from app.services.traffic.parse import iso_now
 from app.services.traffic.sqlite_utils import connect as closing_sqlite_connect
 from app.services.traffic.visibility import (
@@ -1341,6 +1345,24 @@ async def api_visitor_profile_stream(
         poll_seconds=poll_seconds,
         heartbeat_seconds=heartbeat_seconds,
     )
+
+
+@app.get("/api/projects/{project_slug}/observed-browser-insights")
+def api_project_observed_browser_insights(project_slug: str) -> dict:
+    if not any(project["slug"] == project_slug for project in PROJECTS):
+        raise HTTPException(status_code=404, detail="Unknown project")
+    try:
+        return cached_response(
+            "observed_browser_insights",
+            ttl_seconds=300,
+            builder=lambda: build_observed_browser_insights(project_slug),
+            project_slug=project_slug,
+        )
+    except ObservedInsightsUnavailable as exc:
+        # No partial ranking or invented zero on stale/oversized evidence.
+        raise HTTPException(
+            status_code=503, detail=str(exc)
+        ) from exc
 
 
 @app.get("/api/projects/{project_slug}/public-audience-series")
