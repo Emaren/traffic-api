@@ -34,7 +34,7 @@ from scripts import rebuild_public_audience_archive as canonical
 MAX_EVENTS = 200_000
 MAX_SECONDS = 45
 MAX_OPEN = 30_000
-MAX_SESSION_EVENTS = 20_000
+EVENT_SEGMENT_ROWS = historical_sessions.EVENT_SEGMENT_ROWS
 MAX_BUCKET_SESSIONS = 30_000
 
 
@@ -90,7 +90,31 @@ def replay(
     reference_now: datetime,
     deadline: float,
 ) -> tuple[dict[str, list[int]], dict[str, int]]:
-    """Match canonical expire/close/bucket/finalize sequence without writes."""
+    """Run canonical session replay with ephemeral memory-only event chunks.
+
+    The SQLite :memory: database is never written to disk or attached to
+    persistent production databases. Chunking never splits canonical sessions.
+    """
+    with closing(sqlite3.connect(":memory:")) as temporary:
+        temporary.execute(
+            "CREATE TABLE chunks (token INTEGER NOT NULL,"
+            " seq INTEGER NOT NULL, events_json TEXT NOT NULL,"
+            " PRIMARY KEY(token,seq)) WITHOUT ROWID"
+        )
+        return _replay_bounded(
+            items, behavior=behavior, reference_now=reference_now,
+            deadline=deadline, spool=temporary,
+        )
+
+
+def _replay_bounded(
+    items: Iterable[dict], *,
+    behavior: Callable[[str, str], dict],
+    reference_now: datetime,
+    deadline: float,
+    spool: sqlite3.Connection,
+) -> tuple[dict[str, list[int]], dict[str, int]]:
+    """Match the original 30-minute expiry and complete-bucket finalizer."""
     require(reference_now.tzinfo is not None, "preview now must have timezone")
     gap = timedelta(minutes=SESSION_GAP_MINUTES)
     opened: dict[tuple[str, str, str], dict] = {}
@@ -104,11 +128,47 @@ def replay(
     accepted = 0
     finalized = 0
     page_sessions = 0
+    token_counter = 0
+    max_session_length = 0
+    segments_written = 0
+
+    def append_event(state: dict, item: dict) -> None:
+        nonlocal segments_written, max_session_length
+        # Global event budget and deadline guard RAM/CPU; never split an
+        # exact canonical session because it exceeds a guessed row count.
+        state["pending"].append(item)
+        state["size"] += 1
+        max_session_length = max(max_session_length, state["size"])
+        if len(state["pending"]) >= EVENT_SEGMENT_ROWS:
+            spool.execute(
+                "INSERT INTO chunks(token,seq,events_json) VALUES (?,?,?)",
+                (state["token"], state["chunk_seq"],
+                 historical_sessions.serialize(state["pending"])),
+            )
+            state["chunk_seq"] += 1
+            state["pending"] = []
+            segments_written += 1
+
+    def materialize_events(state: dict) -> list[dict]:
+        events: list[dict] = []
+        for (blob,) in spool.execute(
+            "SELECT events_json FROM chunks WHERE token=? ORDER BY seq",
+            (state["token"],),
+        ):
+            part = historical_sessions.deserialize(blob)
+            require(isinstance(part, list)
+                    and 0 < len(part) <= EVENT_SEGMENT_ROWS,
+                    "invalid ephemeral session segment")
+            events.extend(part)
+        events.extend(state["pending"])
+        require(len(events) == state["size"] and bool(events),
+                "incomplete ephemeral canonical session")
+        spool.execute("DELETE FROM chunks WHERE token=?", (state["token"],))
+        return events
 
     def close(key: tuple[str, str, str], state: dict) -> None:
         nonlocal finalized
-        events = state["events"]
-        require(bool(events), "empty future session")
+        events = materialize_events(state)
         actor = (events[0]["host"], events[0]["ip"])
         if actor not in behavior_cache:
             if len(behavior_cache) >= 4096:
@@ -162,18 +222,18 @@ def replay(
         version += 1
         if state is None:
             bucket = canonical.bucket_id(stamp)
+            token_counter += 1
             state = {
-                "events": [item], "last_time": stamp,
+                "pending": [], "size": 0, "chunk_seq": 0,
+                "token": token_counter, "last_time": stamp,
                 "version": version, "bucket": bucket,
             }
             opened[key] = state
             open_counts[bucket] += 1
         else:
-            require(len(state["events"]) < MAX_SESSION_EVENTS,
-                    "future session exceeds bounded event limit")
-            state["events"].append(item)
             state["last_time"] = stamp
             state["version"] = version
+        append_event(state, item)
         heapq.heappush(expiries, (
             (stamp + gap).timestamp(), version, key,
         ))
@@ -190,6 +250,9 @@ def replay(
         "accepted_future_events": accepted,
         "finalized_sessions": finalized,
         "page_sessions": page_sessions,
+        "longest_session_events": max_session_length,
+        "ephemeral_event_segments_written": segments_written,
+        "ephemeral_database_only": True,
     }
 
 
@@ -248,7 +311,7 @@ def diagnose_session_sizes(
         "sessions_by_exact_30min_gap": len(sizes),
         "largest_session_event_count": largest,
         "largest_five_session_event_counts": sorted(sizes, reverse=True)[:5],
-        "sessions_over_20000_events": sum(x > MAX_SESSION_EVENTS for x in sizes),
+        "sessions_over_20000_events": sum(x > 20000 for x in sizes),
         "sessions_over_50000_events": sum(x > 50000 for x in sizes),
         "cross_midnight_session_chains": crossing_midnight,
         "private_read_only": True,
