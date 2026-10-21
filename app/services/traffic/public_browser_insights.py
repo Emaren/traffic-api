@@ -153,11 +153,24 @@ def build_observed_browser_insights(
     current = current.astimezone(timezone.utc)
     end = current.replace(hour=0, minute=0, second=0, microsecond=0)
     begin = end - timedelta(days=DAYS)
-    if not db_path.is_file() or db_path.is_symlink():
-        raise ObservedInsightsUnavailable("browser evidence database unavailable")
+    # The production configuration uses a managed SQLite path alias to the
+    # mounted volume. A symbolic link at that alias is not evidence corruption:
+    # resolve it once to an existing regular file, then open that immutable
+    # resolved pathname with SQLite mode=ro + PRAGMA query_only.
+    # Broken links, directory targets and circular aliases still fail closed.
+    try:
+        resolved = db_path.resolve(strict=True)
+        if not resolved.is_file():
+            raise ObservedInsightsUnavailable(
+                "browser evidence database unavailable"
+            )
+    except (OSError, RuntimeError) as exc:
+        raise ObservedInsightsUnavailable(
+            "browser evidence database unavailable"
+        ) from exc
 
     opened = time.monotonic()
-    uri = f"file:{db_path.resolve().as_posix()}?mode=ro"
+    uri = f"file:{resolved.as_posix()}?mode=ro"
     try:
         with closing(sqlite3.connect(uri, uri=True, timeout=1)) as db:
             db.row_factory = sqlite3.Row
