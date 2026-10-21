@@ -40,7 +40,7 @@ def require(condition: bool, reason: str) -> None:
 
 def event_fingerprint(fields: Any) -> tuple[int, str]:
     """Compare exact canonical raw identities, without emitting PII."""
-    require(all(k in fields for k in checkpoint_mod.RAW_FIELDS),
+    require(all(k in fields.keys() for k in checkpoint_mod.RAW_FIELDS),
             "canonical event identity missing field")
     rowid = fields["source_rowid"]
     require(type(rowid) is int and rowid > 0, "invalid event rowid")
