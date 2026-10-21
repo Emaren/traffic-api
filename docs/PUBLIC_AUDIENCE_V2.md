@@ -1344,3 +1344,43 @@ carry-in chains, test two stable closed UTC days with
 independent parity, and publish atomically. In particular,
 the Oct20 private counterfactual `[5795,139,39]` remains
 **uncertified and unpublished**.
+
+## Explicit activation gate on the Traffic ingest timer
+
+**2026-10-21 hot-path safety correction:** the production
+`traffic-ingest.timer` launches the separate oneshot
+`traffic-ingest.service` roughly every two minutes, directly from
+`/var/www/Traffic/traffic-api`. A source-only Git fast-forward
+can therefore run changed ingestion Python on the **next timer
+tick**, without any long-running API service restart. The
+insertion-time schema/SQL change introduced in PR #49 must NOT
+automatically run merely when code is deployed.
+
+The new environment switch
+`TRAFFIC_INGEST_RECEIPTS_ENABLED` is **OFF by default**.
+When missing/false/0, `_ensure_schema` does not add the column,
+and `_insert_entry_batches` executes the original unchanged
+16-column `INSERT OR IGNORE`, even if the new Python was
+already deployed. With a deliberate opt-in value `1`/true/yes/on,
+a **new traffic-ingest process** performs the idempotent metadata-only
+nullable `ALTER TABLE` and writes SQLite insertion-clock
+`ingested_at_utc` to new events. An env change is not retroactive;
+older rows retain NULL.
+
+**Activation plan (separate approved operation):** first verify
+the running `traffic-ingest.service` / `traffic-ingest.timer`
+configuration and its effective environment, free space, reliable
+current SQLite online-backup receipt and source DB ownership. Then
+enable the flag through the actual configured systemd environment
+source in a controlled window, execute one bounded ingest cycle and
+verify that the new column is present, historical rows are still NULL,
+new rows receive UTC receipts, and the original 131-day public
+audience SHA is unchanged. Do not alter unrelated service flags,
+restart other daemons, enable the legacy public-audience publisher,
+or modify private V2 checkpoint data. **Do not modify
+`/etc/traffic-api.env` without inspecting its current permissions
+and contents privately; never paste secrets into chat.**
+
+Until opt-in activation, the Traffic source and ingestion pipeline
+remain precisely on the old schema/write path, even when the
+instrumentation's source code has been Git-fast-forwarded.

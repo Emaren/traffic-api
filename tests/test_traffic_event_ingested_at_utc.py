@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import os
 import unittest
 from unittest.mock import patch
 from datetime import datetime, timezone
@@ -37,6 +38,34 @@ class TrafficInsertionClockTests(unittest.TestCase):
     def setUp(self):
         self.conn = sqlite3.connect(":memory:")
         self.addCleanup(self.conn.close)
+        enabled = patch.dict(os.environ, {
+            "TRAFFIC_INGEST_RECEIPTS_ENABLED": "1",
+        })
+        enabled.start()
+        self.addCleanup(enabled.stop)
+
+    def test_default_disabled_gives_unchanged_legacy_writer_and_schema(self):
+        with patch.dict(os.environ, {
+            "TRAFFIC_INGEST_RECEIPTS_ENABLED": "0",
+        }):
+            legacy_entries(self.conn)
+            with patch.object(persistence, "_SCHEMA_READY", False):
+                persistence._ensure_schema(self.conn)
+            cols = {r[1] for r in self.conn.execute(
+                "PRAGMA table_info(traffic_entries)"
+            )}
+            self.assertNotIn("ingested_at_utc", cols)
+            persistence._insert_entry_batches(
+                self.conn, [row("no-migration")],
+            )
+            self.assertEqual(self.conn.execute(
+                "SELECT COUNT(*) FROM traffic_entries "
+                "WHERE event_id='no-migration'"
+            ).fetchone()[0], 1)
+
+    def test_missing_flag_is_disabled_by_default(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(persistence.ingestion_receipts_enabled())
 
     def test_legacy_add_column_idempotent_no_backfill(self):
         legacy_entries(self.conn)
