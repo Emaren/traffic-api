@@ -1174,3 +1174,45 @@ the legacy public publisher remains inactive. Later we must test
 joint historical/new-session semantics, establish an explicit
 bounded ingestion-lateness contract, and verify two fully closed
 days independently before considering publication.
+
+## 2026-10-21 production dual-replay time-budget correction
+
+Production Traffic `f90f97259317801c8640d9cf9bba5278994a8864`
+passed **263/263** tests. The private, readonly
+`--estimate-boundary-impact --budget-seconds 40` run safely
+stopped `STOP: preview exceeded allowed wall time` while preparing
+two full ~146k-event canonical classifications. The previous
+`preview_budget_limit` treated carry-in reconciliation as a
+single-pass job capped at <=45s, even though it must run the
+unadjusted preview **and** a second quarantined counterfactual.
+
+The updated program now allows **<=100 seconds**, exactly the
+existing approved, separately bounded original-reference A/B mode,
+**only** for the special two-pass carry-in reconciliation. Single
+normal preview and `--inspect-session-sizes` still have the
+<=45-second cap. It reports baseline/quarantine execution time
+and total processing time as aggregate nonidentifying metrics.
+Both replay passes continue to share one common 100-second deadline;
+the boundary audit executes first with its own <=40s cap, has the
+same readonly authenticated source guard and canary lock, and both
+passes use the exact same verified frozen input cursor. No publisher
+is enabled and original cross-midnight session rules are unchanged.
+
+Existing VPS `tony` terminal (no nested SSH, no `set -e`, no
+`exit`):
+```bash
+sudo nice -n 10 timeout -k 5s 170s .venv/bin/python3 \
+  -m scripts.public_audience_v2_future_session_preview \
+  --source /mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3 \
+  --checkpoint /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/checkpoint.sqlite3 \
+  --ledger /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ledger.sqlite3 \
+  --shadow /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ip-shadow.sqlite3 \
+  --max-events 200000 --budget-seconds 100 \
+  --estimate-boundary-impact
+```
+
+This is a private **time-bounded impact estimate** only. It is NOT
+authority to extend the 131 published days; a proper finality
+certificate must independently establish source ingestion
+completeness, late-source handling, stable global-IP classification,
+and a two-day publication-safe window.

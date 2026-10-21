@@ -436,15 +436,22 @@ def compare_original_stream(
     }
 
 
+def preview_budget_limit(*, compare_original: bool = False,
+                         estimate_boundary_impact: bool = False) -> int:
+    """Two full replay passes need the bounded A/B clock, not single-pass clock."""
+    return MAX_AB_SECONDS if (compare_original or estimate_boundary_impact) else MAX_SECONDS
+
+
 def preview(source: Path, checkpoint: Path, ledger: Path,
             shadow: Path, *, max_events: int, budget_seconds: int,
             inspect_sizes: bool = False,
             compare_original: bool = False,
             estimate_boundary_impact: bool = False) -> dict:
     require(1 <= max_events <= MAX_EVENTS, "invalid private preview event bound")
-    require(5 <= budget_seconds <=
-            (MAX_AB_SECONDS if compare_original else MAX_SECONDS),
-            "invalid private preview time bound")
+    require(5 <= budget_seconds <= preview_budget_limit(
+                compare_original=compare_original,
+                estimate_boundary_impact=estimate_boundary_impact,
+            ), "invalid private preview time bound")
     require(not (inspect_sizes and compare_original),
             "cannot combine session-size diagnosis with canonical A/B")
     require(not (estimate_boundary_impact and (inspect_sizes or compare_original)),
@@ -544,6 +551,7 @@ def preview(source: Path, checkpoint: Path, ledger: Path,
                     "pinned_public_sha256": forward.RELEASE_SHA,
                 }
             now = datetime.now(timezone.utc)
+            baseline_started = time.monotonic()
             daily, stats = replay(
                 read_canonical_inputs(
                     inputs, rules=rules, max_rowid=rowid,
@@ -556,8 +564,10 @@ def preview(source: Path, checkpoint: Path, ledger: Path,
             )
             require(stats["accepted_future_events"] == processed,
                     "canonical preview missed private prefix input")
+            baseline_seconds = round(time.monotonic() - baseline_started, 3)
             reconciliation: dict[str, Any] = {}
             if estimate_boundary_impact:
+                quarantine_started = time.monotonic()
                 adjusted_daily, adjusted_stats = replay(
                     read_canonical_inputs(
                         inputs, rules=rules, max_rowid=rowid,
@@ -591,6 +601,9 @@ def preview(source: Path, checkpoint: Path, ledger: Path,
                 }
                 reconciliation = {
                     "result": "PRIVATE_BOUNDARY_QUARANTINE_IMPACT_ONLY",
+                    "baseline_replay_seconds": baseline_seconds,
+                    "quarantined_replay_seconds":
+                        round(time.monotonic() - quarantine_started, 3),
                     "boundary_continuations_matched": len(bridging_keys),
                     "quarantined_first_future_sessions":
                         adjusted_stats["inherited_continuations_quarantined"],
@@ -644,6 +657,9 @@ def preview(source: Path, checkpoint: Path, ledger: Path,
                 "private_read_only": True,
                 "independent_stream_ab": comparison,
                 "boundary_quarantine_impact": reconciliation,
+                "baseline_replay_seconds": baseline_seconds,
+                "total_processing_seconds":
+                    round(time.monotonic() - start_clock, 3),
                 **stats,
             }
     finally:
