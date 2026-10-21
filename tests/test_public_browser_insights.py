@@ -36,6 +36,8 @@ class ObservedBrowserInsightsTests(unittest.TestCase):
                 );
                 CREATE INDEX idx_traffic_browser_events_project_received
                 ON traffic_browser_events(project_slug, received_at DESC);
+                CREATE INDEX idx_traffic_browser_events_project_type_received
+                ON traffic_browser_events(project_slug, event_type, received_at DESC);
             """)
 
     def add(self, visitor="v1", session="s1", view="p1", event="page_view",
