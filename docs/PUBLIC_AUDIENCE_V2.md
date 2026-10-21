@@ -992,3 +992,59 @@ the exact October 19/20 historical boundary, independent canonical
 parity, late/backdated ingestion evidence, global-IP future retroactivity
 and publication atomicity remain open. Only after those barriers are
 proved can the public completed-day timer be enabled.
+
+## 2026-10-21 — independent A/B comparison to original canonical stream_sessions
+
+Operator VPS `87e76db0623bc6f5db680db0a9bb72127d81f620`
+passed **243/243** tests. The input ledger and private global-IP
+pass-one caught up to **145,877** retained events; the future readonly
+segmented session replay completed successfully with **8,135** logical
+sessions, **6,996** page sessions, max chain **33,586** events,
+**491** memory-only 256-event segments. The private Oct20 2026 UTC
+candidate was `[5800,140,39]` for total page sessions / likely
+humans / confirmed humans. These numbers remain **NOT certified** and
+**NOT published**. The original 131-day public archive is still
+VERIFIED_PUBLISHED SHA
+`84150e4921197efd925fa2d9abccee37154d45a68b6f72e25df57dfc4e2d07b4`.
+
+Use `--compare-historical-stream` (after reviewed/CI-tested release)
+to compare the preview *against the original, unchanged*
+`rebuild_public_audience_archive.stream_sessions` implementation on
+the **same** exact frozen private input prefix and same pinned source
+visibility policy. This is an independent session aggregation path:
+it rebuilds the original behavior map using the separate original
+history + verified future global-IP shadow and replays original
+inactivity-gapped actor grouping and distributed burst finalizer.
+A scoped test/mock context redirects *only the in-process reference*
+source iterator to the readonly future event ledger; it does not
+change any production file, globally installed service, database
+connection or scheduler. The original code function objects are
+restored before the standalone process exits.
+
+A/B requires exact equality of full provisional daily counts
+(including the incomplete current day for comparison only), accepted
+event counts, total logical sessions and page sessions. A mismatch
+fails closed and prints no raw identifiers. Inputs remain restricted
+to 200k accepted events and the worker/canary-lock priority. This
+comparison is allowed an explicitly requested <=100s application
+budget because it computes two separate full classifications; run
+it under lower CPU priority and a bounded process timeout:
+
+```bash
+sudo nice -n 10 timeout -k 5s 125s .venv/bin/python3 \
+  -m scripts.public_audience_v2_future_session_preview \
+  --source /mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3 \
+  --checkpoint /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/checkpoint.sqlite3 \
+  --ledger /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ledger.sqlite3 \
+  --shadow /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ip-shadow.sqlite3 \
+  --max-events 200000 --budget-seconds 100 \
+  --compare-historical-stream
+```
+
+Success indicates **classification parity for the frozen future
+prefix only**, not immutable historical Oct19-to-Oct20 session
+boundary parity or day completeness. The published Oct19 release
+cannot be rewritten; future source row-ID inserts may be backdated,
+and the input collector continues changing global-IP behavior.
+The independent ingestion-lateness certificate, two full UTC
+days and atomic publisher remain explicitly blocked.

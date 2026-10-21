@@ -22,6 +22,7 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
+from unittest.mock import patch
 
 from app.services.traffic.config import SESSION_GAP_MINUTES
 from scripts import public_audience_v2_checkpoint as v2
@@ -33,6 +34,7 @@ from scripts import rebuild_public_audience_archive as canonical
 
 MAX_EVENTS = 200_000
 MAX_SECONDS = 45
+MAX_AB_SECONDS = 100
 MAX_OPEN = 30_000
 EVENT_SEGMENT_ROWS = historical_sessions.EVENT_SEGMENT_ROWS
 MAX_BUCKET_SESSIONS = 30_000
@@ -44,7 +46,8 @@ def require(ok: bool, message: str) -> None:
 
 def read_canonical_inputs(db: sqlite3.Connection, *, rules: list,
                           max_rowid: int, max_events: int,
-                          deadline: float) -> Iterator[dict]:
+                          deadline: float,
+                          raw_records: bool = False) -> Iterator[dict]:
     """Use timestamp INDEX seek, then original line-offset/rowid tie order.
 
     Historical source uses (timestamp,line_offset,rowid) ordering.
@@ -81,7 +84,7 @@ def read_canonical_inputs(db: sqlite3.Connection, *, rules: list,
             require(item is not None, "forward accepted event normalization drift")
             require(item["timestamp_iso"] >= forward.START,
                     "future input targets certified historical epoch")
-            yield item
+            yield record if raw_records else item
 
 
 def replay(
@@ -322,12 +325,100 @@ def diagnose_session_sizes(
     }
 
 
+
+def compare_original_stream(
+    inputs: sqlite3.Connection,
+    historical: sqlite3.Connection,
+    ip_evidence: sqlite3.Connection,
+    *, rules: list, prefix_cursor: int,
+    max_events: int, deadline: float,
+    snapshot_now: datetime,
+    expected_daily: dict[str, list[int]],
+    expected_stats: dict[str, int],
+) -> dict[str, Any]:
+    """Independent original stream_sessions versus segmented future replay.
+
+    Historical canonical stream_sessions is used UNMODIFIED: only its
+    source_rows and visibility-rule provider are temporarily redirected to
+    the previously verified read-only future ledger and source policy.
+    No source, checkpoint, ledger, shadow or publication writes.
+    """
+    require(snapshot_now.tzinfo is not None, "snapshot time must be aware")
+    actor_behavior = {}
+    for host, ip in ip_evidence.execute(
+        "SELECT host,ip FROM ip_counts ORDER BY host,ip"
+    ):
+        require(time.monotonic() < deadline,
+                "original A/B behavior preload time budget exceeded")
+        actor_behavior[(host, ip)] = shadow_mod.merged_ip_behavior(
+            historical, ip_evidence, host, ip,
+        )
+        require(len(actor_behavior) <= 100_000, "too many IP actors for A/B")
+
+    def readonly_rows(*, start: datetime, end: datetime,
+                      snapshot_max_rowid: int) -> Iterator[dict]:
+        require(snapshot_max_rowid == prefix_cursor,
+                "original stream input snapshot drift")
+        require(start == datetime.fromisoformat(forward.START),
+                "original stream wrong forward start")
+        for raw in read_canonical_inputs(
+            inputs, rules=rules, max_rowid=prefix_cursor,
+            max_events=max_events, deadline=deadline, raw_records=True,
+        ):
+            require(time.monotonic() < deadline,
+                    "original canonical streaming budget exceeded")
+            stamp = datetime.fromisoformat(raw["timestamp"])
+            require(start <= stamp < end,
+                    "reference raw event outside UTC window")
+            yield raw
+
+    # This process is a single CLI worker; scoped mocks cannot touch any
+    # live production service and restore original function objects on exit.
+    with patch.object(canonical, "source_rows", side_effect=readonly_rows), \
+         patch.object(canonical, "safe_list_visibility_rules",
+                      return_value=rules):
+        original_daily, original_stats = canonical.stream_sessions(
+            start=datetime.fromisoformat(forward.START),
+            end=snapshot_now,
+            behavior=actor_behavior,
+            snapshot_max_rowid=prefix_cursor,
+        )
+    require(original_stats["raw_rows"] == expected_stats["accepted_future_events"],
+            "A/B original raw input count differs")
+    require(original_stats["accepted_rows"] == expected_stats["accepted_future_events"],
+            "A/B original accepted input count differs")
+    require(original_stats["finalized_sessions"] == expected_stats["finalized_sessions"],
+            "A/B canonical session count disagrees")
+    require(original_stats["page_sessions"] == expected_stats["page_sessions"],
+            "A/B canonical page session count disagrees")
+    require(original_daily == expected_daily,
+            "A/B complete canonical daily distributions disagree")
+    require(time.monotonic() < deadline, "A/B comparison exceeded time budget")
+    return {
+        "result": "PRIVATE_FUTURE_SESSION_AB_PARITY_VERIFIED",
+        "input_events_compared": original_stats["accepted_rows"],
+        "finalized_sessions_compared": original_stats["finalized_sessions"],
+        "page_sessions_compared": original_stats["page_sessions"],
+        "calendar_days_compared": len(original_daily),
+        "original_canonical_stream_sessions_used": True,
+        "historical_cross_epoch_parity_certified": False,
+        "late_ingestion_watermark_certified": False,
+        "future_global_ip_behavior_stable": False,
+        "publication_authorized": False,
+        "private_read_only": True,
+    }
+
+
 def preview(source: Path, checkpoint: Path, ledger: Path,
             shadow: Path, *, max_events: int, budget_seconds: int,
-            inspect_sizes: bool = False) -> dict:
+            inspect_sizes: bool = False,
+            compare_original: bool = False) -> dict:
     require(1 <= max_events <= MAX_EVENTS, "invalid private preview event bound")
-    require(5 <= budget_seconds <= MAX_SECONDS,
+    require(5 <= budget_seconds <=
+            (MAX_AB_SECONDS if compare_original else MAX_SECONDS),
             "invalid private preview time bound")
+    require(not (inspect_sizes and compare_original),
+            "cannot combine session-size diagnosis with canonical A/B")
     for path in (source, checkpoint, ledger, shadow):
         require(path.is_file() and not path.is_symlink(),
                 "input or private evidence missing/symlink")
@@ -429,6 +520,14 @@ def preview(source: Path, checkpoint: Path, ledger: Path,
                         and all(type(x) is int for x in values)
                         and values[0] >= values[1] >= values[2] >= 0,
                         "preview session hierarchy broken")
+            comparison = {}
+            if compare_original:
+                comparison = compare_original_stream(
+                    inputs, history, pass1, rules=rules,
+                    prefix_cursor=rowid, max_events=max_events,
+                    deadline=deadline, snapshot_now=now,
+                    expected_daily=daily, expected_stats=stats,
+                )
             return {
                 "result": "PRIVATE_CANONICAL_SESSION_PREVIEW_ONLY",
                 "pinned_public_through": "2026-10-19",
@@ -446,6 +545,7 @@ def preview(source: Path, checkpoint: Path, ledger: Path,
                 "no_current_utc_day_published": True,
                 "publication_authorized": False,
                 "private_read_only": True,
+                "independent_stream_ab": comparison,
                 **stats,
             }
     finally:
@@ -458,6 +558,8 @@ def main() -> int:
         p.add_argument("--" + key, type=Path, required=True)
     p.add_argument("--max-events", type=int, default=160_000)
     p.add_argument("--budget-seconds", type=int, default=30)
+    p.add_argument("--compare-historical-stream", action="store_true",
+                   help="Compare original canonical stream_sessions, no publishing")
     p.add_argument("--inspect-session-sizes", action="store_true",
                    help="Read-only aggregate size diagnostic; never build sessions")
     a = p.parse_args()
@@ -466,6 +568,7 @@ def main() -> int:
             a.source, a.checkpoint, a.ledger, a.shadow,
             max_events=a.max_events, budget_seconds=a.budget_seconds,
             inspect_sizes=a.inspect_session_sizes,
+            compare_original=a.compare_historical_stream,
         ), sort_keys=True))
         return 0
     except (RuntimeError, ValueError, TypeError, KeyError,
