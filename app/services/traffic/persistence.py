@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -28,6 +29,13 @@ _LAST_RETENTION_PRUNE_MONOTONIC = 0.0
 SYNC_WRITE_BATCH_ROWS = 2_000
 RETENTION_PRUNE_BATCH_ROWS = 5_000
 RETENTION_PRUNE_INTERVAL_SECONDS = 300.0
+
+
+def ingestion_receipts_enabled() -> bool:
+    """Explicit production opt-in; source-only code deploy MUST be inert."""
+    return os.getenv("TRAFFIC_INGEST_RECEIPTS_ENABLED", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
 
 
 def persistence_enabled() -> bool:
@@ -285,7 +293,8 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
         # wall time retroactively. SQLite ADD COLUMN is metadata-only; no
         # 44M-row backfill or index build. The ingest writer populates the
         # new column only for newly inserted evidence.
-        _ensure_ingestion_clock_column(connection)
+        if ingestion_receipts_enabled():
+            _ensure_ingestion_clock_column(connection)
         connection.commit()
         _SCHEMA_READY = True
 
@@ -370,14 +379,26 @@ def _insert_entry_batches(
 ) -> None:
     if batch_rows <= 0:
         raise ValueError("batch_rows must be positive")
-    sql = """
-        INSERT OR IGNORE INTO traffic_entries (
-            event_id, source_path, source_inode, line_offset, timestamp, ip,
-            request, method, raw_path, normalized_path, status, referrer,
-            referrer_host, ua, host, raw, ingested_at_utc
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                  strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
-    """
+    # Do not change the production SQLite schema or insert path merely
+    # because Git HEAD advanced. Ingest is an automatically scheduled
+    # oneshot every ~2 minutes; activation is a separate explicit step.
+    if ingestion_receipts_enabled():
+        sql = """
+            INSERT OR IGNORE INTO traffic_entries (
+                event_id, source_path, source_inode, line_offset, timestamp, ip,
+                request, method, raw_path, normalized_path, status, referrer,
+                referrer_host, ua, host, raw, ingested_at_utc
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
+        """
+    else:
+        sql = """
+            INSERT OR IGNORE INTO traffic_entries (
+                event_id, source_path, source_inode, line_offset, timestamp, ip,
+                request, method, raw_path, normalized_path, status, referrer,
+                referrer_host, ua, host, raw
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
     for start in range(0, len(batch), batch_rows):
         connection.executemany(sql, batch[start : start + batch_rows])
         # Bound SQLite writer ownership. Replaying committed chunks after a
