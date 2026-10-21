@@ -44,6 +44,21 @@ def _connect() -> sqlite3.Connection:
     return connection
 
 
+def _ensure_ingestion_clock_column(connection: sqlite3.Connection) -> None:
+    """Safe additive migration; preserve every existing historical row."""
+    columns = {
+        str(row[1]) for row in connection.execute(
+            "PRAGMA table_info(traffic_entries)"
+        )
+    }
+    if "ingested_at_utc" not in columns:
+        # The column must stay nullable: old data has NO provable ingest time.
+        # A non-null default would fabricate historical ingestion evidence.
+        connection.execute(
+            "ALTER TABLE traffic_entries ADD COLUMN ingested_at_utc TEXT"
+        )
+
+
 def _ensure_schema(connection: sqlite3.Connection) -> None:
     global _SCHEMA_READY
 
@@ -266,6 +281,11 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
                 ON traffic_push_subscriptions(active, updated_at DESC);
             """
         )
+        # Existing SQLite rows cannot be assigned a trustworthy ingestion
+        # wall time retroactively. SQLite ADD COLUMN is metadata-only; no
+        # 44M-row backfill or index build. The ingest writer populates the
+        # new column only for newly inserted evidence.
+        _ensure_ingestion_clock_column(connection)
         connection.commit()
         _SCHEMA_READY = True
 
@@ -354,8 +374,9 @@ def _insert_entry_batches(
         INSERT OR IGNORE INTO traffic_entries (
             event_id, source_path, source_inode, line_offset, timestamp, ip,
             request, method, raw_path, normalized_path, status, referrer,
-            referrer_host, ua, host, raw
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            referrer_host, ua, host, raw, ingested_at_utc
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                  strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
     """
     for start in range(0, len(batch), batch_rows):
         connection.executemany(sql, batch[start : start + batch_rows])
