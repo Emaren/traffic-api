@@ -1216,3 +1216,77 @@ authority to extend the 131 published days; a proper finality
 certificate must independently establish source ingestion
 completeness, late-source handling, stable global-IP classification,
 and a two-day publication-safe window.
+
+## 2026-10-21 — source-rowid ingestion-order audit (never a day certificate)
+
+Operator VPS release `0c11b71b0b4f01087c5086cc0c493e3111e450b7`
+passed **267/267** regression tests. The readonly midnight carry-in
+impact estimate succeeded in **23.489s** total (baseline 13.011s,
+quarantine replay 10.445s) with **nine canonical Oct19→Oct20
+continuations** and **46,238** inherited future events. The
+unadjusted Oct20 private triple `[5800,140,39]` became the
+counterfactual quarantined `[5795,139,39]` (delta `[-5,-1,0]`).
+The private source prefix had 145,877 verified records vs 147,085
+captured (1,208 awaiting private IP processing), not a source
+ingestion completeness attestation. The original 131-day published
+Jun11–Oct19 checksum stayed
+`84150e4921197efd925fa2d9abccee37154d45a68b6f72e25df57dfc4e2d07b4`,
+legacy public publisher inactive, collector enabled.
+
+**Critical limitation:** `traffic_entries` holds event timestamps,
+source log identifiers and line offsets, but **no authoritative
+ingested-at timestamp per event**. The monotonically increasing
+SQLite rowid is an insertion-order indicator, not an ingestion wall
+clock. Therefore no single query can prove an event was received
+within X hours of its timestamp; no finite observed gap alone
+proves future backdating impossible. Also long-horizon global IP
+behavior can reclassify earlier sessions when future requests arrive
+unless a windowed/frozen behavior policy is explicitly approved.
+
+`scripts.public_audience_v2_ingestion_order_audit` is a protected,
+read-only audit of that limitation. It validates historical/private
+checkpoint identity, original publication SHA, LIVE forward ledger
+and IP shadow origin, guarded exclusive canary lock, worker priority
+and filesystem permissions. It scans at most 200,000 future
+canonical ledger event timestamps in increasing insertion rowid to
+report **relative event-time inversions** (30m, 6h, 24h) and how
+often a previous-day timestamp follows one from a later UTC day.
+It also inspects up to 10,000 as-yet-uncaptured raw Traffic source
+rows beyond the collector cursor, applies the exact canonical
+visibility classifier to flag pending events targeting **sealed
+historical days** or already-ended calendar days, and reports
+source raw rowid distance, private-IP processing backlog, and
+`traffic_ingest_state` update timestamps. No private IPs,
+visitor IDs, source pathnames, UAs or per-actor details leave this
+audit. No source/ledger/checkpoint/archive writes.
+
+Standalone operator command from the already-open `tony` VPS
+terminal (never nested SSH, shell-exiting flags or ownership edits):
+
+```bash
+sudo nice -n 10 timeout -k 5s 65s .venv/bin/python3 \
+  -m scripts.public_audience_v2_ingestion_order_audit \
+  --source /mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3 \
+  --checkpoint /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/checkpoint.sqlite3 \
+  --ledger /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ledger.sqlite3 \
+  --shadow /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ip-shadow.sqlite3 \
+  --max-events 200000 --max-unprocessed-rows 10000 \
+  --budget-seconds 40
+```
+
+It **never** sets
+`late_ingestion_watermark_certified`,
+`global_ip_classification_stable`, `two_closed_utc_days_certified`
+or `publication_authorized` true. If a source backlog is too
+large or the worker is active, it stops safely without changing
+data. Even zero observed inversions cannot authorize public Oct20.
+
+**Required before any new public day:** agree/document an explicit
+bounded late-event acceptance contract tied to ingress or a
+durable event ingestion timestamp; prove log synchronization and
+rowid watermark completeness; choose and verify temporal global
+IP-behavior freezing semantics; obtain at least two consecutive
+stable completed-day independent A/B receipts including the
+Oct19/20 carry-in; and implement an atomic publisher that refuses
+post-seal changes. Do not infer unlimited historical finality
+from snapshot observations.
