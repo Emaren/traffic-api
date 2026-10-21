@@ -81,7 +81,7 @@ class DailyBoundaryReadinessTests(unittest.TestCase):
         receipt = self.run_case(
             [event("2026-10-20T23:50:00+00:00")],
             [event("2026-10-21T00:05:00+00:00", actor="different")],
-            "2026-10-21T00:30:00+00:00",
+            "2026-10-21T00:10:00+00:00",
         )
         self.assertEqual(receipt["actor_keys_observed_continuing_across_midnight"], 0)
         self.assertEqual(receipt["actor_keys_without_observed_expiry"], 1)
