@@ -842,3 +842,61 @@ If the canary lock is held by an active collector, the inspector
 stops safely and should be retried when no writer is active. Do not
 increase the event cap just to make a failing check green; any
 mismatch must be investigated before downstream sessionization.
+
+## Next stage: read-only canonical future-session preview (NOT PUBLICATION)
+
+October 21 independent VPS data proved the first **129,980 retained future
+events** matched their private pass-one global IP evidence, actor-by-actor:
+3,635 actor records, 4,402 distinct UA records, and 16,074 distinct
+path records. VPS tests 221/221, private input/actor parity
+`PRIVATE_CANONICAL_IP_PARITY_VERIFIED`. Original public 131 days stay
+pinned through October 19 (sha
+`84150e4921197efd925fa2d9abccee37154d45a68b6f72e25df57dfc4e2d07b4`).
+
+`scripts.public_audience_v2_future_session_preview` is an
+operator-invoked **read-only candidate-only** replay. It takes the
+private IP shadow's exact durable source-row-ID prefix, matches that
+prefix to the saved future evidence and reuses historical canonical
+`normalize_row`, `build_single_session`,
+`finalize_bucket` and `collapse_distributed_bursts` through the
+unchanged canonical helpers. The replay sorts by
+`(timestamp, line_offset, source_rowid)`, NOT by row-ID; maintains
+`(host, IP, lower-case user agent)` sessions and the exact 30-minute
+expiry inequality; collapses each 60-second burst only when all
+sessions in its bucket are finalized. Global IP behavior is the
+**distinct-set union** of frozen original history and processed future
+pass one, with summed request/direct counts. The latter may affect
+earlier classification as more inputs arrive.
+
+The operator's current-day bucket is never included. Any previous
+UTC-calendar-day values are printed as
+`unverified_past_calendar_day_candidates` **solely for engineering
+inspection**. The output contains only aggregates, no individual IP,
+user agent, path, or visitor IDs. No SQLite writes, no new systemd
+service, no change to published API, and no authorization to publish.
+
+Safe manual example, from existing `tony` VPS terminal with `sudo`
+(no `set -e`, nested SSH or interactive shell exit):
+```bash
+sudo nice -n 10 timeout -k 5s 65s .venv/bin/python3 \
+  -m scripts.public_audience_v2_future_session_preview \
+  --source /mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3 \
+  --checkpoint /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/checkpoint.sqlite3 \
+  --ledger /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ledger.sqlite3 \
+  --shadow /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ip-shadow.sqlite3 \
+  --max-events 160000 --budget-seconds 40
+```
+
+The explicit preview caps are ≤200,000 events, ≤45s wall time,
+≤30,000 open sessions and ≤20,000 events per session. If it cannot
+honor these limits, if the private canary lock is busy, if the project
+worker needs priority, or if source/policy/checkpoint identities
+diverge, it stops without modifying production.
+
+**Still blocking public daily publication:** prove per-day independent
+A/B parity with the original canonical algorithm; decide how sealed
+October 19 sessions continuing into October 20 affect historical
+immutability; certify late arrivals/insertion ordering, source ingestion
+watermarks, and day-end 30-minute expiry; confirm exact burst-collapsed
+semantics over more than one fully completed UTC day. This tool is
+NOT a day certifier, session parity attestor, or automatic publisher.
