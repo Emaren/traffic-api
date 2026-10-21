@@ -6,6 +6,7 @@ No raw IP, persistent browser identifier, UA or private route is returned.
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
@@ -66,7 +67,7 @@ def build_observed_browser_insights(
     opened = time.monotonic()
     uri = f"file:{db_path.resolve().as_posix()}?mode=ro"
     try:
-        with sqlite3.connect(uri, uri=True, timeout=1) as db:
+        with closing(sqlite3.connect(uri, uri=True, timeout=1)) as db:
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA query_only=ON")
             db.execute("PRAGMA busy_timeout=1000")
