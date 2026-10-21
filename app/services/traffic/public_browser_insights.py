@@ -17,7 +17,9 @@ from app.services.traffic.config import BROWSER_EVENT_STORY_REJECT_UA_TERMS
 
 DAYS = 7
 MAX_ROWS = 80_000
-MAX_QUERY_SECONDS = 4.0
+# Bound each cold read even on a busy production volume; the normal path
+# reads indexed page views plus SQL-compacted visible maxima, not 80k full rows.
+MAX_QUERY_SECONDS = 12.0
 MAX_VISIBLE_MS_PER_PAGE = 12 * 60 * 60 * 1000
 MIN_COUNTRY_VISITORS = 5
 EXCLUDED_PATH_PREFIXES = (
@@ -171,37 +173,95 @@ def build_observed_browser_insights(
 
     opened = time.monotonic()
     uri = f"file:{resolved.as_posix()}?mode=ro"
+    expired = False
+
+    def progress() -> int:
+        nonlocal expired
+        if time.monotonic() - opened > MAX_QUERY_SECONDS:
+            expired = True
+            return 1
+        return 0
+
     try:
         with closing(sqlite3.connect(uri, uri=True, timeout=1)) as db:
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA query_only=ON")
             db.execute("PRAGMA busy_timeout=1000")
-            db.set_progress_handler(
-                lambda: int(time.monotonic() - opened > MAX_QUERY_SECONDS), 1000
-            )
-            # The index orders a bounded completed-UTC-day window. Never truncate
-            # an oversized cohort and present its first N events as all visitors.
-            rows = db.execute(
-                """SELECT received_at, event_type, path, visitor_id, session_id,
-                          page_view_id, visible_ms, country, user_agent
+            db.set_progress_handler(progress, 1000)
+
+            # First prove that the *entire* seven-day window fits the cap.
+            # COUNT(*) can use the existing (project_slug,received_at) index.
+            # Never LIMIT a partial cohort and imply it is a full ranking.
+            rows_scanned = int(db.execute(
+                """SELECT COUNT(*) FROM traffic_browser_events
+                   INDEXED BY idx_traffic_browser_events_project_received
+                   WHERE project_slug=? AND received_at>=? AND received_at<?""",
+                (project_slug, begin.isoformat(), end.isoformat()),
+            ).fetchone()[0])
+            if rows_scanned > MAX_ROWS:
+                raise ObservedInsightsUnavailable(
+                    "browser cohort exceeds bounded scan; do not publish partial ranking"
+                )
+
+            # The overwhelming majority of browser rows are heartbeats. Use
+            # the existing (project_slug,event_type,received_at) index so only
+            # genuine page_view metadata, not tens of thousands of heartbeats,
+            # crosses into Python.
+            page_rows = db.execute(
+                """SELECT path, visitor_id, session_id, page_view_id,
+                          country, user_agent
+                   FROM traffic_browser_events
+                   INDEXED BY idx_traffic_browser_events_project_type_received
+                   WHERE project_slug=? AND event_type='page_view'
+                     AND received_at>=? AND received_at<?
+                   ORDER BY received_at DESC""",
+                (project_slug, begin.isoformat(), end.isoformat()),
+            ).fetchall()
+
+            # Collapse repeated cumulative heartbeat readings inside SQLite.
+            # Group by UA as well as page identity, preserving the original
+            # per-event bot exclusion even if one page identity contains
+            # events from different user agents. MAX is NOT SUM: every
+            # heartbeat repeats elapsed visible time.
+            visible_rows = db.execute(
+                """SELECT visitor_id, session_id, page_view_id, user_agent,
+                          MAX(visible_ms) AS max_visible_ms
                    FROM traffic_browser_events
                    INDEXED BY idx_traffic_browser_events_project_received
                    WHERE project_slug=? AND received_at>=? AND received_at<?
-                   ORDER BY received_at DESC LIMIT ?""",
-                (project_slug, begin.isoformat(), end.isoformat(), MAX_ROWS + 1),
+                     AND typeof(visible_ms)='integer'
+                     AND visible_ms>0 AND visible_ms<=?
+                   GROUP BY visitor_id, session_id, page_view_id, user_agent""",
+                (project_slug, begin.isoformat(), end.isoformat(),
+                 MAX_VISIBLE_MS_PER_PAGE),
             ).fetchall()
     except sqlite3.Error as exc:
         raise ObservedInsightsUnavailable(
-            "bounded read-only browser evidence scan failed"
+            "bounded browser evidence query exceeded time budget"
+            if expired else "bounded read-only browser evidence scan failed"
         ) from exc
-    if len(rows) > MAX_ROWS:
-        raise ObservedInsightsUnavailable(
-            "browser cohort exceeds bounded scan; do not publish partial ranking"
-        )
 
     page_views: dict[tuple[str, str, str], dict] = {}
+    for row in page_rows:
+        ua = str(row["user_agent"] or "").lower()
+        if any(token in ua for token in BROWSER_EVENT_STORY_REJECT_UA_TERMS):
+            continue
+        visitor, session, view = (
+            str(row[k] or "") for k in ("visitor_id", "session_id", "page_view_id")
+        )
+        if not visitor or not session or not view:
+            continue
+        path = public_path(str(row["path"] or ""))
+        if path is None:
+            continue
+        # Match the existing descending-read last-write-wins semantics for
+        # duplicate page-view IDs. Never infer a new page from heartbeats.
+        page_views[(visitor, session, view)] = {
+            "path": path, "country": str(row["country"] or "").strip()[:80],
+        }
+
     duration_by_view: dict[tuple[str, str, str], int] = defaultdict(int)
-    for row in rows:
+    for row in visible_rows:
         ua = str(row["user_agent"] or "").lower()
         if any(token in ua for token in BROWSER_EVENT_STORY_REJECT_UA_TERMS):
             continue
@@ -211,16 +271,9 @@ def build_observed_browser_insights(
         if not visitor or not session or not view:
             continue
         key = (visitor, session, view)
-        if row["event_type"] == "page_view":
-            path = public_path(str(row["path"] or ""))
-            if path is None:
-                continue
-            page_views[key] = {
-                "path": path, "country": str(row["country"] or "").strip()[:80],
-            }
-        visible = row["visible_ms"]
-        if type(visible) is int and 0 < visible <= MAX_VISIBLE_MS_PER_PAGE:
-            duration_by_view[key] = max(duration_by_view[key], visible)
+        duration_by_view[key] = max(
+            duration_by_view[key], int(row["max_visible_ms"])
+        )
 
     # Count distinct page-view IDs, not all heartbeat/click requests.
     page_counter = Counter(item["path"] for item in page_views.values())
@@ -260,7 +313,7 @@ def build_observed_browser_insights(
             "observed_browser_sessions": len(by_session),
             "positive_duration_sessions": len(positive_ms),
             "excluded_zero_duration_sessions": len(by_session) - len(positive_ms),
-            "rows_scanned": len(rows),
+            "rows_scanned": rows_scanned,
         },
         "top_countries": [
             {"name": country, "unique_browser_ids": count}
