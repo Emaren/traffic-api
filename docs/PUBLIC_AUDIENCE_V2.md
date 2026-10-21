@@ -805,3 +805,40 @@ and never substitutes request totals for human sessions. Exact session
 parity, cross-UTC-midnight closure, retroactive global IP effects,
 60-second distributed burst collapse, and delayed ingestion watermark
 certification remain required before the public daily publisher.
+
+## Independent future pass-one IP evidence parity — read-only
+
+The private `public_audience_v2_forward_ip_parity` inspector verifies
+the exact normalized input prefix which the private IP shadow claims
+to have consumed. It independently reads saved events from
+`future-ledger.sqlite3`, re-applies the pinned canonical normalizer
+and visibility policy, and compares **each** `(host,ip)` request and
+direct-referrer count against the shadow plus all distinct user-agent
+and normalized-path set members in both directions. It reports
+**aggregate counts only**, never IPs, UAs, paths or visitor IDs. It
+does not authorize daily visitor totals or rewrite the certified archive.
+
+It requires LIVE input, matching original private checkpoint/source
+identity and the 131-day public checksum, strict 0600 files,
+a protected directory, and a stable exclusive private canary lock.
+Default event cap 100k, hard limit 200k. When testing later larger
+prefixes set `--max-events 200000` and apply a wall timeout at
+the operator terminal. This comparison is a memory-bounded-by-cap
+single-prefix audit, NOT a timer, not full session parity and not a
+public publisher. The existing 5-minute private input capture timer
+continues independently.
+
+Sample read-only operator command (after reviewed source deployment):
+```bash
+sudo timeout -k 5s 60s .venv/bin/python3 \
+  -m scripts.public_audience_v2_forward_ip_parity \
+  --source /mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3 \
+  --checkpoint /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/checkpoint.sqlite3 \
+  --ledger /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ledger.sqlite3 \
+  --shadow /mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA/future-ip-shadow.sqlite3 \
+  --max-events 200000
+```
+If the canary lock is held by an active collector, the inspector
+stops safely and should be retried when no writer is active. Do not
+increase the event cap just to make a failing check green; any
+mismatch must be investigated before downstream sessionization.
