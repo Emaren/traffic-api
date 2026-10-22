@@ -289,10 +289,9 @@ def build_observed_browser_insights(
             geolocated += 1
             distinct_country_visitors[country].add(visitor)
     positive_ms = [ms for ms in by_session.values() if ms > 0]
-    # Rank all observed countries. A country with fewer than five browser
-    # identifiers may occupy a top-five slot, but its exact small count must
-    # never be published. No raw identifiers, IPs or one-person counts leave
-    # this backend; a missing sixth country is not fabricated.
+    # Rank distinct observed browser IDs, never requests. Browser identifiers
+    # are not verified people; publish only country-level aggregate counts,
+    # never the underlying browser IDs, IPs, UAs or individual events.
     country_counts = [
         (country, len(identifiers))
         for country, identifiers in distinct_country_visitors.items()
@@ -321,8 +320,14 @@ def build_observed_browser_insights(
         "top_countries": [
             {
                 "name": country,
+                # Backward compatible with already-deployed consumers that
+                # still apply the original small-cohort suppression contract.
                 "unique_browser_ids": count if count >= MIN_COUNTRY_VISITORS else None,
                 "small_cohort": count < MIN_COUNTRY_VISITORS,
+                # Public country-level aggregate (not raw visitor IDs).
+                # Allows the next UI to show exact 1–4 counts without breaking
+                # the currently certified website during the two-repo rollout.
+                "observed_browser_ids": count,
             }
             for country, count in country_counts[:5]
         ],
