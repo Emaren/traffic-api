@@ -289,10 +289,13 @@ def build_observed_browser_insights(
             geolocated += 1
             distinct_country_visitors[country].add(visitor)
     positive_ms = [ms for ms in by_session.values() if ms > 0]
+    # Rank all observed countries. A country with fewer than five browser
+    # identifiers may occupy a top-five slot, but its exact small count must
+    # never be published. No raw identifiers, IPs or one-person counts leave
+    # this backend; a missing sixth country is not fabricated.
     country_counts = [
         (country, len(identifiers))
         for country, identifiers in distinct_country_visitors.items()
-        if len(identifiers) >= MIN_COUNTRY_VISITORS
     ]
     country_counts.sort(key=lambda p: (-p[1], p[0]))
     pages = sorted(page_counter.items(), key=lambda p: (-p[1], p[0]))[:5]
@@ -316,7 +319,11 @@ def build_observed_browser_insights(
             "rows_scanned": rows_scanned,
         },
         "top_countries": [
-            {"name": country, "unique_browser_ids": count}
+            {
+                "name": country,
+                "unique_browser_ids": count if count >= MIN_COUNTRY_VISITORS else None,
+                "small_cohort": count < MIN_COUNTRY_VISITORS,
+            }
             for country, count in country_counts[:5]
         ],
         "top_pages": [
