@@ -84,13 +84,13 @@ class ObservedBrowserInsightsTests(unittest.TestCase):
         })
         self.assertEqual(payload["top_countries"], [{
             "name": "Canada", "unique_browser_ids": 5,
-            "small_cohort": False,
+            "small_cohort": False, "observed_browser_ids": 5,
         }])
         self.assertNotIn("ip", str(payload))
         self.assertNotIn("v1", str(payload))
         self.assertEqual(payload["through_day"], "2026-10-20")
 
-    def test_top_five_includes_small_countries_without_exposing_exact_counts(self):
+    def test_top_five_provides_exact_country_aggregates_without_raw_ids(self):
         # Country counts: Canada=6, US=5, NL=4, Germany=3,
         # France=2, Japan=1. All six countries have genuine public page views.
         for name, total in (
@@ -109,14 +109,21 @@ class ObservedBrowserInsightsTests(unittest.TestCase):
             "Canada", "United States", "Netherlands", "Germany", "France"
         ])
         self.assertEqual(countries[:2], [
-            {"name": "Canada", "unique_browser_ids": 6, "small_cohort": False},
-            {"name": "United States", "unique_browser_ids": 5, "small_cohort": False},
+            {"name": "Canada", "unique_browser_ids": 6, "small_cohort": False,
+             "observed_browser_ids": 6},
+            {"name": "United States", "unique_browser_ids": 5, "small_cohort": False,
+             "observed_browser_ids": 5},
         ])
+        self.assertEqual(
+            [country["observed_browser_ids"] for country in countries],
+            [6, 5, 4, 3, 2],
+        )
         for country in countries[2:]:
             self.assertIsNone(country["unique_browser_ids"])
             self.assertIs(country["small_cohort"], True)
-        # The response must not expose raw visitor identifiers or the exact
-        # small country sample sizes through any other field.
+        # The response reveals only aggregate country counts. Never raw IDs.
+        self.assertNotIn("Netherlands0", str(result))
+        self.assertNotIn("France0", str(result))
         self.assertNotIn("Japan", [row["name"] for row in countries])
         self.assertEqual(result["coverage"]["browser_page_views"], 21)
 
@@ -125,7 +132,7 @@ class ObservedBrowserInsightsTests(unittest.TestCase):
         countries = self.build()["top_countries"]
         self.assertEqual(countries, [{
             "name": "Sweden", "unique_browser_ids": None,
-            "small_cohort": True,
+            "small_cohort": True, "observed_browser_ids": 1,
         }])
 
     def test_excludes_private_assets_bots_and_other_project(self):
