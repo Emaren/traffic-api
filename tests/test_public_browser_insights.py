@@ -83,11 +83,50 @@ class ObservedBrowserInsightsTests(unittest.TestCase):
             "path": "/academy", "page_views": 5
         })
         self.assertEqual(payload["top_countries"], [{
-            "name": "Canada", "unique_browser_ids": 5
+            "name": "Canada", "unique_browser_ids": 5,
+            "small_cohort": False,
         }])
         self.assertNotIn("ip", str(payload))
         self.assertNotIn("v1", str(payload))
         self.assertEqual(payload["through_day"], "2026-10-20")
+
+    def test_top_five_includes_small_countries_without_exposing_exact_counts(self):
+        # Country counts: Canada=6, US=5, NL=4, Germany=3,
+        # France=2, Japan=1. All six countries have genuine public page views.
+        for name, total in (
+            ("Canada", 6), ("United States", 5),
+            ("Netherlands", 4), ("Germany", 3),
+            ("France", 2), ("Japan", 1),
+        ):
+            for index in range(total):
+                visitor = name.replace(" ", "_") + str(index)
+                self.add(visitor=visitor, session="s_" + visitor,
+                         view="p_" + visitor, country=name)
+        result = self.build()
+        countries = result["top_countries"]
+        self.assertEqual(len(countries), 5)
+        self.assertEqual([row["name"] for row in countries], [
+            "Canada", "United States", "Netherlands", "Germany", "France"
+        ])
+        self.assertEqual(countries[:2], [
+            {"name": "Canada", "unique_browser_ids": 6, "small_cohort": False},
+            {"name": "United States", "unique_browser_ids": 5, "small_cohort": False},
+        ])
+        for country in countries[2:]:
+            self.assertIsNone(country["unique_browser_ids"])
+            self.assertIs(country["small_cohort"], True)
+        # The response must not expose raw visitor identifiers or the exact
+        # small country sample sizes through any other field.
+        self.assertNotIn("Japan", [row["name"] for row in countries])
+        self.assertEqual(result["coverage"]["browser_page_views"], 21)
+
+    def test_one_real_country_is_one_real_row_not_padded_to_five(self):
+        self.add(country="Sweden")
+        countries = self.build()["top_countries"]
+        self.assertEqual(countries, [{
+            "name": "Sweden", "unique_browser_ids": None,
+            "small_cohort": True,
+        }])
 
     def test_excludes_private_assets_bots_and_other_project(self):
         self.add(view="internal", path="/admin")
