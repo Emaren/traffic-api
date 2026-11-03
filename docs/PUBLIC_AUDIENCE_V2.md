@@ -1490,3 +1490,33 @@ lifetime global-IP behavior or public human counts. Oct20
 `[5795,139,39]` remains provisional. The protected legacy
 public timer remains disabled. The old whole-future preview's
 200k cap must not simply be raised.
+
+
+## Provisional observed project activity (separate from human certification)
+
+GET /api/projects/aoe2hdbets/observed-daily-series provides at most
+45 days of **observational** daily project activity through the current UTC
+calendar day. This is a small, indexed, read-only query over the existing
+traffic_project_daily_rollups table; it does **not** scan raw source logs
+or modify traffic_public_daily_audience_rollups. Dates already included
+in the canonical certified archive are suppressed to avoid competing
+classifications for the same day. The current UTC day is always flagged
+as partial; even completed days remain provisional.
+
+observed_qualifying_ips counts qualifying IP addresses after legacy
+GET/page filters, **not people, visitors or canonical page sessions**.
+observed_get_events counts filtered GETs, **not confirmed human events**.
+No raw IP addresses, user agents, browser/session IDs, source filenames,
+account data or financial information appear in the response. Every
+point includes certified_human=false; the API declares
+kind=provisional_observed_project_daily.
+
+A consumer must display this feed **separately**, with an unmistakable
+"Observed / Unverified" legend and different units. It must never join,
+sum, visually continue, extrapolate or label these points as the
+canonical three-series totalTraffic, suspectedHuman, confirmedHuman
+history. Live availability does not waive any public-audience V2
+ingestion watermark, global IP stability, cross-day stitching or atomic
+publisher gate. A failed or inconsistent rollup is a 503, never a
+synthetic zero. The existing certified June 11–October 19 source and its
+frozen checksum remain independent.

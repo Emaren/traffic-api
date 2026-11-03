@@ -1365,6 +1365,27 @@ def api_project_observed_browser_insights(project_slug: str) -> dict:
         ) from exc
 
 
+@app.get("/api/projects/{project_slug}/observed-daily-series")
+def api_project_observed_daily_series(project_slug: str) -> dict:
+    """PROVISIONAL filtered GET/IP aggregates, never human-certified history."""
+    import sqlite3
+    from app.services.traffic.config import PERSIST_DB_PATH
+    from app.services.traffic.observed_daily_series import observed_daily_series
+
+    if project_slug != "aoe2hdbets" or not any(
+        item["slug"] == project_slug for item in PROJECTS
+    ):
+        raise HTTPException(status_code=404, detail="Unknown project")
+
+    try:
+        return observed_daily_series(PERSIST_DB_PATH)
+    except (sqlite3.DatabaseError, OSError, ValueError) as error:
+        # Fail closed; don't return raw path/SQLite errors or guess at counts.
+        raise HTTPException(
+            status_code=503, detail="Provisional observed activity is unavailable."
+        ) from error
+
+
 @app.get("/api/projects/{project_slug}/public-audience-series")
 def api_project_public_audience_series(
     project_slug: str,
