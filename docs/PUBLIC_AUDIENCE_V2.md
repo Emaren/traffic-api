@@ -1492,6 +1492,17 @@ public timer remains disabled. The old whole-future preview's
 200k cap must not simply be raised.
 
 
+## Permanent SQLite ingestion-receipt health gate (November 3)
+
+The operator-facing code, bounded mode=ro auditor, failure-mode tests, and
+the verified **current production hold** are recorded in
+[TRAFFIC_V2_INGESTION_RECEIPTS_OPERATOR.md](TRAFFIC_V2_INGESTION_RECEIPTS_OPERATOR.md).
+The live Traffic source remains without `ingested_at_utc`; no historical
+timestamp backfill is valid. This source-only audit does not turn on
+`TRAFFIC_INGEST_RECEIPTS_ENABLED`, update the certified archive or
+enable the legacy publication timer. Until a consistent full backup and
+independent ingestion/remote-log finality evidence exist, publication stays HOLD.
+
 ## Provisional observed project activity (separate from human certification)
 
 GET /api/projects/aoe2hdbets/observed-daily-series provides at most
