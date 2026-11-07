@@ -1,8 +1,29 @@
 [Unit]
-Description=Traffic public health watchdog
+Description=Traffic public health watchdog (dedicated unprivileged identity)
 After=network-online.target traffic-api.service traffic-web.service
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/var/www/Traffic/ops/traffic-watchdog.sh
+User=traffic-watchdog
+Group=traffic-watchdog
+WorkingDirectory=/
+Environment=PATH=/usr/bin:/bin
+ExecStart=/usr/local/libexec/aoe2war-traffic-watchdog-20261107.sh
+TimeoutStartSec=90
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+InaccessiblePaths=-/run/postgresql -/var/run/postgresql
