@@ -17,4 +17,24 @@ Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
 TimeoutStartSec=3600
+# C03 narrow finance boundary: this worker refreshes Traffic SQLite only.
+# No IP networking, root capabilities, direct PostgreSQL socket or finance paths.
+# Keep the shared RuntimeDirectory/flock contract and production SQLite WAL writes.
+NoNewPrivileges=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictNamespaces=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+InaccessiblePaths=-/run/postgresql -/var/run/postgresql
+ReadWritePaths=/mnt/HC_Volume_105319120/traffic-db /run/traffic-rollups
+UMask=0027
 ExecStart=/usr/bin/flock -n -E 0 /run/traffic-rollups/aoe2hdbets.lock /var/www/Traffic/traffic-api/.venv/bin/python3 scripts/rebuild_project_daily_rollups.py --incremental --project aoe2hdbets
