@@ -7,7 +7,11 @@ RequiresMountsFor=/mnt/HC_Volume_105319120/traffic-v2-shadow/canary-oocB0WuA
 [Service]
 Type=oneshot
 User=root
-Group=root
+Group=tony
+# Traffic source DB directory is owned by tony:tony mode 0775; the
+# supplementary primary group allows SQLite read-only WAL/SHM coordination
+# without restoring CAP_DAC_OVERRIDE. Private root-owned 0600 canary remains
+# accessible because User=root owns it.
 WorkingDirectory=/var/www/Traffic/traffic-api
 Environment=PYTHONUNBUFFERED=1
 UMask=0077
@@ -21,6 +25,21 @@ MemorySwapMax=128M
 OOMPolicy=stop
 TimeoutStartSec=50s
 NoNewPrivileges=yes
+# Root remains temporarily necessary for the existing protected root-owned
+# private SQLite canary/ledger. Do NOT infer that User=root is safe by itself.
+# This forwarder uses local SQLite only and must not reach HD/DE/Wolo finance
+# over IP, Unix PostgreSQL sockets, a new network namespace, or capabilities.
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictNamespaces=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+InaccessiblePaths=-/run/postgresql -/var/run/postgresql
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
