@@ -3,7 +3,11 @@ Description=Private forward-evidence capture for AoE2WAR, NEVER an audience publ
 
 [Timer]
 OnBootSec=5min
-OnUnitInactiveSec=5min
+# Re-arm relative to every start. Verified in-progress project rollup
+# collisions now return a logged, no-write defer; real failures still exit2.
+# OnUnitInactiveSec can strand a failed unit, preventing later capture.
+# Never weaken worker priority, lock, sandbox or private-only scope.
+OnUnitActiveSec=5min
 AccuracySec=15s
 RandomizedDelaySec=30s
 Unit=traffic-v2-forward-ledger-aoe2hdbets.service

@@ -253,6 +253,29 @@ def execute(args: argparse.Namespace) -> dict:
             "private-ledger write requires explicit confirmation")
     require(not args.ledger.is_symlink(), "ledger symlink refused")
     guard.require_worker_priority()
+    # Every ~30 minutes the higher-priority daily-rollup timer may overlap
+    # our five-minute private capture. Defer ONLY a verified in-flight
+    # rollup, not a failed/disabled/unknown worker. A recorded no-op is safe:
+    # the checkpoint remains unchanged and the next timer catches up.
+    worker = guard.WORKER + ".service"
+    worker_active = guard.unit_state(worker, "ActiveState")
+    worker_result = guard.unit_state(worker, "Result")
+    require(guard.unit_state(worker, "Type") == "oneshot" and
+            guard.unit_state(worker, "NeedDaemonReload") == "no",
+            "project rollup worker service type or loaded source changed")
+    if worker_active in ("activating", "active", "deactivating"):
+        require(worker_result == "success", "rollup worker in-flight but unsuccessful")
+        return {
+            "status": "DEFERRED_VERIFIED_ROLLUP_IN_PROGRESS",
+            "mode": "PRIVATE_LEDGER_NOOP",
+            "original_history_unchanged": True,
+            "private_ledger_advanced": False,
+            "public_audience_writes": False,
+            "publish_authorized": False,
+            "rollup_service": worker,
+        }
+    require(worker_active == "inactive" and worker_result == "success",
+            "project rollup worker failed or unreviewed state")
     require(guard.worker_idle(), "project rollup worker active")
     info = guard.checkpoint_info(args.checkpoint)
     guard.verify_frozen(args.source, args.checkpoint, info)
