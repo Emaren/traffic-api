@@ -27,7 +27,7 @@ def qualified_config(raw: str) -> dict:
     expected = {
         "Type": "oneshot",
         "User": "root",  # Explicit temporary root-owned 0600 ledger limitation.
-        "Group": "root",
+        "Group": "tony",
         "NoNewPrivileges": "yes",
         "PrivateNetwork": "yes",
         "RestrictAddressFamilies": "AF_UNIX",
@@ -121,7 +121,7 @@ class C03ForwardLedgerUnitSource(unittest.TestCase):
             ("--max-rows 3000", "--max-rows 300000"),
             ("--advance --approve-private-write", "--apply --approve-private-write"),
             ("User=root", "User=tony"),
-            ("Group=root", "Group=tony"),
+            ("Group=tony", "Group=root"),
             ("MemoryMax=512M", "MemoryMax=infinity"),
         ]
         for before, after in mutations:

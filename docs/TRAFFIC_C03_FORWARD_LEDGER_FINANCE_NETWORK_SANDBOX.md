@@ -20,7 +20,13 @@ The source repository is `Emaren/traffic-api` at
 
 The current private canary directory and checkpoint/ledger databases are
 root-owned, mode `0700` and `0600`; a straight `User=tony` change
-would break that existing workload. The hardening does **not** silently
+would break that existing workload. The source Traffic database directory is
+`tony:tony` mode `0775`; the worker keeps `User=root` for its private
+canary and uses `Group=tony` to permit SQLite WAL/SHM coordination without
+CAP_DAC_OVERRIDE. A native read-only run with `Group=root` and zero caps
+failed `OperationalError: attempt to write a readonly database`, while the
+identical sandbox with `Group=tony` returned `mode=READ_ONLY`,
+`source_verified=true`, `publish_authorized=false` (exit 0). The hardening does **not** silently
 change ownership, 1.6 GB ledger files, historic 50 GB source Traffic DB,
 or maintenance behavior.
 
