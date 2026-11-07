@@ -131,6 +131,59 @@ class FutureLedgerTests(unittest.TestCase):
         ]
         self.assertTrue(any("INTEGER PRIMARY KEY" in item for item in plan))
 
+    def test_sparse_live_scan_advances_raw_window_without_skipping_match(self):
+        # Regression for HEL1's 12s budget: a sparse ~411k rowid backlog
+        # previously rescanned from the same cursor and returned interrupted.
+        ledger.advance_one(self.source, self.db, self.meta,
+                           ["aoe2war.com"], [], cap=5)
+        self.assertEqual(self.meta["phase"], "LIVE")
+        rowid = ledger.FROZEN_WATERMARK + ledger.LIVE_ROWID_WINDOW + 1
+        self.add_event(rowid, "2026-10-20T02:00:00+00:00")
+        first = ledger.advance_one(self.source, self.db, self.meta,
+                                   ["aoe2war.com"], [], cap=5)
+        self.assertEqual(first["step_source_rows"], 0)
+        self.assertEqual(int(self.meta["live_rowid"]),
+                         ledger.FROZEN_WATERMARK + ledger.LIVE_ROWID_WINDOW)
+        self.assertEqual(self.captured_ids(), [])
+        second = ledger.advance_one(self.source, self.db, self.meta,
+                                    ["aoe2war.com"], [], cap=5)
+        self.assertEqual(second["step_source_rows"], 1)
+        self.assertEqual(self.captured_ids(), [rowid])
+        self.assertEqual(int(self.meta["live_rowid"]), rowid)
+        self.assertEqual(int(dict(self.db.execute(
+            "SELECT key,value FROM ledger_metadata"))["live_rowid"]), rowid)
+
+    def test_full_matched_page_never_skips_remaining_same_window(self):
+        ledger.advance_one(self.source, self.db, self.meta,
+                           ["aoe2war.com"], [], cap=5)
+        ids = [ledger.FROZEN_WATERMARK + x for x in (10, 11, 12)]
+        for rowid in ids:
+            self.add_event(rowid, "2026-10-20T02:00:00+00:00")
+        first = ledger.advance_one(self.source, self.db, self.meta,
+                                   ["aoe2war.com"], [], cap=2)
+        self.assertEqual(first["step_source_rows"], 2)
+        self.assertEqual(int(self.meta["live_rowid"]), ids[1])
+        second = ledger.advance_one(self.source, self.db, self.meta,
+                                    ["aoe2war.com"], [], cap=2)
+        self.assertEqual(second["step_source_rows"], 1)
+        self.assertEqual(self.captured_ids(), ids)
+        self.assertEqual(int(self.meta["live_rowid"]), ids[2])
+
+    def test_nonmatching_only_window_commits_cursor_atomically(self):
+        ledger.advance_one(self.source, self.db, self.meta,
+                           ["aoe2war.com"], [], cap=5)
+        terminal = ledger.FROZEN_WATERMARK + ledger.LIVE_ROWID_WINDOW
+        self.add_event(terminal, "2026-10-20T02:00:00+00:00",
+                       host="other.example")
+        result = ledger.advance_one(self.source, self.db, self.meta,
+                                    ["aoe2war.com"], [], cap=5)
+        self.assertEqual(result["step_source_rows"], 0)
+        self.assertEqual(int(self.meta["live_rowid"]), terminal)
+        self.assertEqual(int(dict(self.db.execute(
+            "SELECT key,value FROM ledger_metadata"))["live_rowid"]), terminal)
+        self.assertEqual(self.captured_ids(), [])
+        self.assertFalse(result["public_audience_writes"])
+
     def test_policy_and_epoch_drift_fails_closed(self):
         snapshot = {
             "device": "1", "inode": "2",
