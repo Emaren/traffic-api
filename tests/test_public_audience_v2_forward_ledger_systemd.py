@@ -42,10 +42,40 @@ class PrivateForwardLedgerUnitTests(unittest.TestCase):
 
     def test_timer_only_targets_private_evidence_job(self):
         timer = TIMER.read_text()
-        self.assertIn("OnUnitInactiveSec=5min", timer)
+        self.assertIn("OnUnitActiveSec=5min", timer)
+        self.assertNotIn("OnUnitInactiveSec=", timer)
+        self.assertIn("OnBootSec=5min", timer)
+        self.assertIn("AccuracySec=15s", timer)
+        self.assertIn("RandomizedDelaySec=30s", timer)
         self.assertIn("Unit=traffic-v2-forward-ledger-aoe2hdbets.service", timer)
         self.assertNotIn("traffic-public-audience-aoe2hdbets.service", timer)
         self.assertNotIn("ExecStart", timer)
+
+    def test_verified_in_progress_collision_defers_but_real_failures_still_stop(self):
+        code = (ROOT / "scripts/public_audience_v2_forward_ledger.py").read_text()
+        guard = (ROOT / "scripts/public_audience_v2_guarded_resume.py").read_text()
+        service = SERVICE.read_text()
+        timer = TIMER.read_text()
+        self.assertIn('require(guard.worker_idle(), "project rollup worker active")', code)
+        self.assertIn('"DEFERRED_VERIFIED_ROLLUP_IN_PROGRESS"', code)
+        self.assertIn('"PRIVATE_LEDGER_NOOP"', code)
+        self.assertIn('"private_ledger_advanced": False', code)
+        self.assertIn('worker_result == "success"', code)
+        self.assertIn('project rollup worker failed or unreviewed state', code)
+        self.assertIn('print("SAFE STOP:", type(exc).__name__, str(exc)', code)
+        self.assertIn("return 2", code)
+        self.assertIn('unit_state(WORKER + ".service", "ActiveState") == "inactive"',guard)
+        self.assertIn('unit_state(WORKER + ".service", "Result") == "success"',guard)
+        self.assertIn("OnUnitActiveSec=5min",timer)
+        self.assertNotIn("OnUnitInactiveSec=",timer)
+        self.assertNotIn("Restart=always",service)
+        for critical in ("PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX",
+                         "NoNewPrivileges=yes","ProtectSystem=strict",
+                         "CapabilityBoundingSet=",
+                         "--advance --approve-private-write"):
+            self.assertIn(critical,service)
+        self.assertNotIn("OnFailure=",timer)
+        self.assertNotIn("OnFailure=",service)
 
 
 if __name__ == "__main__":
