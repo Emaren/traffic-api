@@ -21,6 +21,21 @@ MemorySwapMax=128M
 OOMPolicy=stop
 TimeoutStartSec=50s
 NoNewPrivileges=yes
+# Root remains temporarily necessary for the existing protected root-owned
+# private SQLite canary/ledger. Do NOT infer that User=root is safe by itself.
+# This forwarder uses local SQLite only and must not reach HD/DE/Wolo finance
+# over IP, Unix PostgreSQL sockets, a new network namespace, or capabilities.
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictNamespaces=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+InaccessiblePaths=-/run/postgresql -/var/run/postgresql
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
