@@ -31,6 +31,9 @@ RELEASE_SHA = "84150e4921197efd925fa2d9abccee37154d45a68b6f72e25df57dfc4e2d07b4"
 START = "2026-10-20T00:00:00+00:00"
 BOOT_END = "2026-10-21T00:00:00+00:00"
 FROZEN_WATERMARK = 44_247_247
+# Bound raw rowids, not matching events: sparse host/UA filters must make
+# cursor progress before the 12-second read-only SQLite query budget expires.
+LIVE_ROWID_WINDOW = 25_000
 PRIVATE_SCHEMA = """
 CREATE TABLE ledger_metadata (
     key TEXT PRIMARY KEY, value TEXT NOT NULL
@@ -163,9 +166,13 @@ def advance_one(src: sqlite3.Connection, db: sqlite3.Connection,
         )
         require(ceiling >= int(meta["live_rowid"]),
                 "live Traffic source rowid ceiling moved backward")
+        # A single giant sparse seek can exceed SQLite's progress budget:
+        # scan a bounded RAW rowid interval even if it contains zero matches.
+        # The cursor and retained events still commit atomically below.
+        scan_ceiling = min(ceiling, int(meta["live_rowid"]) + LIVE_ROWID_WINDOW)
         rows = src.execute(
             live_seek_sql(hosts),
-            (int(meta["live_rowid"]), ceiling, *hosts, cap),
+            (int(meta["live_rowid"]), scan_ceiling, *hosts, cap),
         ).fetchall()
     else:
         raise RuntimeError("STOP: unknown forward-ledger phase")
@@ -204,7 +211,7 @@ def advance_one(src: sqlite3.Connection, db: sqlite3.Connection,
                 updates["phase"] = "LIVE"
         else:
             updates["live_rowid"] = str(
-                ceiling if len(rows) < cap
+                scan_ceiling if len(rows) < cap
                 else rows[-1]["source_rowid"]
             )
         updates["captured"] = str(int(meta["captured"]) + len(rows))
