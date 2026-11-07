@@ -21,4 +21,23 @@ MemoryMax=1024M
 MemorySwapMax=256M
 OOMPolicy=stop
 TimeoutStartSec=600
+# C03 Traffic-only SQLite log ingestion. Prevent PostgreSQL/WOLO writer reach.
+# Preserve Nginx access-log reads, source DB SQLite writes and existing flock.
+NoNewPrivileges=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictNamespaces=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+InaccessiblePaths=-/run/postgresql -/var/run/postgresql
+ReadWritePaths=/mnt/HC_Volume_105319120/traffic-db /run/traffic-ingest
+UMask=0027
 ExecStart=/usr/bin/flock -n -E 75 /run/traffic-ingest/sync.lock /var/www/Traffic/traffic-api/.venv/bin/python3 scripts/sync_traffic_logs.py
