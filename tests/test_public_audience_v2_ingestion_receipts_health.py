@@ -33,8 +33,9 @@ class SampleReadiness(unittest.TestCase):
         self.assertFalse(receipt["two_complete_days_certified"])
 
     def test_real_insert_clock_is_observation_not_certification(self):
-        rows=[row(30),row(29,inserted="2026-11-03T23:11:00.000+00:00"),
-              row(28,inserted=None)]
+        # Newer rowid 30 must have insertion clock >= older rowid 29.
+        rows=[row(30,inserted="2026-11-03T23:11:00.000+00:00"),
+              row(29),row(28,inserted=None)]
         receipt=audit.sample_health(rows,now_utc=NOW,receipts_column=True)
         self.assertEqual(receipt["status"],"OBSERVED_RECEIPT_SAMPLE_ONLY")
         self.assertEqual(receipt["sampled_insert_clock_receipts"],2)
@@ -78,6 +79,44 @@ class SampleReadiness(unittest.TestCase):
         self.assertEqual(result["missing_receipts_between_instrumented_rows"],0)
         self.assertEqual(result["older_null_rows_with_unproven_boundary"],2)
         self.assertFalse(result["publication_authorized"])
+
+    def test_insertion_clock_reversal_fails_closed_even_with_positive_event_delay(self):
+        # The highest ROWID is newest; its ingestion clock cannot legitimately
+        # precede an older row's SQLite insertion clock.
+        rows=[
+            row(40, inserted="2026-11-03T23:10:00+00:00"),
+            row(39, inserted="2026-11-03T23:12:00+00:00"),
+            row(38, inserted="2026-11-03T23:09:00+00:00"),
+        ]
+        receipt=audit.sample_health(rows,now_utc=NOW,receipts_column=True)
+        self.assertEqual(receipt["status"],"HOLD_INGESTION_CLOCK_ROWID_REVERSAL")
+        self.assertEqual(receipt["ingestion_clock_rowid_reversals"],1)
+        self.assertEqual(receipt["nonnegative_ingest_delay_rows"],3)
+        self.assertEqual(receipt["event_time_after_insert"],0)
+        self.assertFalse(receipt["publication_authorized"])
+
+    def test_equal_sqlite_batch_insertion_clocks_are_legitimate(self):
+        rows=[
+            row(40, inserted="2026-11-03T23:10:00.123+00:00"),
+            row(39, inserted="2026-11-03T23:10:00.123+00:00"),
+            row(38, inserted="2026-11-03T23:10:00.123+00:00"),
+        ]
+        receipt=audit.sample_health(rows,now_utc=NOW,receipts_column=True)
+        self.assertEqual(receipt["status"],"OBSERVED_RECEIPT_SAMPLE_ONLY")
+        self.assertEqual(receipt["ingestion_clock_rowid_reversals"],0)
+        self.assertFalse(receipt["publication_authorized"])
+
+    def test_reversal_behind_historical_null_and_newer_gap_remains_hold(self):
+        rows=[
+            row(43, inserted="2026-11-03T23:10:00+00:00"),
+            row(42, inserted=None),
+            row(41, inserted="2026-11-03T23:12:00+00:00"),
+        ]
+        receipt=audit.sample_health(rows,now_utc=NOW,receipts_column=True)
+        self.assertEqual(receipt["status"],"HOLD_INTERLEAVED_INGESTION_RECEIPT_GAPS")
+        self.assertEqual(receipt["missing_receipts_between_instrumented_rows"],1)
+        self.assertEqual(receipt["ingestion_clock_rowid_reversals"],1)
+        self.assertFalse(receipt["publication_authorized"])
 
     def test_clock_in_future_is_hold(self):
         rows=[row(30,inserted="2026-11-04T23:10:00+00:00")]
@@ -166,6 +205,40 @@ class RealSQLiteReadOnly(unittest.TestCase):
         self.assertTrue(receipt["read_only_sqlite_connection"])
         self.assertFalse(receipt["publication_authorized"])
         self.assertFalse((self.path.parent/"traffic.sqlite3-wal").exists())
+
+    def test_real_sqlite_insert_clock_reversal_is_readonly_hold(self):
+        self.create(clock=True)
+        with sqlite3.connect(self.path) as db:
+            db.execute(
+                "UPDATE traffic_entries SET ingested_at_utc = "
+                "'2026-11-03T23:12:00+00:00' WHERE rowid=3"
+            )
+        before=self.path.read_bytes()
+        result=audit.audit(self.path,sample=4)
+        self.assertEqual(result["status"],"HOLD_INGESTION_CLOCK_ROWID_REVERSAL")
+        self.assertEqual(result["ingestion_clock_rowid_reversals"],1)
+        self.assertFalse(result["publication_authorized"])
+        self.assertEqual(before,self.path.read_bytes())
+
+    def test_cli_reversal_requires_nonzero_and_does_not_mutate_sqlite(self):
+        self.create(clock=True)
+        with sqlite3.connect(self.path) as db:
+            db.execute(
+                "UPDATE traffic_entries SET ingested_at_utc = "
+                "'2026-11-03T23:12:00+00:00' WHERE rowid=3"
+            )
+        before=self.path.read_bytes()
+        result=subprocess.run(
+            [sys.executable, "-m", "scripts.public_audience_v2_ingestion_receipts_health",
+             "--source", str(self.path), "--sample", "4", "--require-receipts"],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,text=True,timeout=10,
+        )
+        self.assertEqual(result.returncode,2)
+        output=json.loads(result.stdout)
+        self.assertEqual(output["status"],"HOLD_INGESTION_CLOCK_ROWID_REVERSAL")
+        self.assertFalse(output["publication_authorized"])
+        self.assertEqual(self.path.read_bytes(),before)
 
     def test_real_sqlite_interleaved_receipts_fail_closed_without_writes(self):
         self.create(clock=True)

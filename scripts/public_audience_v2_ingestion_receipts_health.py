@@ -49,6 +49,11 @@ def sample_health(rows: list[tuple[int, str, str | None]], *,
     negative_delay = 0
     event_after_insert = 0
     future_ingestion_clock = 0
+    insertion_clock_order_reversals = 0
+    # In descending ROWID order, newer INSERT receipts must not precede
+    # older INSERT receipts. Equality is normal for batch inserts that share
+    # SQLite's per-step millisecond clock. A reversal is not publication proof.
+    previous_receipted_ingestion_utc: datetime | None = None
     previous_rowid: int | None = None
     newest_receipted_rowid: int | None = None
     null_newer_than_receipt = 0
@@ -80,6 +85,13 @@ def sample_health(rows: list[tuple[int, str, str | None]], *,
             interior_receipt_gaps += pending_older_nulls
             pending_older_nulls = 0
         ingested = utc_datetime(ingest_time, clock=True)
+        if (previous_receipted_ingestion_utc is not None and
+                ingested > previous_receipted_ingestion_utc):
+            # The older ROWID claims a *later* insertion clock than a newer
+            # row. This may indicate clock rollback, clock substitution or
+            # corrupted provenance; never silently certify that sequence.
+            insertion_clock_order_reversals += 1
+        previous_receipted_ingestion_utc = ingested
         if newest_receipted_rowid is None:
             newest_receipted_rowid = rowid
             # All more recent rowids were missing insertion clock.
@@ -113,6 +125,8 @@ def sample_health(rows: list[tuple[int, str, str | None]], *,
         state = "HOLD_RECENT_WRITER_MISSING_RECEIPTS"
     elif interior_receipt_gaps:
         state = "HOLD_INTERLEAVED_INGESTION_RECEIPT_GAPS"
+    elif insertion_clock_order_reversals:
+        state = "HOLD_INGESTION_CLOCK_ROWID_REVERSAL"
     elif negative_delay or future_ingestion_clock:
         state = "HOLD_CLOCK_CONSISTENCY"
     else:
@@ -132,6 +146,7 @@ def sample_health(rows: list[tuple[int, str, str | None]], *,
         "nonnegative_ingest_delay_rows": len(delays),
         "event_time_after_insert": event_after_insert,
         "future_insert_clock_rows": future_ingestion_clock,
+        "ingestion_clock_rowid_reversals": insertion_clock_order_reversals,
         "measured_post_canonical_events": measured_after_canonical,
         "observed_ingestion_delay_p50_milliseconds": percentile(0.5),
         "observed_ingestion_delay_p95_milliseconds": percentile(0.95),
