@@ -42,6 +42,34 @@ publish. The script intentionally does NOT check the historical archive
 hash; its stated October 19 boundary is the pinned source assumption,
 not an independently reverified digest.
 
+## SQLite ROWID versus insertion-clock continuity (November 8 repair)
+
+The bounded audit now also fails closed on an insertion clock reversal.
+Its sample is explicitly ordered by descending SQLite ROWID: a newly
+inserted row must not claim a SQLite UTC insertion timestamp **earlier**
+than an older recorded row. Equal millisecond timestamps are valid for
+rows inserted in the same batch. A reversal returns
+`HOLD_INGESTION_CLOCK_ROWID_REVERSAL` with the non-identifying counter
+`ingestion_clock_rowid_reversals`; the auditor never prints event/IP/UA
+or individual clock values.
+
+This detects an untrustworthy insertion-clock history even if each
+receipt is individually present, within the current UTC timestamp bound,
+and later than its source event timestamp. Mixed internal NULL gaps take
+priority as `HOLD_INTERLEAVED_INGESTION_RECEIPT_GAPS` while the reversal
+count is still surfaced. The historical contiguous older NULL tail
+remains legitimate left-censored history, not a fabricated insertion
+receipt. No event rows or ingestion timestamp data are altered to repair
+this condition; correct the underlying clock or provenance and collect
+new independent evidence. A source clock reversal is **never** a reason
+to advance the October 19 canonical archive.
+
+The five additional adversarial cases include valid same-batch clock
+equality, a pair of nonnegative yet reversed SQLite insertion clocks,
+mixed receipt gaps, and actual temporary SQLite/CLI mutation-free
+negative controls. All observations are bounded, read-only and not
+financially authoritative.
+
 ## Real production observation — November 3, 2026, 23:48 UTC
 
 An authorized read-only HEL1 inspection found:
