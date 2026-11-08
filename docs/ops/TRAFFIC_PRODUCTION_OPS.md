@@ -16,6 +16,43 @@
 - Ops scripts: /var/www/Traffic/ops
 - Traffic DB: /mnt/HC_Volume_105319120/traffic-db/traffic_history.sqlite3
 
+## Canonical AoE2 War publication-age observer (read-only)
+
+The API healthz, ingestion timer and every-30-minute project rollup **do not
+certify** the separate canonical audience series. The legacy full-history
+publisher is intentionally disabled. Do not mark the public chart healthy
+merely because the endpoint returns HTTP 200 or recent filtered GET/IP
+observations exist.
+
+Run the source-only, loopback-only observer after a source review:
+
+    .venv/bin/python3 -I -B scripts/public_audience_v2_publication_freshness.py --phase observe
+
+It checks only the exact AoE2HDBets public-audience-series HTTP endpoint on
+127.0.0.1:3345 and the read-only systemd state of
+traffic-public-audience-aoe2hdbets.timer. It validates published UTC dates,
+completed-day timestamps, monotonic gap-free daily rows, exact project
+identity, nonnegative Total/Potential/Confirmed hierarchy and coverage
+metadata. It flags an archive more than two UTC days old as
+HOLD_CANONICAL_ARCHIVE_STALE (exit code 3), **even with a healthy HTTP 200**.
+It also holds on an unreviewed legacy timer activation or corrupt data. A
+non-stale observation is *not* canonical source/ingestion/financial certification.
+
+Actual HEL1 read-only observation at Nov 8 2026 ~02:40 UTC returned:
+age_utc_days=20, last_published_utc_day=2026-10-19,
+reported_days=131, archive_calculated_at=2026-10-20T21:36:55.213038+00:00,
+legacy_full_history_forge_timer=INACTIVE_DISABLED_INTENTIONAL_HOLD and
+status=HOLD_CANONICAL_ARCHIVE_STALE, exit code 3.
+This observer has **no publication, restart, timer enable, SQLite write,
+raw visitor identity export or financial authorization capability**.
+
+The unresolved corrective work remains Traffic issue #31: coherent private
+offhost source backup, genuine remote log-delivery/receipt lateness bounds,
+global IP/cross-midnight session equivalence, two independently certified
+closed days, bounded atomic publisher with rollback, and a separate approved
+America/Edmonton-local delayed-catch-up schedule. Never substitute observed
+GET/IP totals for canonical three-series human sessions.
+
 ## Fast archive path
 
 The all-time human-visible AoE2 War visit archive is served from:
