@@ -53,6 +53,32 @@ class SampleReadiness(unittest.TestCase):
         self.assertEqual(receipt["status"],"HOLD_RECENT_WRITER_MISSING_RECEIPTS")
         self.assertEqual(receipt["missing_receipts_newer_than_most_recent_receipt"],1)
 
+    def test_interior_receipt_hole_fails_closed_not_legacy_boundary(self):
+        rows=[row(34),row(33,inserted=None),row(32)]
+        result=audit.sample_health(rows,now_utc=NOW,receipts_column=True)
+        self.assertEqual(result["status"],"HOLD_INTERLEAVED_INGESTION_RECEIPT_GAPS")
+        self.assertEqual(result["missing_receipts_between_instrumented_rows"],1)
+        self.assertEqual(result["older_null_rows_with_unproven_boundary"],0)
+        self.assertEqual(result["sampled_insert_clock_receipts"],2)
+        self.assertFalse(result["publication_authorized"])
+
+    def test_multiple_interleaved_holes_counted_without_private_data(self):
+        rows=[row(39),row(38,inserted=None),row(37,inserted=None),
+              row(36),row(35,inserted=None),row(34)]
+        result=audit.sample_health(rows,now_utc=NOW,receipts_column=True)
+        self.assertEqual(result["status"],"HOLD_INTERLEAVED_INGESTION_RECEIPT_GAPS")
+        self.assertEqual(result["missing_receipts_between_instrumented_rows"],3)
+        self.assertNotIn("source_path",result)
+        self.assertNotIn("ip",result)
+
+    def test_older_contiguous_null_tail_remains_legitimate_legacy(self):
+        rows=[row(37),row(36),row(35,inserted=None),row(34,inserted=None)]
+        result=audit.sample_health(rows,now_utc=NOW,receipts_column=True)
+        self.assertEqual(result["status"],"OBSERVED_RECEIPT_SAMPLE_ONLY")
+        self.assertEqual(result["missing_receipts_between_instrumented_rows"],0)
+        self.assertEqual(result["older_null_rows_with_unproven_boundary"],2)
+        self.assertFalse(result["publication_authorized"])
+
     def test_clock_in_future_is_hold(self):
         rows=[row(30,inserted="2026-11-04T23:10:00+00:00")]
         receipt=audit.sample_health(rows,now_utc=NOW,receipts_column=True)
@@ -140,6 +166,34 @@ class RealSQLiteReadOnly(unittest.TestCase):
         self.assertTrue(receipt["read_only_sqlite_connection"])
         self.assertFalse(receipt["publication_authorized"])
         self.assertFalse((self.path.parent/"traffic.sqlite3-wal").exists())
+
+    def test_real_sqlite_interleaved_receipts_fail_closed_without_writes(self):
+        self.create(clock=True)
+        with sqlite3.connect(self.path) as db:
+            db.execute("UPDATE traffic_entries SET ingested_at_utc = NULL WHERE event_id='3'")
+        original=self.path.read_bytes()
+        result=audit.audit(self.path,sample=4)
+        self.assertEqual(result["status"],"HOLD_INTERLEAVED_INGESTION_RECEIPT_GAPS")
+        self.assertEqual(result["missing_receipts_between_instrumented_rows"],1)
+        self.assertEqual(original,self.path.read_bytes())
+        self.assertFalse(result["publication_authorized"])
+
+    def test_cli_interleaved_receipt_hole_requires_failure(self):
+        self.create(clock=True)
+        with sqlite3.connect(self.path) as db:
+            db.execute("UPDATE traffic_entries SET ingested_at_utc=NULL WHERE event_id='3'")
+        before=self.path.read_bytes()
+        result=subprocess.run(
+            [sys.executable, "-m", "scripts.public_audience_v2_ingestion_receipts_health",
+             "--source", str(self.path), "--sample", "4", "--require-receipts"],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,text=True,timeout=10,
+        )
+        self.assertEqual(result.returncode,2)
+        response=json.loads(result.stdout)
+        self.assertEqual(response["status"],"HOLD_INTERLEAVED_INGESTION_RECEIPT_GAPS")
+        self.assertFalse(response["publication_authorized"])
+        self.assertEqual(self.path.read_bytes(),before)
 
     def test_missing_column_stays_missing(self):
         self.create(clock=False)
