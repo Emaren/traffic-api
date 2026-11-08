@@ -52,6 +52,11 @@ def sample_health(rows: list[tuple[int, str, str | None]], *,
     previous_rowid: int | None = None
     newest_receipted_rowid: int | None = None
     null_newer_than_receipt = 0
+    # Historic NULLs are allowed only as a *contiguous old prefix*.
+    # Descending rowids: receipt -> NULL -> receipt demonstrates a hole
+    # inside the observed writer era, not harmless pre-migration history.
+    pending_older_nulls = 0
+    interior_receipt_gaps = 0
     uninstrumented = 0
 
     for rowid, event_time, ingest_time in rows:
@@ -65,11 +70,15 @@ def sample_health(rows: list[tuple[int, str, str | None]], *,
         if ingest_time is None:
             uninstrumented += 1
             if newest_receipted_rowid is not None:
-                # An older NULL may be legitimately left-censored, not a
-                # missing receipt after enabling the ingestion writer.
-                pass
+                # Tentatively permit the boundary between new instrumented
+                # rows and legacy rows. A still-older stamped row disproves
+                # that interpretation; count the entire intervening hole.
+                pending_older_nulls += 1
             continue
         require(receipts_column, "receipt data without schema")
+        if newest_receipted_rowid is not None and pending_older_nulls:
+            interior_receipt_gaps += pending_older_nulls
+            pending_older_nulls = 0
         ingested = utc_datetime(ingest_time, clock=True)
         if newest_receipted_rowid is None:
             newest_receipted_rowid = rowid
@@ -102,6 +111,8 @@ def sample_health(rows: list[tuple[int, str, str | None]], *,
         state = "HOLD_NO_VALID_INGESTION_RECEIPTS"
     elif null_newer_than_receipt:
         state = "HOLD_RECENT_WRITER_MISSING_RECEIPTS"
+    elif interior_receipt_gaps:
+        state = "HOLD_INTERLEAVED_INGESTION_RECEIPT_GAPS"
     elif negative_delay or future_ingestion_clock:
         state = "HOLD_CLOCK_CONSISTENCY"
     else:
@@ -116,6 +127,8 @@ def sample_health(rows: list[tuple[int, str, str | None]], *,
         "sampled_insert_clock_receipts": len(rows) - uninstrumented,
         "legacy_or_uninstrumented_rows": uninstrumented,
         "missing_receipts_newer_than_most_recent_receipt": null_newer_than_receipt,
+        "missing_receipts_between_instrumented_rows": interior_receipt_gaps,
+        "older_null_rows_with_unproven_boundary": pending_older_nulls,
         "nonnegative_ingest_delay_rows": len(delays),
         "event_time_after_insert": event_after_insert,
         "future_insert_clock_rows": future_ingestion_clock,
