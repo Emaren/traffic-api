@@ -1531,3 +1531,33 @@ ingestion watermark, global IP stability, cross-day stitching or atomic
 publisher gate. A failed or inconsistent rollup is a 503, never a
 synthetic zero. The existing certified June 11–October 19 source and its
 frozen checksum remain independent.
+
+## Completed-day negative contract (2026-11-15)
+
+Run the bounded synthetic regression suite independently:
+
+```bash
+python -m unittest discover -s tests -p 'test_public_audience_v2_completed_day_contract.py' -v
+```
+
+It uses in-memory SQLite only. It checks current/future UTC-day rejection
+before file access, October 19/20 watermark overlap with tied keyset pages
+and idempotent retries, atomic rejection of late historical input, missing
+insertion receipts, and private capture success without publication authority.
+Fixed session labels isolate the original strict `>30 minutes` expiry,
+first-seen UTC-day attribution, and real 60-second burst finalizer/collapse.
+These fixtures are not production classifier or complete-day parity evidence.
+
+The preview now rejects globally regressing event timestamps before session
+expiry or burst flushing. The existing canonical reader retains late events
+and sorts the frozen prefix by timestamp, line offset and rowid; do not drop
+late arrivals or feed insertion/rowid order directly to replay.
+
+This is source-only hardening, not a daily publisher. A recent successful
+receipt sample cannot certify older NULL insertion times. Those days remain
+HOLD without independent historical delivery/restore evidence. Next required
+dependency is a persisted, independently verified day-finality receipt binding
+the source prefix, upstream log-delivery coverage, insertion-time coverage and
+an explicit late-arrival policy. Global-IP/cross-epoch semantics and two real
+completed-day canonical parity proofs must still precede an authorized atomic
+publisher. No live ledger, SQLite source, service or timer changes are included.
