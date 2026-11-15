@@ -230,6 +230,7 @@ def _replay_bounded(
                 page_sessions += canonical.finalize_bucket(batch, daily)
             open_counts.pop(bid, None)
 
+    previous_stamp: datetime | None = None
     for item in items:
         accepted += 1
         if accepted % 128 == 0:
@@ -237,6 +238,11 @@ def _replay_bounded(
                     "session-preview time budget exceeded")
         stamp = item["timestamp"]
         require(stamp.tzinfo is not None, "naive event timestamp forbidden")
+        # Rowid order is insertion order, not event order. A late event must
+        # be sorted by read_canonical_inputs before any expiry/burst flush.
+        require(previous_stamp is None or stamp >= previous_stamp,
+                "event time order regressed; use canonical timestamp order")
+        previous_stamp = stamp
         expire(stamp)
         flush(stamp)
         key = (item["host"], item["ip"], (item.get("ua") or "").lower())
