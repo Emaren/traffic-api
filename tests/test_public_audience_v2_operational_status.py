@@ -53,6 +53,12 @@ class TrafficStatusFixture(unittest.TestCase):
         self.assertEqual(result["last_published_utc_day"], "2026-10-19")
         self.assertEqual(result["target_last_completed_utc_day"], "2026-11-17")
         self.assertEqual(result["uncertified_gap_count"], 29)
+        self.assertEqual(result["missing_recent_completed_day_count"], 29)
+        self.assertEqual(result["unknown_historical_gap_count"], 0)
+        self.assertFalse(result["public_previous_completed_day_present"])
+        self.assertEqual(result["public_publication_lag_days"], 29)
+        self.assertEqual(result["status"],
+                         "HOLD_PREVIOUS_COMPLETED_DAY_NOT_PUBLISHED")
         self.assertEqual(result["first_uncertified_day"], "2026-10-20")
         self.assertEqual(result["last_uncertified_day"], "2026-11-17")
         self.assertEqual(result["delay_reason"],
@@ -75,6 +81,59 @@ class TrafficStatusFixture(unittest.TestCase):
         self.assertFalse(result["new_day_certificates_independently_verified_here"])
         self.assertEqual(result["uncertified_gap_count"], 28)
         self.assertEqual(result["last_uncertified_day"], "2026-11-16")
+        self.assertTrue(result["public_previous_completed_day_present"])
+        self.assertEqual(result["missing_recent_completed_day_count"], 0)
+        self.assertEqual(result["unknown_historical_gap_count"], 28)
+        self.assertEqual(result["public_publication_lag_days"], 0)
+        self.assertEqual(result["status"],
+                         "PUBLIC_PREVIOUS_COMPLETED_DAY_PRESENT_CERTIFICATE_UNVERIFIED")
+        self.assertEqual(result["delay_reason"],
+                         "SOURCE_DAY_CERTIFICATE_NOT_INDEPENDENTLY_AUDITED_HERE")
+
+
+    def test_new_previous_day_with_older_gap_is_current_not_backfill_blocked(self):
+        fresh = [
+            {"date": day, "values": {
+                "totalTraffic": 600 + i,
+                "suspectedHuman": 90 + i,
+                "confirmedHuman": 20 + i}}
+            for i, day in enumerate(("2026-11-16", "2026-11-17"))
+        ]
+        source, site, historic = endpoints(fresh)
+        source["archive_calculated_at"] = NOW.isoformat()
+        result = self.inspect(source, site, historic)
+        self.assertEqual(result["published_points"], 133)
+        self.assertEqual(result["last_published_utc_day"], "2026-11-17")
+        self.assertEqual(result["public_publication_lag_days"], 0)
+        self.assertTrue(result["public_previous_completed_day_present"])
+        self.assertEqual(result["unknown_historical_gap_count"], 27)
+        self.assertEqual(result["uncertified_gap_count"], 27)
+        self.assertEqual(result["missing_recent_completed_day_count"], 0)
+        self.assertEqual(result["unknown_historical_gap_days"][0], "2026-10-20")
+        self.assertEqual(result["unknown_historical_gap_days"][-1], "2026-11-15")
+        self.assertEqual(result["last_certified_utc_day"], "2026-10-19")
+        self.assertFalse(result["new_day_certificates_independently_verified_here"])
+        self.assertTrue(
+            result["historical_unknown_does_not_block_prospective_publication"]
+        )
+
+    def test_previous_day_missing_is_real_lag_even_if_previous_day_before_it_present(self):
+        source, site, historic = endpoints([{
+            "date": "2026-11-16",
+            "values": {
+                "totalTraffic": 630, "suspectedHuman": 84,
+                "confirmedHuman": 12}
+        }])
+        source["archive_calculated_at"] = NOW.isoformat()
+        result = self.inspect(source, site, historic)
+        self.assertEqual(result["last_published_utc_day"], "2026-11-16")
+        self.assertEqual(result["public_publication_lag_days"], 1)
+        self.assertEqual(result["missing_recent_completed_days"], ["2026-11-17"])
+        self.assertEqual(result["unknown_historical_gap_count"], 27)
+        self.assertEqual(result["delay_reason"],
+                         "MISSING_VERIFIED_INSERT_RECEIPTS_AND_UPSTREAM_DELIVERY")
+        self.assertEqual(result["status"],
+                         "HOLD_PREVIOUS_COMPLETED_DAY_NOT_PUBLISHED")
 
     def test_mismatched_website_graph_refused(self):
         src, website, h = endpoints([{

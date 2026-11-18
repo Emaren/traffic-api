@@ -105,6 +105,7 @@ def inspect(source, website, *, now=None):
             "PUBLIC_ARCHIVE_CLOCK_FUTURE")
     published = {date.fromisoformat(day) for day in source_matrix}
     latest_possible = now.date() - timedelta(days=1)
+    last_date = date.fromisoformat(last)
     gaps = [
         day.isoformat() for index in range(500)
         if (day := FROZEN_LAST + timedelta(days=index+1)) <= latest_possible
@@ -112,10 +113,19 @@ def inspect(source, website, *, now=None):
     ]
     require(FROZEN_LAST + timedelta(days=501) > latest_possible,
             "GAP_DIAGNOSTIC_WINDOW_EXCEEDED")
+    # A provenance gap *before* the last published day does not make a
+    # newly published previous completed UTC day stale. Public matrices
+    # alone, however, cannot independently attest its signed certificate.
+    last_day_present = last_date == latest_possible
+    outstanding_recent = [
+        d for d in gaps if d > last
+    ]
+    historical_unknown = [d for d in gaps if d < last]
     return {
         "format": "traffic.public-audience.v2.operational-diagnostics.v1",
-        "status": ("HOLD_SOURCE_FINALITY_AND_INSERT_RECEIPT_WITNESS"
-                   if gaps else "OBSERVED_PUBLIC_DATA_RECENT_NOT_DAY_CERTIFICATE"),
+        "status": ("PUBLIC_PREVIOUS_COMPLETED_DAY_PRESENT_CERTIFICATE_UNVERIFIED"
+                   if last_day_present else
+                   "HOLD_PREVIOUS_COMPLETED_DAY_NOT_PUBLISHED"),
         "project": "aoe2hdbets",
         "original_131_day_digest": RELEASE_SHA,
         "historical_131_days_intact": True,
@@ -127,6 +137,13 @@ def inspect(source, website, *, now=None):
         "target_last_completed_utc_day": latest_possible.isoformat(),
         "uncertified_utc_days": gaps,
         "uncertified_gap_count": len(gaps),
+        "unknown_historical_gap_count": len(historical_unknown),
+        "unknown_historical_gap_days": historical_unknown,
+        "missing_recent_completed_day_count": len(outstanding_recent),
+        "missing_recent_completed_days": outstanding_recent,
+        "public_previous_completed_day_present": last_day_present,
+        "public_publication_lag_days": max(0, (latest_possible - last_date).days),
+        "historical_unknown_does_not_block_prospective_publication": True,
         "first_uncertified_day": gaps[0] if gaps else None,
         "last_uncertified_day": gaps[-1] if gaps else None,
         "public_api_generated_at": generated.isoformat(),
@@ -136,8 +153,10 @@ def inspect(source, website, *, now=None):
         "independent_remote_delivery_finality": False,
         "canonical_classifier_parity_finality": False,
         "publisher_health": "NOT_VERIFIED_FROM_ROOT",
-        "delay_reason": ("MISSING_VERIFIED_INSERT_RECEIPTS_AND_UPSTREAM_DELIVERY"
-                         if gaps else "INDEPENDENT_DAY_CERTIFICATION_NOT_AUDITED"),
+        "delay_reason": (
+            "SOURCE_DAY_CERTIFICATE_NOT_INDEPENDENTLY_AUDITED_HERE"
+            if last_day_present else
+            "MISSING_VERIFIED_INSERT_RECEIPTS_AND_UPSTREAM_DELIVERY"),
         "current_utc_day_excluded": True,
         "missing_days_not_filled_with_zero": True,
         "production_publisher_activated_by_this_check": False,
@@ -168,7 +187,9 @@ def main(argv=None):
     try:
         result = inspect(get_json(SOURCE_URL), get_json(WEBSITE_URL))
         print(json.dumps(result, separators=(",", ":"), sort_keys=True))
-        return 2 if result["uncertified_gap_count"] else 0
+        # This public-only check cannot read the signed private certificate
+        # ledger. Even a timely date without gaps is NOT a finality proof.
+        return 2
     except (ValueError, KeyError, TypeError, json.JSONDecodeError,
             OSError, urllib.error.URLError) as exc:
         print("SAFE STOP:", type(exc).__name__, str(exc), file=sys.stderr)
