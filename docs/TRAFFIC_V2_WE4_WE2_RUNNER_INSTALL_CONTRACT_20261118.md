@@ -1,6 +1,10 @@
 # WE4 to WE2 — Traffic V2 root installation and inverse contract
 Date: November 18, 2026. This is a reviewed-source PROPOSAL, not a root permit or live install. Original Emaren/traffic-api only, stacked PR #76 → #75 → #73; independent PR #74 ingress setting. WE2 exclusively controls HEL1 installation, protected service and root operator approvals.
 
+## Signed daily delegation extension
+
+The root-pinned alternative authorization_mode=delegation is specified in TRAFFIC_V2_WE4_DAILY_DELEGATION_CONTRACT_20261118.md. Its separate signed ACTIVE/REVOKED state and <=35-day owner scope are not day-specific owner permits; separate independent per-day source and classifier signatures remain mandatory. The new root-config delegation paths must be admitted before unattended timer activation. Root-only signed revocation-state monotonic anti-rollback acceptance remains outstanding.
+
 ## Production-bound entrypoint
 python3 -m scripts.public_audience_v2_runner --status
 python3 -m scripts.public_audience_v2_runner --once

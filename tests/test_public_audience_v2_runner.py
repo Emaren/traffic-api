@@ -123,6 +123,9 @@ class BoundedRunnerTests(unittest.TestCase):
             "website_gap_renderer_sha256":self.websha,
             "ingest_unit_sha256":runner.sha(self.unit_bytes),
             "max_days_per_run":3,"run_uid":self.uid,"run_gid":os.getgid(),
+            "authorization_mode":"one_day",
+            "daily_delegation":str(self.root/"daily-delegation.json"),
+            "delegation_state":str(self.root/"delegation-state.json"),
         }
         self.config=self.root/"runner.json"
         self._write(self.config,self.cfg)
@@ -382,6 +385,145 @@ class BoundedRunnerTests(unittest.TestCase):
         self.config.chmod(0o600)
         with self.assertRaisesRegex(ValueError,"DUPLICATE_JSON_KEY"):
             self.execute()
+
+
+    def set_delegation(self, *, revocation="ACTIVE", override=None,
+                       state_override=None):
+        """Owner-signs ONCE using disposable test key; not each UTC day."""
+        from scripts import public_audience_v2_daily_delegation as delegated
+        owner = {
+            "schema":delegated.SCHEMA,
+            "delegation_id":"7"*64,
+            "project":"aoe2hdbets","approved_by":"Emaren",
+            "issued_at_utc":"2026-11-18T12:00:00+00:00",
+            "expires_at_utc":"2026-12-08T12:00:00+00:00",
+            "earliest_utc_day":"2026-11-17",
+            "latest_utc_day":"2026-12-07",
+            "max_completed_day_age_days":3,
+            "max_days_per_run":3,
+            "source_commit_sha":SOURCE,
+            "source_database_dev":self.cfg["source_dev"],
+            "source_database_ino":self.cfg["source_inode"],
+            "ingest_service_loaded_sha256":self.cfg["ingest_unit_sha256"],
+            "traffic_api_source_sha256":self.cfg["traffic_api_sha256"],
+            "website_gap_renderer_sha256":self.cfg["website_gap_renderer_sha256"],
+            "upstream_key_sha256":self.cfg["upstream_key_sha256"],
+            "classifier_key_sha256":self.cfg["classifier_key_sha256"],
+            "historical_release_sha256":publisher.RELEASE_SHA,
+            "gap_aware_api_and_chart":True,
+            "no_historical_corrections":True,
+        }
+        owner.update(override or {})
+        signed_owner=self.operator.signed(owner)
+        scope={"delegation":signed_owner["permit"],
+               "signature":signed_owner["signature"]}
+        delegation_sha=runner.sha(witness.canonical(owner))
+        state={
+            "schema":delegated.STATE_SCHEMA,
+            "delegation_sha256":delegation_sha,
+            "delegation_id":owner["delegation_id"],"status":revocation,
+            "revision":1,"effective_at_utc":"2026-11-18T12:00:00+00:00",
+        }
+        state.update(state_override or {})
+        signed_state=self.operator.signed(state)
+        self._write(Path(self.cfg["daily_delegation"]),scope)
+        self._write(Path(self.cfg["delegation_state"]),{
+            "state":signed_state["permit"],
+            "signature":signed_state["signature"],
+        })
+        self.cfg["authorization_mode"]="delegation"
+        self._write(self.config,self.cfg)
+        return owner
+
+    def test_auto_delegation_sign_once_new_utc_day_without_owner_daily_permits(self):
+        self.set_delegation()
+        # Existing per-day owner permit is deliberately absent: only
+        # signed upstream and classifier daily evidence may advance the day.
+        self.set_day("2026-11-17")
+        (self.root/"evidence"/"2026-11-17"/"owner-permit.json").unlink()
+        r=self.execute()
+        self.assertEqual(r["new_count"],1)
+        self.assertEqual(r["last_published_day"],"2026-11-17")
+        self.assertEqual(self.execute()["new_count"],0)
+
+    def test_one_delegation_publishes_two_consecutive_signed_days_across_restart(self):
+        self.set_delegation(override={
+            "issued_at_utc":"2026-11-17T12:00:00+00:00",
+            "earliest_utc_day":"2026-11-16",
+        })
+        first = self.set_day("2026-11-16")
+        (first/"owner-permit.json").unlink()
+        self.assertEqual(self.execute()["new_count"],1)
+        self.db.close()
+        self.db=sqlite3.connect(self.dbpath)
+        second = self.set_day("2026-11-17")
+        (second/"owner-permit.json").unlink()
+        finish = self.execute()
+        self.assertEqual(finish["new_count"],1)
+        self.assertEqual(finish["last_published_day"],"2026-11-17")
+        self.assertEqual(len(publisher.public_rows(self.db)),133)
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) FROM "
+              "traffic_public_audience_day_certificates_v2").fetchone()[0],2)
+        self.assertEqual(self.execute()["new_count"],0)
+
+    def test_revoke_signed_delegation_before_day_write(self):
+        self.set_delegation(revocation="REVOKED")
+        self.set_day("2026-11-17")
+        (self.root/"evidence"/"2026-11-17"/"owner-permit.json").unlink()
+        with self.assertRaisesRegex(ValueError,"DELEGATION_REVOKED"):
+            self.execute()
+        self.assertEqual(len(publisher.public_rows(self.db)),131)
+
+    def test_expired_overscoped_or_source_drift_auto_delegation_refuses(self):
+        examples=[
+            ({"expires_at_utc":"2026-11-18T13:00:00+00:00"}, {},
+             "EXPIRED_NOT_YET_ISSUED"),
+            ({"source_commit_sha":"0"*40}, {}, "SIGNED_SOURCE_SCOPE_DRIFT"),
+            ({"website_gap_renderer_sha256":"0"*64}, {}, "SIGNED_SOURCE_SCOPE_DRIFT"),
+            ({"earliest_utc_day":"2026-11-18"}, {},
+             "DAY_SUBSTITUTION_OR_HISTORICAL_BACKFILL"),
+            ({"max_completed_day_age_days":100}, {},
+             "LATE_DAY_NEEDS_SEPARATE_OWNER_APPROVAL"),
+            ({"expires_at_utc":"2027-01-02T12:00:00+00:00"}, {},
+             "EXPIRED_NOT_YET_ISSUED"),
+        ]
+        self.set_day("2026-11-17")
+        for body,state,reason in examples:
+            with self.subTest(reason=reason,body=body):
+                self.set_delegation(override=body,state_override=state)
+                with self.assertRaisesRegex(ValueError,reason):
+                    self.execute()
+                self.assertEqual(len(publisher.public_rows(self.db)),131)
+
+    def test_changed_revocation_status_without_owner_signature_refused(self):
+        self.set_delegation(revocation="REVOKED")
+        path=Path(self.cfg["delegation_state"])
+        state=json.loads(path.read_text())
+        state["state"]["status"]="ACTIVE"
+        self._write(path,state)  # signature intentionally left untouched
+        self.set_day("2026-11-17")
+        with self.assertRaisesRegex(ValueError,"INDEPENDENT_SIGNATURE_REFUSED"):
+            self.execute()
+        self.assertEqual(len(publisher.public_rows(self.db)),131)
+
+    def test_missing_one_daily_source_signer_blocks_auto_delegation(self):
+        self.set_delegation()
+        folder=self.set_day("2026-11-17")
+        x=json.loads((folder/"day-envelope.json").read_text())
+        x["classifier_signature"]="A"*86
+        self._write(folder/"day-envelope.json",x)
+        with self.assertRaisesRegex(ValueError,"INDEPENDENT_SIGNATURE_REFUSED"):
+            self.execute()
+        self.assertEqual(len(publisher.public_rows(self.db)),131)
+
+    def test_no_delegation_mode_fallback_to_unsigned_day(self):
+        self.set_delegation()
+        self.set_day("2026-11-17")
+        Path(self.cfg["delegation_state"]).unlink()
+        with self.assertRaises((FileNotFoundError,ValueError)):
+            self.execute()
+        self.assertEqual(len(publisher.public_rows(self.db)),131)
 
 
 if __name__=="__main__":

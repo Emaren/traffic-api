@@ -4,7 +4,8 @@
 WE2-owned root only. There is no --config or --key override in the CLI:
 --once requires root-owned /etc/aoe2war/traffic-v2/runner.json and separate
 trusted keys, protected source DB, admitted systemd readback, signed upstream
-delivery, independently signed canonical classifier and a one-day owner permit.
+delivery, independently signed canonical classifier and either a one-day
+owner permit or a revocable owner-signed daily delegation.
 No evidence => no DB writes. One invocation handles at most seven signed days
 and retains the existing 131-day certified archive and all unknown gaps.
 
@@ -31,6 +32,7 @@ from urllib.parse import quote
 
 from scripts import public_audience_v2_day_admission as witness
 from scripts import public_audience_v2_operator_permit as operator
+from scripts import public_audience_v2_daily_delegation as delegation
 from scripts import public_audience_v2_daily_append as append
 from scripts.public_audience_v2_atomic_publish import public_rows
 from scripts.public_audience_v2_release_manifest import sha as matrix_sha
@@ -47,6 +49,7 @@ FIELDS = {
     "source_commit_sha", "traffic_api_file", "traffic_api_sha256",
     "website_gap_receipt", "website_gap_renderer_sha256",
     "ingest_unit_sha256", "max_days_per_run", "run_uid", "run_gid",
+    "authorization_mode", "daily_delegation", "delegation_state",
 }
 MAX_FILES = 366
 MAX_DAYS_PER_RUN = 7
@@ -141,6 +144,9 @@ def config_read(file: Path, *, uid: int, trust_uid: int | None = None) -> dict:
                                    max_bytes=12000, mode=mode))
     need(set(obj) == FIELDS and obj["schema"] == SCHEMA
          and obj["project"] == PROJECT, "ROOT_CONFIG_SCHEMA_OR_PROJECT_DRIFT")
+    need(obj["authorization_mode"] in ("one_day", "delegation")
+         and type(obj["authorization_mode"]) is str,
+         "AUTHORIZATION_MODE_NOT_PINNED")
     need(type(obj["run_uid"]) is int and obj["run_uid"] > 0
          and type(obj["run_gid"]) is int and obj["run_gid"] > 0
          and obj["run_uid"] == uid,
@@ -162,7 +168,8 @@ def config_read(file: Path, *, uid: int, trust_uid: int | None = None) -> dict:
     for k in ("source_database", "evidence_dir", "backup_dir",
               "checkpoint_dir", "worker_lock", "upstream_key",
               "classifier_key", "operator_key", "traffic_api_file",
-              "website_gap_receipt"):
+              "website_gap_receipt", "daily_delegation",
+              "delegation_state"):
         value = obj[k]
         need(type(value) is str and Path(value).is_absolute()
              and str(Path(value)) == value, "SOURCE_PATH_NOT_CANONICAL")
@@ -174,6 +181,12 @@ def config_read(file: Path, *, uid: int, trust_uid: int | None = None) -> dict:
         need(sha(private_file(Path(obj[k]), uid=trust_uid,
                               max_bytes=3000, mode=mode)) ==
              obj[k+"_sha256"], "PINNED_PUBLIC_KEY_MISMATCH")
+    if obj["authorization_mode"] == "delegation":
+        for k in ("daily_delegation", "delegation_state"):
+            if trust_uid == 0:
+                protected_trust_ancestors(Path(obj[k]))
+            private_file(Path(obj[k]), uid=trust_uid, max_bytes=14000,
+                         mode=mode)
     need(Path(obj["worker_lock"]).parent == Path(obj["checkpoint_dir"]),
          "SHARED_WORKER_LOCK_NOT_IN_PRIVATE_CHECKPOINT")
     need(Path(obj["source_database"]).resolve()
@@ -388,34 +401,80 @@ def reusable_preimage(cfg: dict, rows: list[dict], *, day: str, uid: int) -> str
     return append.durable_public_preimage(folder, rows, day=day)
 
 
+def verified_publish_authority(cfg: dict, *, day: str,
+                               folder: Path, evidence: dict,
+                               public_preimage: str, now: datetime,
+                               uid: int, trust_uid: int) -> dict:
+    """Choose ONLY an installed root-pinned authorization mode.
+
+    Daily delegation removes the per-day OWNER signature, NOT the upstream
+    delivery or classifier independent signatures or their source checks.
+    Root-owned signed state is re-opened per day to apply owner revocation.
+    """
+    mode = cfg["authorization_mode"]
+    public_mode = 0o644 if trust_uid == 0 else 0o600
+    owner_key = private_file(Path(cfg["operator_key"]), uid=trust_uid,
+                             mode=public_mode, max_bytes=3000)
+    source_cert_sha = sha(witness.canonical(evidence["certificate"]))
+    if mode == "one_day":
+        one_day = strict_json(private_file(
+            folder/"owner-permit.json", uid=uid))
+        need(one_day.get("permit", {}).get("day") == day,
+             "OWNER_ONE_DAY_CERTIFICATE_DRIFT")
+        return operator.verify_operator_permit(
+            one_day, trust_public_key=owner_key,
+            trusted_public_sha256=cfg["operator_key_sha256"],
+            upstream_key_sha256=cfg["upstream_key_sha256"],
+            classifier_key_sha256=cfg["classifier_key_sha256"],
+            reviewed_source_commit_sha=cfg["source_commit_sha"],
+            database_dev=cfg["source_dev"], database_ino=cfg["source_inode"],
+            reviewed_ingest_unit_sha256=cfg["ingest_unit_sha256"],
+            reviewed_traffic_api_sha256=cfg["traffic_api_sha256"],
+            reviewed_website_gap_renderer_sha256=cfg["website_gap_renderer_sha256"],
+            expected_public_preimage_sha256=public_preimage,
+            certificate_sha256=source_cert_sha, now=now,
+        )
+    need(mode == "delegation", "AUTHORIZATION_MODE_NOT_PINNED")
+    paths = [Path(cfg["daily_delegation"]), Path(cfg["delegation_state"])]
+    if trust_uid == 0:
+        for path in paths:
+            protected_trust_ancestors(path)
+    signed_scope = strict_json(private_file(
+        paths[0], uid=trust_uid, mode=public_mode, max_bytes=14000))
+    revocation = strict_json(private_file(
+        paths[1], uid=trust_uid, mode=public_mode, max_bytes=14000))
+    return delegation.verify_daily_delegation(
+        signed_scope, revocation, trust_public_key=owner_key,
+        trusted_public_sha256=cfg["operator_key_sha256"],
+        expected_upstream_key_sha256=cfg["upstream_key_sha256"],
+        expected_classifier_key_sha256=cfg["classifier_key_sha256"],
+        reviewed_source_commit_sha=cfg["source_commit_sha"],
+        source_database_dev=cfg["source_dev"],
+        source_database_ino=cfg["source_inode"],
+        reviewed_ingest_unit_sha256=cfg["ingest_unit_sha256"],
+        reviewed_traffic_api_sha256=cfg["traffic_api_sha256"],
+        reviewed_website_gap_renderer_sha256=cfg["website_gap_renderer_sha256"],
+        expected_max_days_per_run=cfg["max_days_per_run"],
+        day=day, certificate_sha256=source_cert_sha,
+        public_preimage_sha256=public_preimage, now=now,
+    )
+
+
 def verify_and_append(db: sqlite3.Connection, cfg: dict, day: str,
                       folder: Path, now: datetime, *, uid: int,
                       trust_uid: int, observed_unit: dict) -> dict:
     evidence = strict_json(private_file(folder/"day-envelope.json", uid=uid))
     page = strict_json(private_file(folder/"page-state.json", uid=uid))
-    permit = strict_json(private_file(folder/"owner-permit.json", uid=uid))
     need(evidence.get("certificate", {}).get("day") == day
-         and page.get("day") == day
-         and permit.get("permit", {}).get("day") == day,
+         and page.get("day") == day,
          "SOURCE_EVIDENCE_DAY_IDENTITY_DRIFT")
     unit_check(cfg, observed_unit)
     source_late_check(db, page, day)
     preimage = matrix(db)
-    authority = operator.verify_operator_permit(
-        permit, trust_public_key=private_file(
-            Path(cfg["operator_key"]), uid=trust_uid,
-            mode=0o644 if trust_uid == 0 else 0o600),
-        trusted_public_sha256=cfg["operator_key_sha256"],
-        upstream_key_sha256=cfg["upstream_key_sha256"],
-        classifier_key_sha256=cfg["classifier_key_sha256"],
-        reviewed_source_commit_sha=cfg["source_commit_sha"],
-        database_dev=cfg["source_dev"], database_ino=cfg["source_inode"],
-        reviewed_ingest_unit_sha256=cfg["ingest_unit_sha256"],
-        reviewed_traffic_api_sha256=cfg["traffic_api_sha256"],
-        reviewed_website_gap_renderer_sha256=cfg["website_gap_renderer_sha256"],
-        expected_public_preimage_sha256=preimage,
-        certificate_sha256=sha(witness.canonical(evidence["certificate"])),
-        now=now,
+    authority = verified_publish_authority(
+        cfg, day=day, folder=folder, evidence=evidence,
+        public_preimage=preimage, now=now, uid=uid,
+        trust_uid=trust_uid,
     )
     # The owner permit is separate from the two source and classifier roles.
     result = append.append_verified_day(
@@ -618,6 +677,7 @@ def run_bounded(cfg: dict, *, now: datetime, uid: int,
                 "original_131_day_release_intact": True,
                 "last_public_sha256": old["public_sha256"],
                 "source_ingest_readback": source_health,
+                "authorization_mode": cfg["authorization_mode"],
                 "service_installation_performed": False,
             }
     finally:
@@ -658,6 +718,7 @@ def main(argv: list[str] | None = None) -> int:
                       "unknown_dates": gaps,
                       "unknown_gap_count": len(gaps),
                       "source_ingest_readback": source_health,
+                      "authorization_mode": cfg["authorization_mode"],
                       "candidate_days": [day for day, _ in candidates],
                       "publisher_writes": False,
                       "clock_utc": now.isoformat()}

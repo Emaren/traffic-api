@@ -169,8 +169,9 @@ def append_verified_day(
          all(x in "0123456789abcdef" for x in expected_public_sha256),
          "PUBLIC_PREIMAGE_SHA_NOT_PINNED")
     need(type(independently_admitted_operator_permit) is dict
-         and independently_admitted_operator_permit.get("status") ==
-         "INDEPENDENT_OPERATOR_PERMIT_VERIFIED"
+         and independently_admitted_operator_permit.get("status") in (
+             "INDEPENDENT_OPERATOR_PERMIT_VERIFIED",
+             "INDEPENDENT_DAILY_DELEGATION_VERIFIED")
          and independently_admitted_operator_permit.get("project") == PROJECT
          and independently_admitted_operator_permit.get("day") ==
          certificate_envelope.get("certificate", {}).get("day")
