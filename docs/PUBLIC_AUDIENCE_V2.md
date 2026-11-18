@@ -1622,3 +1622,35 @@ day, **not** a whole-day input census or a visitor-value measurement.
 All 26 remain UNVERIFIED until independent historical delivery/receipt
 restoration (or accepted evidence-of-unknowability) is reviewed.
 The correct public API still ends Oct19 with 131 unchanged days.
+
+
+## WE2 bounded day evidence pagination — source-only candidate, 2026-11-18
+
+The original 20,000 **per-day** diagnostic ceiling in draft #73 remains a
+strict negative gate. A separate new `public_audience_v2_paged_evidence.py`
+source primitive offers **at most 20,000 ordered canonical candidate events
+per page** for days that necessarily contain more than 20,000 rows. It uses
+the existing canonical indexed UTC timestamp/line-offset/rowid ordering,
+original browser/source filter, fixed authenticated forward source rowid
+prefix and external host/rules fingerprints. The caller must first run the
+existing checkpoint/forward-epoch/131-day and worker-lock preflight. The
+primitive **never itself attests those preconditions**.
+
+The 0600, owner-private checkpoint is atomically replaced under a separate
+stable nonblocking sibling flock with fsync and exact preimage comparison.
+After a crash, a new process may reload the last complete page cursor and
+continue; a stale writer, changed source epoch, host policy, day, prefix or
+already exhausted source prefix is refused. The rolling digest covers only
+internal source rowid/time/offset/ingestion-clock data; no IP, UA, request
+path or raw event payload is emitted. Replaying a page from the same state
+yields exactly the same result; no audience database write occurs.
+
+**This does NOT fix historical NULL ingestion receipts.** In particular,
+October 20 and dates through November 17 still require independent upstream
+log completeness and insert-clock disposition. The primitive does not prove
+unseen late arrivals, retroactive global-IP classification, cross-midnight
+30-minute session parity, 60-second burst parity, finality, two consecutive
+closed days, atomic publication or scheduler restart acceptance. Every
+result returns explicit HOLD, `publication_authorized=false`, empty
+`certified_days` and `public_audience_writes=false`. This is source-only;
+there is no HEL1 install, service/timer activation, or public site change.
