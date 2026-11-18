@@ -124,6 +124,7 @@ class BoundedRunnerTests(unittest.TestCase):
             "ingest_unit_sha256":runner.sha(self.unit_bytes),
             "max_days_per_run":3,"run_uid":self.uid,"run_gid":os.getgid(),
             "authorization_mode":"one_day",
+            "external_revocation_mode":"github-protected-revocation-branch-v1",
             "daily_delegation":str(self.root/"daily-delegation.json"),
             "delegation_state":str(self.root/"delegation-state.json"),
         }
@@ -175,8 +176,14 @@ class BoundedRunnerTests(unittest.TestCase):
 
     def execute(self,enabled=True):
         cfg=runner.config_read(self.config,uid=self.uid)
+        def remote_state(*,now):
+            if hasattr(self,"remote_state_override"):
+                return self.remote_state_override
+            file = Path(self.cfg["delegation_state"])
+            return json.loads(file.read_text()) if file.is_file() else None
         with patch.object(publisher,"RELEASE_SHA",self.original_sha), \
-             patch.object(witness,"RELEASE_SHA",self.original_sha):
+             patch.object(witness,"RELEASE_SHA",self.original_sha), \
+             patch.object(runner.external,"current_external_state",side_effect=remote_state):
             return runner.run_bounded(
                 cfg,now=NOW,uid=self.uid,
                 systemd_observer=lambda:self.service(enabled=enabled),
@@ -516,6 +523,37 @@ class BoundedRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,"INDEPENDENT_SIGNATURE_REFUSED"):
             self.execute()
         self.assertEqual(len(publisher.public_rows(self.db)),131)
+
+
+    def test_external_revocation_rejects_old_signed_local_active_state(self):
+        # WE2 publishes REVOKED to separately governed external branch.
+        self.set_delegation(revocation="REVOKED")
+        remote = json.loads(Path(self.cfg["delegation_state"]).read_text())
+        # A local restorer maliciously reinstates the older correctly signed
+        # ACTIVE state. Its Ed25519 validity must NOT be enough to publish.
+        self.set_delegation(revocation="ACTIVE")
+        self.remote_state_override = remote
+        self.set_day("2026-11-17")
+        with self.assertRaisesRegex(ValueError,"TRUSTED_EXTERNAL_STATE_CONFLICT"):
+            self.execute()
+        self.assertEqual(len(publisher.public_rows(self.db)),131)
+
+    def test_remote_revocation_unavailable_refuses_daily_authorization(self):
+        self.set_delegation()
+        self.set_day("2026-11-17")
+        self.remote_state_override = None
+        with self.assertRaisesRegex(ValueError,"LOCAL_OR_EXTERNAL_ENVELOPE_DRIFT"):
+            self.execute()
+        self.assertEqual(len(publisher.public_rows(self.db)),131)
+
+    def test_changed_remote_revision_requires_new_locally_admitted_state(self):
+        self.set_delegation(state_override={"revision":2})
+        newer = json.loads(Path(self.cfg["delegation_state"]).read_text())
+        self.set_delegation(state_override={"revision":1})
+        self.remote_state_override = newer
+        self.set_day("2026-11-17")
+        with self.assertRaisesRegex(ValueError,"TRUSTED_EXTERNAL_STATE_CONFLICT"):
+            self.execute()
 
     def test_no_delegation_mode_fallback_to_unsigned_day(self):
         self.set_delegation()

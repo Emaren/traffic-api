@@ -1,6 +1,10 @@
 # WE4 to WE2 — Traffic V2 root installation and inverse contract
 Date: November 18, 2026. This is a reviewed-source PROPOSAL, not a root permit or live install. Original Emaren/traffic-api only, stacked PR #76 → #75 → #73; independent PR #74 ingress setting. WE2 exclusively controls HEL1 installation, protected service and root operator approvals.
 
+## External revocation monotonic witness (NEW mandatory admission)
+
+The source-based rollback defense is in `docs/TRAFFIC_V2_WE4_EXTERNAL_REVOCATION_ADMISSION_20261118.md`. In delegation mode, EVERY attempted day requires a fresh authenticated GitHub CURRENT owner-signed state readback matching the local root-owned state. No access, wrong state, stale HTTP Date, missing branch or signed REVOKED => HOLD. WE2 must independently protect the separate `traffic-v2-revocation` GitHub branch with required signed monotonic terminal-transition checks, no force pushes/deletion/admin bypass and human review before any real automatic publication. It is not installed or physically qualified by this PR.
+
 ## Signed daily delegation extension
 
 The root-pinned alternative authorization_mode=delegation is specified in TRAFFIC_V2_WE4_DAILY_DELEGATION_CONTRACT_20261118.md. Its separate signed ACTIVE/REVOKED state and <=35-day owner scope are not day-specific owner permits; separate independent per-day source and classifier signatures remain mandatory. The new root-config delegation paths must be admitted before unattended timer activation. Root-only signed revocation-state monotonic anti-rollback acceptance remains outstanding.

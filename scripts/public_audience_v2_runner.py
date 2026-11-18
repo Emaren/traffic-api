@@ -33,6 +33,7 @@ from urllib.parse import quote
 from scripts import public_audience_v2_day_admission as witness
 from scripts import public_audience_v2_operator_permit as operator
 from scripts import public_audience_v2_daily_delegation as delegation
+from scripts import public_audience_v2_revocation_external as external
 from scripts import public_audience_v2_daily_append as append
 from scripts.public_audience_v2_atomic_publish import public_rows
 from scripts.public_audience_v2_release_manifest import sha as matrix_sha
@@ -50,6 +51,7 @@ FIELDS = {
     "website_gap_receipt", "website_gap_renderer_sha256",
     "ingest_unit_sha256", "max_days_per_run", "run_uid", "run_gid",
     "authorization_mode", "daily_delegation", "delegation_state",
+    "external_revocation_mode",
 }
 MAX_FILES = 366
 MAX_DAYS_PER_RUN = 7
@@ -147,6 +149,8 @@ def config_read(file: Path, *, uid: int, trust_uid: int | None = None) -> dict:
     need(obj["authorization_mode"] in ("one_day", "delegation")
          and type(obj["authorization_mode"]) is str,
          "AUTHORIZATION_MODE_NOT_PINNED")
+    need(obj["external_revocation_mode"] == external.MODE,
+         "EXTERNAL_REVOCATION_MODE_NOT_ADMITTED")
     need(type(obj["run_uid"]) is int and obj["run_uid"] > 0
          and type(obj["run_gid"]) is int and obj["run_gid"] > 0
          and obj["run_uid"] == uid,
@@ -443,6 +447,10 @@ def verified_publish_authority(cfg: dict, *, day: str,
         paths[0], uid=trust_uid, mode=public_mode, max_bytes=14000))
     revocation = strict_json(private_file(
         paths[1], uid=trust_uid, mode=public_mode, max_bytes=14000))
+    # A signed local ACTIVE snapshot is NOT rollback-safe. Always read the
+    # externally governed current state over a fresh authenticated channel.
+    current = external.current_external_state(now=now)
+    external.compare_root_and_external(revocation, current)
     return delegation.verify_daily_delegation(
         signed_scope, revocation, trust_public_key=owner_key,
         trusted_public_sha256=cfg["operator_key_sha256"],
