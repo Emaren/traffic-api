@@ -95,7 +95,9 @@ class OneFileExecutor(unittest.TestCase):
             self.assertEqual(t.DROPIN_PATH.stat().st_mode&0o777,0o644)
             with self.assertRaises(FileExistsError):
                 t.exact_install()
-            t.exact_inverse()
+            # Disposable nonroot temp file cannot genuinely be root-owned.
+            with patch.object(t,"read_single",side_effect=lambda path, **kw: Path(path).read_bytes()):
+                t.exact_inverse()
             self.assertFalse(t.DROPIN_PATH.exists())
 
     def test_inverse_refuses_drift_without_removal(self):
