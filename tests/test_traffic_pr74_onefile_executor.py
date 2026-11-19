@@ -108,5 +108,36 @@ class OneFileExecutor(unittest.TestCase):
                 t.exact_inverse()
             self.assertTrue(t.DROPIN_PATH.exists())
 
+
+    def test_real_ssh_ed25519_owner_signature_namespace_and_tamper(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            key=root/"test-only-ed25519"
+            gen=subprocess.run(["/usr/bin/ssh-keygen","-q","-t","ed25519",
+                                "-N","","-f",str(key)],capture_output=True)
+            if gen.returncode:
+                self.skipTest("host ssh-keygen Ed25519 fixture unavailable")
+            pub=Path(str(key)+".pub").read_text().strip()
+            allowed=root/"allowed_signers"
+            allowed.write_text("aoe2war-traffic-pr74-owner "+pub+"\n")
+            message=root/"permit.json"
+            message.write_bytes(b'{"purpose":"TRAFFIC_PR74_RECEIPT_SETTING_ONLY"}\n')
+            signed=subprocess.run(["/usr/bin/ssh-keygen","-Y","sign","-f",
+                                   str(key),"-n","aoe2war-traffic-pr74",str(message)],
+                                  capture_output=True)
+            self.assertEqual(signed.returncode,0,signed.stderr.decode(errors="replace"))
+            sig=Path(str(message)+".sig")
+            cmd=["/usr/bin/ssh-keygen","-Y","verify",
+                 "-I","aoe2war-traffic-pr74-owner","-n","aoe2war-traffic-pr74",
+                 "-f",str(allowed),"-s",str(sig)]
+            def verify(*,raw=None,argv=cmd):
+                return subprocess.run(argv,input=message.read_bytes() if raw is None else raw,
+                                      capture_output=True)
+            self.assertEqual(verify().returncode,0)
+            self.assertNotEqual(verify(raw=b'tampered\n').returncode,0)
+            wrong=cmd.copy(); wrong[wrong.index("aoe2war-traffic-pr74")]="aoe2war-retire-stage"
+            self.assertNotEqual(verify(argv=wrong).returncode,0)
+
 if __name__=="__main__":
     unittest.main()
