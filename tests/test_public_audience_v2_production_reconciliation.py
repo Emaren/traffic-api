@@ -63,9 +63,9 @@ def api():
 
 
 class TrafficProductionReconciliationGateTests(unittest.TestCase):
-    def evaluate(self, s=None, h=None, web=None, browser=None):
+    def evaluate(self, s=None, h=None, web=None, browser=None, when=NOW):
         return gate.judge(s or source(), h or host(), web or api(),
-                          now=NOW, browser_observation=browser)
+                          now=when, browser_observation=browser)
 
     def test_http_200_archive_cannot_be_reported_healthy(self):
         r = self.evaluate()
@@ -169,6 +169,17 @@ class TrafficProductionReconciliationGateTests(unittest.TestCase):
         self.assertFalse(r["owner_revocation_active_external_verified"])
         self.assertTrue(any(x.startswith("external_owner_revocation_trust:")
                             for x in r["failed_checks"]))
+
+    def test_grace_then_next_day_expected_freshness_rolls_forward(self):
+        early = self.evaluate(when=datetime(2026, 11, 22, 1, 15,
+                                            tzinfo=timezone.utc))
+        late = self.evaluate(when=datetime(2026, 11, 22, 3, 15,
+                                           tzinfo=timezone.utc))
+        self.assertEqual(early["freshness_target_after_hourly_grace_utc_day"],
+                         "2026-11-20")
+        self.assertEqual(late["freshness_target_after_hourly_grace_utc_day"],
+                         "2026-11-21")
+        self.assertEqual(late["status"], "FAIL")
 
     def test_read_only_cli_red_exit(self):
         with patch.object(gate, "check_once", return_value=self.evaluate()):
