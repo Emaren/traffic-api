@@ -186,6 +186,9 @@ class PagingEvidenceFixture(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,"private"):
             other_dir=Path(self.tmp.name) / "unprotected"
             other_dir.mkdir(mode=0o755)
+            # Restricted PRODUCT UID650 has umask 077; explicitly weaken the
+            # disposable directory to test rejection of an actual 0755 path.
+            other_dir.chmod(0o755)
             other=other_dir / "unprotected.json"
             pages.save_private_continuation(other,state)
         pages.save_private_continuation(self.state_file,state)
