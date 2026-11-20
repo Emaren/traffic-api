@@ -1,0 +1,40 @@
+name: verify-traffic-v2-revocation-transition
+
+on:
+  pull_request:
+    branches:
+      - traffic-v2-revocation
+
+permissions:
+  contents: read
+
+jobs:
+  verify-traffic-v2-revocation-transition:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - name: Check out trusted protected BASE source (never execute PR head code)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch proposed PR commit as data only
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "refs/pull/${PR_NUMBER}/head:refs/remotes/traffic-v2-proposed"
+          actual="$(git rev-parse refs/remotes/traffic-v2-proposed)"
+          test "$actual" = "$EXPECTED_HEAD"
+
+      - name: Verify one owner-signed terminal revocation transition
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          python3 -m scripts.public_audience_v2_revocation_required_check \
+            --base-sha "$BASE_SHA" --proposed-sha "$HEAD_SHA"
