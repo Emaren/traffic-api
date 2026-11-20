@@ -35,7 +35,8 @@ def host():
             "traffic-ingest.timer": {"ActiveState": "active",
                                      "UnitFileState": "enabled"},
             "traffic-ingest.service": {
-                "Environment": "PYTHONUNBUFFERED=1 TRAFFIC_INGEST_RECEIPTS_ENABLED=1"},
+                "Environment": "PYTHONUNBUFFERED=1 TRAFFIC_INGEST_RECEIPTS_ENABLED=1",
+                "ExecStart": "/usr/bin/flock -n -E 75 /run/traffic-ingest/sync.lock /var/www/Traffic/traffic-api/.venv/bin/python3 scripts/sync_traffic_logs.py"},
             "traffic-api.service": {
                 "Environment": "TRAFFIC_DISABLE_INLINE_INGEST=1"},
             "traffic-v2-publisher.service": {
@@ -45,6 +46,10 @@ def host():
                 "UnitFileState": "", "LastTriggerUSec": ""},
         },
         "financial_open_ports": [],
+        "original_signed_unit_sha256": {
+            "traffic-ingest.service": gate.SIGNED_LOADED_INGEST_SHA256,
+            "traffic-ingest.timer": gate.SIGNED_ORIGINAL_TIMER_SHA256,
+        },
         "publisher_config_present": False,
     }
 
@@ -76,6 +81,27 @@ class TrafficProductionReconciliationGateTests(unittest.TestCase):
                             for x in r["failed_checks"]))
         self.assertIn("natural_ingestion_receipts", r["passed_checks"])
         self.assertTrue(r["other_product_lanes_may_ship"])
+
+    def test_original_ingest_unit_hash_mismatch_fails(self):
+        h = host()
+        h["original_signed_unit_sha256"]["traffic-ingest.service"] = "0"*64
+        r = self.evaluate(h=h)
+        self.assertTrue(any(x.startswith("original_single_ingest_configuration:")
+                            for x in r["failed_checks"]))
+
+    def test_original_timer_unit_hash_mismatch_fails(self):
+        h = host()
+        h["original_signed_unit_sha256"]["traffic-ingest.timer"] = "f"*64
+        r = self.evaluate(h=h)
+        self.assertTrue(any(x.startswith("original_single_ingest_configuration:")
+                            for x in r["failed_checks"]))
+
+    def test_original_flock_removed_from_service_is_fatal(self):
+        h = host()
+        h["units"]["traffic-ingest.service"]["ExecStart"] = "python3 scripts/sync_traffic_logs.py"
+        r = self.evaluate(h=h)
+        self.assertTrue(any(x.startswith("original_single_ingest_configuration:")
+                            for x in r["failed_checks"]))
 
     def test_missing_genuine_clock_fails_independently(self):
         s = source()
