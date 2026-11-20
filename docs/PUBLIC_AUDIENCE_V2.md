@@ -1561,3 +1561,64 @@ the source prefix, upstream log-delivery coverage, insertion-time coverage and
 an explicit late-arrival policy. Global-IP/cross-epoch semantics and two real
 completed-day canonical parity proofs must still precede an authorized atomic
 publisher. No live ledger, SQLite source, service or timer changes are included.
+## 2026-11-15 — bounded source-only completed-day insertion evidence gate
+
+The command python3 -m scripts.public_audience_v2_day_ingest_evidence is
+a **pre-certification diagnostic, never a publisher or scheduler**.
+It accepts --source, --checkpoint, --ledger, --lock and --day YYYY-MM-DD;
+all private paths must share the already pinned private canary directory,
+with mode 0600 and the existing .canary.lock. The source is opened in
+SQLite mode=ro/query_only. The project daily worker retains priority and
+the failed old audience publication timer must remain inactive.
+
+Before computing day counts, the tool independently requires the real
+sealed historical checkpoint, 131 unchanged public days, original
+source inode/policy, canonical project hosts and unchanged browser/chain
+source filter, and an exact validated private forward-ledger epoch. It
+refuses current/future UTC days before file access. Each query is
+indexed, bounded to at most 20,000 canonical candidate source events
+and 45 seconds total; no actor, IP, UA, path or per-event timestamp
+is emitted. A day exceeding the cap is a SAFE STOP, not an estimated
+audience total. Missing source INSERT-time receipts, forward cursor lag,
+retroactive events touching the frozen Oct19 archive, invalid clocks,
+source rewind and shared-canary lock contention all fail closed.
+
+**All successful diagnostic reads still exit with nonzero status 2**
+and no ready-to-publish days. This is intentional: no local SQLite
+sampling proves independent upstream log delivery, stable global-IP
+classification, original 30-minute cross-midnight sessions, 60-second
+burst collapse, late-arrival closure or two real completed-day canonical
+A/B equivalence. Even perfect receipts are not a publication permit.
+No public audience table, scheduler, ledger, source writer or financial
+service is touched by this source-only diagnostic.
+
+At 2026-11-15T22:31:55Z, a read-only live HEL1 observation under
+the existing private canary lock and project-worker priority found:
+2026-10-20, 2026-11-13 and 2026-11-14 each exceeded a 20,000-row
+bounded scan. **All 20,001 sampled rows on each day had
+ingested_at_utc=NULL.** These are bounded samples, *not* whole-day
+counts or claims that every source row is missing the receipt.
+The private collector cursor was 50,588,063, source maximum rowid
+50,588,871. All three dates remain UNVERIFIED; the public 131-day
+release through Oct19 is unchanged.
+
+Next source owners must independently restore genuine delivery/INSERT
+receipts (or document permanently UNKNOWN historical NULL epochs),
+produce exact bounded session/global-IP parity and forward-source
+prefix/carry and lateness proof for two real consecutive completed
+UTC days, then separately review/admit a reversible atomic per-day
+publisher with source-lock/preimage/idempotence/rollback and lagged
+scheduler. No legacy full-history timer restart, fabricated insertion
+timestamp, project-rollup substitution or source-authorized live
+SQLite write is supported by this change.
+
+The follow-up 2026-11-15T22:36:49Z **26-day bounded earliest-candidate-row**
+read-only probe, using the same exact canonical host/browser source
+filter and priority lock, found at least one genuine NULL
+ingested_at_utc on **every date from Oct20 through Nov14 inclusive**.
+It read one earliest canonical candidate row per day; this is a
+source-backed proof of at least one unsupported insertion receipt per
+day, **not** a whole-day input census or a visitor-value measurement.
+All 26 remain UNVERIFIED until independent historical delivery/receipt
+restoration (or accepted evidence-of-unknowability) is reviewed.
+The correct public API still ends Oct19 with 131 unchanged days.
