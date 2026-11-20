@@ -78,13 +78,19 @@ def source_observation(path: Path = SOURCE, r0: int = SIGNED_RECEIPT_R0) -> dict
     # recalculated from whatever new path appears.
     require((st.st_dev, st.st_ino) == (2064, 131074),
             "SOURCE_DB_DEVICE_INODE_CHANGED")
+    candidate_day = max(RECEIPTS_ON_UTC_DAY,
+                        datetime.now(timezone.utc).date())
+    next_day = candidate_day + timedelta(days=1)
     with closing(sqlite3.connect("file:" + str(path) + "?mode=ro",
                                  uri=True, timeout=2)) as db:
         db.execute("PRAGMA query_only=ON")
+        # Bounded newest sample; a full all-time COUNT would grow without
+        # limit as the original one-writer SQLite ingester runs for years.
         row = db.execute(
             "SELECT COUNT(*), COUNT(ingested_at_utc),"
-            " MAX(rowid), MAX(ingested_at_utc)"
-            " FROM traffic_entries WHERE rowid > ?", (r0,)
+            " MAX(rowid), MAX(ingested_at_utc) FROM ("
+            "SELECT rowid, ingested_at_utc FROM traffic_entries"
+            " WHERE rowid > ? ORDER BY rowid DESC LIMIT 512)", (r0,)
         ).fetchone()
         before = db.execute(
             "SELECT COUNT(*),SUM(ingested_at_utc IS NOT NULL) FROM ("
@@ -95,7 +101,7 @@ def source_observation(path: Path = SOURCE, r0: int = SIGNED_RECEIPT_R0) -> dict
             "SELECT COUNT(*),COUNT(ingested_at_utc)"
             " FROM traffic_entries INDEXED BY idx_traffic_entries_timestamp"
             " WHERE timestamp >= ? AND timestamp < ?",
-            (RECEIPTS_ON_UTC_DAY.isoformat(), "2026-11-21"),
+            (candidate_day.isoformat(), next_day.isoformat()),
         ).fetchone()
         schemas = {r[0] for r in db.execute(
             "SELECT name FROM sqlite_master WHERE type='table' "
@@ -123,7 +129,8 @@ def source_observation(path: Path = SOURCE, r0: int = SIGNED_RECEIPT_R0) -> dict
         "new_rows": row[0], "new_clocked": row[1], "max_rowid": row[2],
         "latest_inserted_utc": row[3], "historic_probe_rows": before[0],
         "historic_probe_retroclocked": before[1] or 0,
-        "prospective_day": RECEIPTS_ON_UTC_DAY.isoformat(),
+        "prospective_day": candidate_day.isoformat(),
+        "recent_natural_receipt_sample_limit": 512,
         "prospective_rows": current[0], "prospective_clocked": current[1],
         "certificate_ledger_present": CERT_LEDGER in schemas,
         "certificates": [list(item) for item in ledger],
@@ -345,12 +352,16 @@ def judge(source: dict, host: dict, api_diag: dict, *, now: datetime,
          "API_PRIVATE_DATABASE_FULL_MATRIX_OR_FROZEN_HISTORY_MISMATCH")
     latest = api_diag.get("last_published_utc_day")
     target = now.date() - timedelta(days=1)
-    # Never report healthy while a 131-point archive stops a month back.
-    # A single absent completed date is still UNKNOWN, not "zero traffic".
+    # D+1 00:31 UTC is the earliest evidence closure. Allow until 02:00
+    # UTC for an hourly publisher timer; then require the preceding day.
+    # The preinstrumentation hole cannot become an invented zero date.
+    expected = max(RECEIPTS_ON_UTC_DAY, now.date() - timedelta(
+        days=1 if now.hour >= 2 else 2))
     age = (now.date() - date.fromisoformat(latest)).days
     gate("public_graph_freshness",
-         age <= 2 and latest >= FROZEN_LAST.isoformat(),
-         "STALE_" + str(age) + "_UTC_CALENDAR_DAYS")
+         latest >= expected.isoformat() and age <= 2,
+         "STALE_" + str(age) + "_UTC_CALENDAR_DAYS_REQUIRED_"
+         + expected.isoformat())
     # An actual Chrome DOM/screenshot witness is distinct from HTTP/API.
     # No unsigned machine-generated assertion can certify it.
     gate("chrome_graph_and_gap_renderer",
@@ -370,6 +381,8 @@ def judge(source: dict, host: dict, api_diag: dict, *, now: datetime,
         "observed_utc": now.isoformat(),
         "failed_checks": failed, "passed_checks": passed,
         "source_row_watermark": current,
+        "recent_postinstall_sample_rows": source["new_rows"],
+        "recent_postinstall_sample_clocked": source["new_clocked"],
         "last_natural_insertion_utc": recent,
         "candidate_day": source["prospective_day"],
         "candidate_clocked_count": source["prospective_clocked"],
@@ -384,6 +397,7 @@ def judge(source: dict, host: dict, api_diag: dict, *, now: datetime,
         "publisher_high_water_utc_day": max(future, default=None),
         "last_public_utc_day": latest,
         "last_completed_utc_day": target.isoformat(),
+        "freshness_target_after_hourly_grace_utc_day": expected.isoformat(),
         "publication_lag_utc_days": age,
         "api_point_count": api_diag.get("published_points"),
         "both_api_matrices_exact": api_diag.get("traffic_api_website_parity"),
