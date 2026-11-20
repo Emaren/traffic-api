@@ -15,6 +15,7 @@ import argparse
 from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 import json
+import hashlib
 import os
 from pathlib import Path
 import sqlite3
@@ -40,6 +41,9 @@ FROZEN_LAST = date(2026, 10, 19)
 GRAPH_PATH = "https://aoe2war.com/traffic"
 MAX_AGE_MINUTES = 10
 FINANCIAL_PORTS = {8092, 8093, 8094, 8095}
+SIGNED_LOADED_INGEST_SHA256 = "1a700eacf9e0494706fbe32111db890a33f7f620592fdfc17ec071ae6781bea9"
+SIGNED_ORIGINAL_TIMER_SHA256 = "25e477653b9ed312159177732aae5af6f2ae4acd573a96dfe74b14bc267572b2"
+SIGNED_ORIGINAL_FLOCK = "/usr/bin/flock -n -E 75 /run/traffic-ingest/sync.lock"
 
 
 def require(condition: bool, reason: str) -> None:
@@ -60,7 +64,7 @@ def systemd(unit: str) -> dict:
                     PUBLISHER_SERVICE, PUBLISHER_TIMER},
             "UNALLOWLISTED_UNIT")
     fields = ("LoadState", "ActiveState", "UnitFileState", "Environment",
-              "User", "Group", "ExecMainStatus", "LastTriggerUSec")
+              "User", "Group", "ExecStart", "ExecMainStatus", "LastTriggerUSec")
     args = ["systemctl", "show", unit]
     for field in fields:
         args.extend(("-p", field))
@@ -143,6 +147,13 @@ def host_observation() -> dict:
     names = (INGEST_TIMER, INGEST_SERVICE, API_SERVICE,
              PUBLISHER_SERVICE, PUBLISHER_TIMER)
     units = {name: systemd(name) for name in names}
+    loaded = {}
+    for name in (INGEST_SERVICE, INGEST_TIMER):
+        p = subprocess.run(["systemctl", "cat", name], check=False,
+                           capture_output=True, timeout=7)
+        require(p.returncode == 0 and 0 < len(p.stdout) < 60000,
+                "SIGNED_SYSTEMD_UNIT_READBACK_UNAVAILABLE")
+        loaded[name] = hashlib.sha256(p.stdout).hexdigest()
     listeners = run("ss", "-H", "-ltn")
     open_financial = []
     for line in listeners.splitlines():
@@ -153,6 +164,7 @@ def host_observation() -> dict:
                 open_financial.append(int(port))
     return {
         "units": units,
+        "original_signed_unit_sha256": loaded,
         "publisher_config_present": PROTECTED_RUNNER.is_file(),
         "financial_open_ports": sorted(set(open_financial)),
     }
@@ -313,6 +325,12 @@ def judge(source: dict, host: dict, api_diag: dict, *, now: datetime,
              "TRAFFIC_INGEST_RECEIPTS_ENABLED=1") == 1
          and api_svc["Environment"].split().count(
              "TRAFFIC_DISABLE_INLINE_INGEST=1") == 1
+         and host.get("original_signed_unit_sha256", {}).get(INGEST_SERVICE)
+             == SIGNED_LOADED_INGEST_SHA256
+         and host.get("original_signed_unit_sha256", {}).get(INGEST_TIMER)
+             == SIGNED_ORIGINAL_TIMER_SHA256
+         and SIGNED_ORIGINAL_FLOCK in ingest_svc.get("ExecStart", "")
+         and "scripts/sync_traffic_logs.py" in ingest_svc.get("ExecStart", "")
          and not host["financial_open_ports"],
          "ONE_WRITER_CONFIGURATION_OR_FINANCIAL_ISOLATION_DRIFT")
     gate("complete_utc_day_proven",
@@ -414,6 +432,10 @@ def judge(source: dict, host: dict, api_diag: dict, *, now: datetime,
         "publisher_timer_last_trigger": timer["LastTriggerUSec"],
         "ingest_timer_last_trigger": ingest.get("LastTriggerUSec"),
         "ingest_last_exit_status": ingest_svc.get("ExecMainStatus"),
+        "original_ingest_service_unit_sha256":
+            host.get("original_signed_unit_sha256", {}).get(INGEST_SERVICE),
+        "original_ingest_timer_unit_sha256":
+            host.get("original_signed_unit_sha256", {}).get(INGEST_TIMER),
         "public_writes_performed_by_gate": False,
         "all_missing_days_are_unknown_not_zero": True,
         "other_product_lanes_may_ship": True,
