@@ -29,6 +29,9 @@ from app.services.traffic.persistence import _non_browser_chain_firehose_sql
 FIRST_DAY = date(2026, 10, 20)
 MAX_DAY_ROWS = 20_000
 MAX_SECONDS = 45
+MAX_PAGED_TOTAL_ROWS = 600_000
+MAX_PAGES = 60
+MAX_PAGED_SECONDS = 180
 REQUIRED_INDEX = "idx_traffic_entries_timestamp_line_offset"
 
 
@@ -62,14 +65,15 @@ def parse_utc_clock(value: str) -> datetime:
 
 def evaluate_rows(rows: list[tuple[int, str, str | None]], *,
                   day: str, now: datetime, cursor: int,
-                  max_rowid: int, retroactive_frozen_history: bool) -> dict:
+                  max_rowid: int, retroactive_frozen_history: bool,
+                  bounded_rows: int = MAX_DAY_ROWS) -> dict:
     """Bounded evidence report; a good sample never becomes a certificate."""
     start, end = completed_day(day, now=now)
     require(type(cursor) is int and cursor >= forward.FROZEN_WATERMARK,
             "forward prefix cursor invalid")
     require(type(max_rowid) is int and max_rowid >= cursor,
             "canonical source rowid rewind")
-    require(0 <= len(rows) <= MAX_DAY_ROWS,
+    require(0 <= len(rows) <= bounded_rows <= MAX_PAGED_TOTAL_ROWS,
             "completed day exceeds bounded row ceiling")
     digest = hashlib.sha256()
     seen: set[int] = set()
@@ -160,11 +164,14 @@ def regular(path: Path, *, mode: int | None = None) -> None:
 
 def audit(source: Path, checkpoint: Path, ledger: Path, lock: Path, *, day: str,
           max_rows: int = MAX_DAY_ROWS, budget_seconds: int = 30,
-          now: datetime | None = None) -> dict:
+          now: datetime | None = None, paged: bool = False,
+          max_pages: int = MAX_PAGES) -> dict:
     now = now or datetime.now(timezone.utc)
     start, end = completed_day(day, now=now)
     require(1 <= max_rows <= MAX_DAY_ROWS, "day row cap outside allowed bounds")
-    require(5 <= budget_seconds <= MAX_SECONDS,
+    require(type(paged) is bool and 1 <= max_pages <= MAX_PAGES,
+            "paged scan source budget outside bounds")
+    require(5 <= budget_seconds <= (MAX_PAGED_SECONDS if paged else MAX_SECONDS),
             "day scan time budget outside allowed bounds")
     # Calendar refusal happens BEFORE worker or private-file access.
     guard.require_worker_priority()
@@ -236,16 +243,86 @@ def audit(source: Path, checkpoint: Path, ledger: Path, lock: Path, *, day: str,
             # bots; do NOT substitute raw per-day visitor counts for audience.
             host_placeholders = ",".join("?" for _ in hosts)
             canonical_filter = _non_browser_chain_firehose_sql()
-            rows = src.execute(f"""
-                SELECT rowid,timestamp,ingested_at_utc
-                FROM traffic_entries INDEXED BY {REQUIRED_INDEX}
-                WHERE timestamp >= ? AND timestamp < ?
-                  AND host IN ({host_placeholders})
-                  AND ({canonical_filter})
-                ORDER BY timestamp,line_offset,rowid LIMIT ?
-            """, (begin, finish, *hosts, max_rows + 1)).fetchall()
-            require(len(rows) <= max_rows,
-                    "day has more events than bounded source scan")
+            # Legacy bounded single-page behavior is preserved by default.
+            # New paged mode uses the *same SQLite read-only snapshot*,
+            # immutable source filter and index, never an OFFSET-based slice.
+            page_hashes = []
+            if not paged:
+                rows = src.execute(f"""
+                    SELECT rowid,timestamp,ingested_at_utc
+                    FROM traffic_entries INDEXED BY {REQUIRED_INDEX}
+                    WHERE timestamp >= ? AND timestamp < ?
+                      AND host IN ({host_placeholders})
+                      AND ({canonical_filter})
+                    ORDER BY timestamp,line_offset,rowid LIMIT ?
+                """, (begin, finish, *hosts, max_rows + 1)).fetchall()
+                require(len(rows) <= max_rows,
+                        "day has more events than bounded source scan")
+            else:
+                rows = []
+                cursor_key = None
+                # Every page includes one lookahead row. This makes hitting
+                # max_pages or total_rows an explicit HOLD, not false EOF.
+                for page_number in range(max_pages):
+                    require(time.monotonic() < deadline,
+                            "paged source budget exhausted")
+                    where_after = ("""
+                        AND (timestamp,line_offset,rowid) > (?,?,?)
+                    """ if cursor_key is not None else "")
+                    args = (begin, finish, *hosts)
+                    if cursor_key is not None:
+                        args += cursor_key
+                    batch = src.execute(f"""
+                        SELECT rowid,timestamp,line_offset,ingested_at_utc
+                        FROM traffic_entries INDEXED BY {REQUIRED_INDEX}
+                        WHERE timestamp >= ? AND timestamp < ?
+                          AND host IN ({host_placeholders})
+                          AND ({canonical_filter})
+                          {where_after}
+                        ORDER BY timestamp,line_offset,rowid LIMIT ?
+                    """, (*args, max_rows + 1)).fetchall()
+                    more = len(batch) > max_rows
+                    selected = batch[:max_rows]
+                    # Stable tuple keyset across identical timestamps and
+                    # offsets. Detect omissions/repeats rather than hiding them.
+                    page_digest = hashlib.sha256()
+                    last_key = cursor_key
+                    for rid, event_time, line_offset, received in selected:
+                        require(type(rid) is int
+                                and type(event_time) is str
+                                and type(line_offset) is int,
+                                "source key malformed")
+                        key = (event_time, line_offset, rid)
+                        require(last_key is None or key > last_key,
+                                "nonmonotonic paged source key")
+                        last_key = key
+                        page_digest.update(json.dumps(
+                            [rid,event_time,line_offset,received],
+                            ensure_ascii=False,separators=(",",":"),
+                        ).encode("utf-8") + b"\n")
+                        rows.append((rid,event_time,received))
+                        require(len(rows) <= MAX_PAGED_TOTAL_ROWS,
+                                "paged source total row ceiling")
+                    if selected:
+                        page_hashes.append({
+                            "page":page_number + 1,
+                            "rows":len(selected),
+                            "sha256":page_digest.hexdigest(),
+                            "first_key_sha256":hashlib.sha256(json.dumps(
+                                [selected[0][1],selected[0][2],selected[0][0]],
+                                separators=(",",":")).encode()).hexdigest(),
+                            "last_key_sha256":hashlib.sha256(json.dumps(
+                                [selected[-1][1],selected[-1][2],selected[-1][0]],
+                                separators=(",",":")).encode()).hexdigest(),
+                        })
+                    if not more:
+                        break
+                    require(last_key is not None
+                            and page_number + 1 < max_pages,
+                            "paged source page ceiling reached before EOF")
+                    cursor_key = last_key
+                else:
+                    require(False,"paged source page ceiling reached before EOF")
             retroactive = src.execute(f"""
                 SELECT 1 FROM traffic_entries INDEXED BY {REQUIRED_INDEX}
                 WHERE timestamp < ? AND rowid > ?
@@ -258,9 +335,19 @@ def audit(source: Path, checkpoint: Path, ledger: Path, lock: Path, *, day: str,
             result = evaluate_rows(
                 rows, day=day, now=now, cursor=cursor,
                 max_rowid=max_rowid, retroactive_frozen_history=retroactive,
+                bounded_rows=MAX_PAGED_TOTAL_ROWS if paged else MAX_DAY_ROWS,
             )
             for db in (src, private):
                 db.execute("ROLLBACK")
+            if paged:
+                result["paged_source_only"] = True
+                result["source_keyset_pages"] = page_hashes
+                result["source_keyset_page_count"] = len(page_hashes)
+                result["full_day_eof_page_observed"] = True
+                result["max_total_source_rows"] = MAX_PAGED_TOTAL_ROWS
+                result["source_snapshot_read_only"] = True
+                result["full_day_independent_signatures_verified"] = False
+                result["publication_authorized"] = False
             result["private_forward_epoch_hash_checked"] = True
             result["sealed_historical_source_checkpoint_checked"] = True
             result["original_131_published_days_immutable_checked"] = True
@@ -282,11 +369,14 @@ def main() -> int:
     p.add_argument("--day", required=True)
     p.add_argument("--max-rows", type=int, default=MAX_DAY_ROWS)
     p.add_argument("--budget-seconds", type=int, default=30)
+    p.add_argument("--paged-source-only", action="store_true")
+    p.add_argument("--max-pages", type=int, default=MAX_PAGES)
     args = p.parse_args()
     try:
         result = audit(
             args.source, args.checkpoint, args.ledger, args.lock, day=args.day,
             max_rows=args.max_rows, budget_seconds=args.budget_seconds,
+            paged=args.paged_source_only, max_pages=args.max_pages,
         )
         print(json.dumps(result, sort_keys=True))
         # Every emitted report still lacks independently verified upstream
