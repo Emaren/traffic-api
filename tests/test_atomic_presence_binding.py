@@ -127,11 +127,15 @@ class AtomicPresenceBindingTests(unittest.TestCase):
             dict(event, id=6, visitor_id=""),
         ]
         result = be._propagate_authenticated_identity(rows)
-        self.assertTrue(result[1]["authenticated"])
-        self.assertEqual(result[1]["authenticated_uid"], "fixture-account")
-        for row in result[2:]:
+        self.assertTrue(result[0]["authenticated"])
+        self.assertEqual(result[0]["authenticated_uid"], "fixture-account")
+        self.assertTrue(result[1]["correlates_with_recent_auth_presence"])
+        for row in result[1:]:
             self.assertFalse(row["authenticated"])
-            self.assertNotIn("authenticated_uid", row)
+            self.assertEqual(row["authenticated_uid"], "")
+            self.assertFalse(row["authentication_fresh"])
+        for row in result[2:]:
+            self.assertFalse(row["correlates_with_recent_auth_presence"])
 
 
 if __name__ == "__main__":
