@@ -141,7 +141,7 @@ func pem(_ publicKey:Data)->Data {
       let end=b64.index(i,offsetBy:64,limitedBy:b64.endIndex) ?? b64.endIndex
       lines.append(String(b64[i..<end]));i=end
     }
-    return Data(("-----BEGIN PUBLIC KEY-----\n"+lines.joined(separator:"\n")+
+    return Data(("-----BEGIN PUBLIC KEY-----\n" + lines.joined(separator:"\n") +
                  "\n-----END PUBLIC KEY-----\n").utf8)
 }
 let args=Array(CommandLine.arguments.dropFirst())
