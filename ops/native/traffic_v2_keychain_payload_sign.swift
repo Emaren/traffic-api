@@ -28,6 +28,7 @@ let roles: [String: Identity] = [
                            account:"Emaren-github-15059910-classifier",
                            pemSHA:"f445fc5a38b34ae11965fd0db1d28636bb86417ba9d6a63d1ae94886c805316b")
 ]
+let frozenHistoricalSHA = "84150e4921197efd925fa2d9abccee37154d45a68b6f72e25df57dfc4e2d07b4"
 let dayFields=Set(["schema","project_slug","day","historical_release_sha256",
  "source_epoch_sha256","host_rules_sha256","page_state_sha256",
  "source_snapshot_rowid","forward_prefix_rowid","source_rows",
@@ -44,6 +45,10 @@ let delegationFields=Set(["schema","delegation_id","project","approved_by",
  "no_historical_corrections"])
 let stateFields=Set(["schema","delegation_sha256","delegation_id","status",
                      "revision","effective_at_utc"])
+func validHex(_ value: Any?, length: Int = 64) -> Bool {
+    guard let x = value as? String, x.count == length else {return false}
+    return x.utf8.allSatisfy {($0 >= 48 && $0 <= 57) || ($0 >= 97 && $0 <= 102)}
+}
 func dateUTC(_ text: String) -> Date? {
     let formatter=ISO8601DateFormatter()
     if let time=formatter.date(from:text) { return time }
@@ -58,6 +63,11 @@ func check(_ obj:[String:Any], _ role:String, _ kind:String) {
         guard role=="upstream" || role=="classifier" else { hold("ROLE_KIND_DENIED") }
         fields=dayFields; schema="traffic.public-audience.v2.dual-witness-day.v1"
         guard obj["project_slug"] as? String=="aoe2hdbets",
+          obj["historical_release_sha256"] as? String==frozenHistoricalSHA,
+          ["source_epoch_sha256","host_rules_sha256","page_state_sha256",
+           "source_page_chain_sha256","global_ip_model_sha256",
+           "canonical_sessions_sha256","cross_midnight_carry_sha256",
+           "late_arrival_stability_sha256"].allSatisfy {validHex(obj[$0])},
           let day=obj["day"] as? String,day.count==10,
           day>="2026-10-20",day<String(ISO8601DateFormatter().string(from:Date()).prefix(10)),
           let t=obj["total"] as? Int,let p=obj["potential"] as? Int,
@@ -79,12 +89,16 @@ func check(_ obj:[String:Any], _ role:String, _ kind:String) {
         guard role=="owner" else {hold("ROLE_KIND_DENIED")}
         fields=delegationFields;schema="traffic.public-audience.v2.daily-delegation.v1"
         guard obj["project"] as? String=="aoe2hdbets",
+          obj["historical_release_sha256"] as? String==frozenHistoricalSHA,
+          ["delegation_id","ingest_service_loaded_sha256","traffic_api_source_sha256",
+           "website_gap_renderer_sha256","upstream_key_sha256","classifier_key_sha256"]
+           .allSatisfy {validHex(obj[$0])},
           obj["approved_by"] as? String=="Emaren",
           obj["gap_aware_api_and_chart"] as? Bool==true,
           obj["no_historical_corrections"] as? Bool==true,
           let maximum=obj["max_days_per_run"] as? Int,(1...7).contains(maximum),
           let age=obj["max_completed_day_age_days"] as? Int,(1...3).contains(age),
-          let source=obj["source_commit_sha"] as? String,source.count==40,
+          let source=obj["source_commit_sha"] as? String,validHex(source,length:40),
           obj["upstream_key_sha256"] as? String==roles["upstream"]?.pemSHA,
           obj["classifier_key_sha256"] as? String==roles["classifier"]?.pemSHA,
           let issued=obj["issued_at_utc"] as? String,
@@ -98,8 +112,7 @@ func check(_ obj:[String:Any], _ role:String, _ kind:String) {
         fields=stateFields;schema="traffic.public-audience.v2.delegation-revocation-state.v1"
         guard let s=obj["status"] as? String,(s=="ACTIVE" || s=="REVOKED"),
           let rev=obj["revision"] as? Int,rev>0,
-          let ident=obj["delegation_id"] as? String,ident.count==64,
-          let sha=obj["delegation_sha256"] as? String,sha.count==64
+          validHex(obj["delegation_id"]),validHex(obj["delegation_sha256"])
         else {hold("REVOCATION_STATE_SCOPE")}
     default:hold("UNRECOGNIZED_KIND")
     }
