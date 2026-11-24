@@ -137,7 +137,9 @@ class VerifiedMergedIPBehavior:
 def canonical_private_replay(*, raw_rows: Iterator[dict], behavior: object,
                              from_utc: datetime, until_utc: datetime,
                              source_prefix_rowid: int,
-                             observed_at_utc: datetime) -> tuple[dict, dict]:
+                             observed_at_utc: datetime,
+                             source_rules: list[dict] | None = None
+                             ) -> tuple[dict, dict]:
     """Call the ORIGINAL canonical engine, without modifying its source.
 
     Only one isolated command-line process may invoke this substitution.
@@ -149,6 +151,7 @@ def canonical_private_replay(*, raw_rows: Iterator[dict], behavior: object,
     require(canonical.__name__ == "scripts.rebuild_public_audience_archive",
             "CANONICAL_SOURCE_IMPORT_DRIFT")
     original = canonical.source_rows
+    original_rules = canonical.safe_list_visibility_rules
     called = False
 
     def private_source_rows(*, start: datetime, end: datetime,
@@ -164,12 +167,18 @@ def canonical_private_replay(*, raw_rows: Iterator[dict], behavior: object,
     # The private adapter is a one-shot read-only CLI, not part of any web
     # worker. All original canonical session/bucket/classifier code is reused.
     canonical.source_rows = private_source_rows
+    if source_rules is not None:
+        # Visibility rules must come from the very same pinned original
+        # source/checkpoint, never from an ambient SQLite default path.
+        canonical.safe_list_visibility_rules = (
+            lambda *, active_only=True: source_rules)
     try:
         daily, metrics = canonical.stream_sessions(
             start=from_utc, end=until_utc,
             behavior=behavior, snapshot_max_rowid=source_prefix_rowid)
     finally:
         canonical.source_rows = original
+        canonical.safe_list_visibility_rules = original_rules
     require(called, "CANONICAL_PASS_TWO_DID_NOT_READ_PRIVATE_SOURCE")
     return daily, metrics
 
@@ -177,7 +186,8 @@ def canonical_private_replay(*, raw_rows: Iterator[dict], behavior: object,
 def two_window_private_candidate(future: sqlite3.Connection,
                                  behavior: VerifiedMergedIPBehavior, *,
                                  requested: date, source_prefix_rowid: int,
-                                 max_events: int, deadline: float
+                                 max_events: int, deadline: float,
+                                 source_rules: list[dict] | None = None
                                  ) -> tuple[list[int], dict]:
     """Re-run the same source in two independent previous-day contexts.
 
@@ -202,7 +212,8 @@ def two_window_private_candidate(future: sqlite3.Connection,
             raw_rows=private_rows, behavior=behavior,
             from_utc=window, until_utc=end_dt + margin,
             source_prefix_rowid=source_prefix_rowid,
-            observed_at_utc=datetime.now(timezone.utc))
+            observed_at_utc=datetime.now(timezone.utc),
+            source_rules=source_rules)
         evaluated.append((daily.get(requested.isoformat(), [0, 0, 0]), metrics))
     require(time.monotonic() <= deadline, "FULL_REPLAY_BUDGET_EXCEEDED")
     require(evaluated[0][0] == evaluated[1][0],
@@ -237,7 +248,7 @@ def inspect(source: Path, historical: Path, ledger: Path, shadow: Path, *,
     guard.verify_frozen(source, historical, info)
     require(info.get("phase") == "PASS2_COMPLETE",
             "HISTORIC_PASS_TWO_INCOMPLETE")
-    sessions.verified_state(source, historical, info)
+    _, source_rules = sessions.verified_state(source, historical, info)
     with closing(checkpoint.source_connection(source)) as db:
         forward.assert_published_history(db)
         max_at_start = int(db.execute(
@@ -269,7 +280,8 @@ def inspect(source: Path, historical: Path, ledger: Path, shadow: Path, *,
         values, metrics = two_window_private_candidate(
             future, behavior, requested=requested,
             source_prefix_rowid=scanned_prefix,
-            max_events=max_events, deadline=deadline)
+            max_events=max_events, deadline=deadline,
+            source_rules=source_rules)
         require(0 <= values[2] <= values[1] <= values[0],
                 "CANONICAL_METRIC_HIERARCHY")
         # Crucially these are PRIVATE CANDIDATE values, not certifiable
