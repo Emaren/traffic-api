@@ -1411,6 +1411,8 @@ def api_project_public_audience_series(
     connection.row_factory = sqlite3.Row
 
     try:
+        # Same read snapshot for values and metric-version ledger.
+        connection.execute("BEGIN")
         rows = connection.execute(
             """
             SELECT
@@ -1428,6 +1430,37 @@ def api_project_public_audience_series(
             """,
             (project_slug,),
         ).fetchall()
+        transition = None
+        v3_days = set()
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='traffic_public_audience_day_certificates_v2'"
+        ).fetchone():
+            version_rows = connection.execute(
+                """SELECT bucket_day,signed_finality_schema
+                   FROM traffic_public_audience_day_certificates_v2
+                   WHERE project_slug=? ORDER BY bucket_day""", (project_slug,)
+            ).fetchall()
+            v3_days = {row["bucket_day"] for row in version_rows
+                       if row["signed_finality_schema"] ==
+                       "traffic.public-audience.v3.dual-witness-day.v1"}
+            if v3_days:
+                published = {r["bucket_day"] for r in rows}
+                first_v3 = min(v3_days)
+                if first_v3 < "2026-11-23" or v3_days != {
+                    day for day in published if day >= first_v3
+                }:
+                    raise sqlite3.OperationalError("Metric-version ledger mismatch")
+                transition = {
+                    "first_date": first_v3,
+                    "from_version": "legacy-canonical-session",
+                    "to_version": "v3-utc-day-slice",
+                    "description": (
+                        "From this date, Traffic counts page-bearing UTC-day session "
+                        "slices using a frozen day-local IP model. Ongoing operational "
+                        "sessions can contribute on successive days. Earlier values use "
+                        "the original session-start and cumulative model definition."
+                    ),
+                }
     except sqlite3.OperationalError as exc:
         raise HTTPException(
             status_code=503,
@@ -1463,6 +1496,7 @@ def api_project_public_audience_series(
         "coverage_ended_at": rows[-1]["bucket_day"],
         "archive_calculated_at": rows[-1]["updated_at"],
         "generated_at": iso_now(),
+        **({"metric_transition": transition} if transition else {}),
         "semantics": {
             "total_traffic": "Canonical page sessions",
             "suspected_human": (
@@ -1476,6 +1510,7 @@ def api_project_public_audience_series(
         "points": [
             {
                 "date": row["bucket_day"],
+                **({"metricVersion":"v3-utc-day-slice"} if row["bucket_day"] in v3_days else {}),
                 "calculatedAt": row["updated_at"],
                 "values": {
                     "totalTraffic": int(row["total_traffic"]),

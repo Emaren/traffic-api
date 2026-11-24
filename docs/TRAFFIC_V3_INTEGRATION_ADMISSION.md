@@ -34,3 +34,19 @@ interpret this code, fixtures or approval comment as a production permit.
 If November23 as-of dependency preimage cannot be authenticated, keep it
 UNKNOWN. Capture next fully qualified prospective day's dependencies under
 reviewed source/host procedure; do not backdate a snapshot.
+
+
+## Chart / protected configuration binding
+
+The API adds transition metadata only when a real V3 certificate ledger row
+and public point agree. It preserves original public points, flags actual
+V3 rows, and fails closed on orphan or mixed later schema. WE3 must preserve
+the metadata through the website proxy and show the actual first-date
+transition before WE2 issues the root-controlled receipt. The V3 runner
+requires exactly:
+```json
+{"approved_source_commit":"<actual deployed website commit>","metric_version_disclosure":true,"renderer_sha256":"<actual activated compiled renderer SHA256>","schema":"aoe2war.traffic-v3.gap-renderer-readback.v1","status":"WE2_ACTIVATED_GAP_RENDERER_READBACK"}
+```
+The old four-field V2 renderer receipt is NOT sufficient for V3. Existing
+certificate schema, original native key identity and external revocation
+trust remain protected. V2 append cannot downgrade after V3.

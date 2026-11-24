@@ -241,6 +241,10 @@ def append_verified_day(
                 "missing_days_are_unknown": True,
             }
         need(previous_cert is None, "ORPHAN_CERTIFICATE_NOT_PUBLISHED")
+        if not is_v3:
+            need(db.execute(
+                "SELECT 1 FROM traffic_public_audience_day_certificates_v2 WHERE project_slug=? AND signed_finality_schema=? LIMIT 1",
+                (PROJECT, admission.V3_SCHEMA)).fetchone() is None, "METRIC_VERSION_DOWNGRADE_REFUSED")
         if is_v3:
             # Under BEGIN IMMEDIATE, a raw insert cannot race the late-arrival
             # check and append. Do not scan historical day sessions.

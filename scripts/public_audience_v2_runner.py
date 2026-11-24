@@ -222,9 +222,14 @@ def public_source_state(cfg: dict, *, trust_uid: int) -> tuple[int, int]:
     render = strict_json(private_file(
         Path(cfg["website_gap_receipt"]), uid=trust_uid, max_bytes=4096,
         mode=0o644 if trust_uid == 0 else 0o600))
-    need(set(render) == {"schema", "status", "renderer_sha256",
-                         "approved_source_commit"}
-         and render["schema"] == "aoe2war.traffic-v2.gap-renderer-readback.v1"
+    v3 = cfg.get("schema") == V3_RUNNER_SCHEMA
+    expected_fields = {"schema", "status", "renderer_sha256", "approved_source_commit"}
+    if v3:
+        expected_fields.add("metric_version_disclosure")
+    need(set(render) == expected_fields
+         and render["schema"] == ("aoe2war.traffic-v3.gap-renderer-readback.v1" if v3
+                                  else "aoe2war.traffic-v2.gap-renderer-readback.v1")
+         and (not v3 or render["metric_version_disclosure"] is True)
          and render["status"] == "WE2_ACTIVATED_GAP_RENDERER_READBACK"
          and render["renderer_sha256"] ==
          cfg["website_gap_renderer_sha256"]
