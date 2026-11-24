@@ -173,6 +173,32 @@ class ForwardCanonicalReadOnlyTests(unittest.TestCase):
             hashlib.sha256(Path(canonical.__file__).read_bytes()).hexdigest(),
             "1b389839428a2453fa870dfb2f2661087b386b5c5f22782b45de6e6cfe12c321")
 
+    def test_source_qualified_visibility_rules_override_ambient_db(self):
+        raw=event(forward.FROZEN_WATERMARK+1,"2026-11-23T10:00:00+00:00")
+        old_source=canonical.source_rows
+        old_rules=canonical.safe_list_visibility_rules
+        def fake_stream(*,start,end,behavior,snapshot_max_rowid):
+            self.assertEqual(
+                canonical.safe_list_visibility_rules(active_only=True),
+                [{"id":17,"active":True}])
+            seen=list(canonical.source_rows(
+                start=start,end=end,snapshot_max_rowid=snapshot_max_rowid))
+            self.assertEqual([x["source_rowid"] for x in seen],
+                             [raw["source_rowid"]])
+            return {"2026-11-23":[1,1,0]},{"raw_rows":1}
+        with patch.object(canonical,"stream_sessions",side_effect=fake_stream):
+            day, metrics=candidate.canonical_private_replay(
+                raw_rows=iter([raw]),behavior={},
+                from_utc=datetime(2026,11,23,tzinfo=timezone.utc),
+                until_utc=datetime(2026,11,24,tzinfo=timezone.utc),
+                source_prefix_rowid=forward.FROZEN_WATERMARK+2,
+                observed_at_utc=datetime.now(timezone.utc),
+                source_rules=[{"id":17,"active":True}])
+        self.assertEqual(day["2026-11-23"],[1,1,0])
+        self.assertEqual(metrics["raw_rows"],1)
+        self.assertIs(canonical.source_rows,old_source)
+        self.assertIs(canonical.safe_list_visibility_rules,old_rules)
+
     def test_private_source_function_restored_even_on_error(self):
         original=canonical.source_rows
         def failed_rows():
