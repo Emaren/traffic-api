@@ -90,17 +90,89 @@ def validate_ledger(meta: dict[str, str], snapshot: dict[str, str]) -> None:
 
 
 def assert_published_history(source: sqlite3.Connection) -> None:
+    """Seal the historical 131 rows AND require explicit certificates thereafter.
+
+    A legitimate V2 daily append must NOT stop future private capture simply
+    because the public table has grown to 132 rows. Missing post-archive dates
+    stay UNKNOWN; no implicit zero or consecutive-day requirement. This is an
+    independent consistency observer, never a day signature verifier.
+    """
+    import re
+    from datetime import date, datetime, timedelta
+
     rows = source.execute(
         """SELECT bucket_day,total_traffic,suspected_human,confirmed_human
            FROM traffic_public_daily_audience_rollups
            WHERE project_slug='aoe2hdbets' ORDER BY bucket_day"""
     ).fetchall()
     from scripts import public_audience_v2_release_manifest as manifest
-    matrix = {r[0]: list(r[1:]) for r in rows}
-    require(len(rows) == 131 and len(matrix) == 131
-            and min(matrix) == "2026-06-11" and max(matrix) == "2026-10-19"
-            and manifest.sha(matrix) == RELEASE_SHA,
+    history: dict[str, list[int]] = {}
+    future: dict[str, list[int]] = {}
+    for row in rows:
+        day, values = row[0], list(row[1:])
+        require(type(day) is str and len(day) == 10,
+                "malformed public day")
+        try:
+            require(date.fromisoformat(day).isoformat() == day,
+                    "noncanonical public day")
+        except ValueError as exc:
+            raise RuntimeError("STOP: malformed public day") from exc
+        require(all(type(v) is int for v in values)
+                and values[0] > 0
+                and values[0] >= values[1] >= values[2] >= 0,
+                "invalid public audience hierarchy")
+        target = history if day <= "2026-10-19" else future
+        require(day not in target, "duplicate public day")
+        target[day] = values
+    require(len(history) == 131 and min(history) == "2026-06-11"
+            and max(history) == "2026-10-19"
+            and manifest.sha(history) == RELEASE_SHA,
             "original 131-day certified public history changed")
+    if not future:
+        # No post-archive publication yet. An absent V2 certificate ledger
+        # is acceptable only in this original 131-day state.
+        return
+    certified_name = "traffic_public_audience_day_certificates_v2"
+    table = source.execute(
+        "SELECT type FROM sqlite_master WHERE name=?", (certified_name,)
+    ).fetchone()
+    require(table is not None and table[0] == "table",
+            "post-archive rows lack installed certificate ledger")
+    columns = {r[1] for r in source.execute(
+        "PRAGMA table_info(traffic_public_audience_day_certificates_v2)"
+    )}
+    require({"project_slug", "bucket_day", "certificate_sha256",
+             "source_page_sha256", "signed_finality_schema",
+             "certified_at_utc"}.issubset(columns),
+            "V2 certificate ledger schema drift")
+    receipts = source.execute(
+        """SELECT bucket_day,certificate_sha256,source_page_sha256,
+                  signed_finality_schema,certified_at_utc
+           FROM traffic_public_audience_day_certificates_v2
+           WHERE project_slug='aoe2hdbets' ORDER BY bucket_day"""
+    ).fetchall()
+    require(len(receipts) == len(future), "post-archive certificate gap")
+    hex_sha = re.compile(r"^[0-9a-f]{64}$")
+    matched: set[str] = set()
+    for day, cert_sha, page_sha, schema, at_utc in receipts:
+        require(day in future and day not in matched,
+                "orphan or duplicate future certificate")
+        matched.add(day)
+        require(type(cert_sha) is str and hex_sha.fullmatch(cert_sha) is not None
+                and type(page_sha) is str and hex_sha.fullmatch(page_sha) is not None
+                and schema == "traffic.public-audience.v2.dual-witness-day.v1",
+                "future certificate digest or source schema drift")
+        require(type(at_utc) is str and 20 <= len(at_utc) <= 40,
+                "missing future certification UTC clock")
+        try:
+            moment = datetime.fromisoformat(at_utc)
+        except ValueError as exc:
+            raise RuntimeError("STOP: malformed future certification clock") from exc
+        require(moment.tzinfo is not None
+                and moment.utcoffset() == timedelta(0),
+                "future certification time not UTC")
+    require(matched == set(future),
+            "post-archive public/certificate mismatch")
 
 
 def initial_metadata(info: dict[str, str]) -> dict[str, str]:
