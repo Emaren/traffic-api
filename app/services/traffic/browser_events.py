@@ -811,117 +811,38 @@ def _identity_session_key(event: Mapping[str, Any]) -> tuple[str, str, str] | No
 def _propagate_authenticated_identity(
     events: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Propagate fresh authentication only within its complete browser tuple."""
+    """Correlate public telemetry, never promote it to authenticated proof."""
 
-    by_session: dict[
-        tuple[str, str, str],
-        dict[str, str],
-    ] = {}
-
-    for event in sorted(
-        events,
-        key=_story_sort_key,
-    ):
+    by_session: dict[tuple[str, str, str], str] = {}
+    for event in sorted(events, key=_story_sort_key):
         session_key = _identity_session_key(event)
-        if session_key is None:
-            continue
-
         if (
-            event.get("authenticated") is True
-            and event.get("event_type") == "auth_presence"
+            event.get("event_type") == "auth_presence"
+            and event.get("authenticated") is True
             and event.get("authenticated_uid")
+            and session_key is not None
         ):
-            by_session[session_key] = {
-                "authenticated_uid": str(
-                    event.get(
-                        "authenticated_uid"
-                    )
-                    or ""
-                ),
-                "known_visitor_label": str(
-                    event.get(
-                        "known_visitor_label"
-                    )
-                    or "Authenticated player"
-                ),
-                "known_visitor_kind": str(
-                    event.get(
-                        "known_visitor_kind"
-                    )
-                    or "known_player"
-                ),
-                "authenticated_at": str(
-                    event.get(
-                        "received_at"
-                    )
-                    or ""
-                ),
-            }
-
-        identity = by_session.get(session_key)
-
-        if not identity:
+            by_session[session_key] = str(event.get("received_at") or "")
+            event["authentication_fresh"] = True
+            event["authenticated_at"] = by_session[session_key]
             continue
 
-        fresh = auth_presence_is_fresh(
-            identity["authenticated_at"],
-            reference_at=event.get(
-                "received_at"
-            ),
-        )
-
-        event["authentication_fresh"] = fresh
-        event["authenticated_at"] = (
-            identity["authenticated_at"]
-        )
-
-        if fresh:
-            event["authenticated"] = True
-            event["authenticated_uid"] = (
-                identity[
-                    "authenticated_uid"
-                ]
-            )
-            event["known_visitor_label"] = (
-                identity[
-                    "known_visitor_label"
-                ]
-            )
-            event["known_visitor_detail"] = (
-                "authenticated AoE2WAR session"
-            )
-            event["known_visitor_kind"] = (
-                identity[
-                    "known_visitor_kind"
-                ]
-            )
-            event["known_visitor_source"] = (
-                "authenticated"
-            )
-            continue
-
+        # Public browser telemetry supplies its own tuple. A matching tuple
+        # is context only, even after the server stores an authenticated ping.
         event["authenticated"] = False
-        event["previously_authenticated_uid"] = (
-            identity[
-                "authenticated_uid"
-            ]
-        )
         event["authenticated_uid"] = ""
-        event["known_visitor_label"] = (
-            identity[
-                "known_visitor_label"
-            ]
-        )
-        event["known_visitor_detail"] = (
-            "previously authenticated AoE2WAR session"
-        )
-        event["known_visitor_kind"] = (
-            identity[
-                "known_visitor_kind"
-            ]
-        )
-        event["known_visitor_source"] = (
-            "authenticated_stale"
+        event["authentication_fresh"] = False
+        event.pop("authenticated_at", None)
+        event.pop("previously_authenticated_uid", None)
+        if event.get("known_visitor_source") in ("authenticated", "authenticated_stale"):
+            for name in ("known_visitor_label", "known_visitor_detail",
+                         "known_visitor_kind", "known_visitor_source"):
+                event[name] = ""
+        evidence_at = by_session.get(session_key) if session_key is not None else None
+        event["correlates_with_recent_auth_presence"] = bool(
+            evidence_at and auth_presence_is_fresh(
+                evidence_at, reference_at=event.get("received_at")
+            )
         )
 
     return events
