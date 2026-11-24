@@ -124,6 +124,55 @@ class ForwardCanonicalReadOnlyTests(unittest.TestCase):
         self.assertEqual(private_daily["2026-11-22"][0],1)
         self.assertEqual(private_daily["2026-11-23"][0],1)
 
+    def test_two_context_windows_agree_across_midnight(self):
+        for row in (
+            event(forward.FROZEN_WATERMARK+1,
+                  "2026-11-22T23:59:40+00:00"),
+            event(forward.FROZEN_WATERMARK+2,
+                  "2026-11-23T00:01:10+00:00"),
+            event(forward.FROZEN_WATERMARK+3,
+                  "2026-11-23T01:00:00+00:00"),
+        ):
+            self.add(row)
+        behavior={("aoe2war.com","192.0.2.10"): {
+            "request_count":3,"unique_uas":1,"unique_paths":1,
+            "route_bundle_paths":["/"],"route_bundle_spam":False}}
+        with patch.object(canonical,"safe_list_visibility_rules",return_value=[]):
+            values,metrics=candidate.two_window_private_candidate(
+                self.db,behavior,requested=datetime(2026,11,23).date(),
+                source_prefix_rowid=forward.FROZEN_WATERMARK+1000,
+                max_events=100,deadline=time.monotonic()+10)
+        self.assertEqual(values[0],1)
+        self.assertGreaterEqual(values[0],values[1])
+        self.assertEqual(metrics["raw_rows"],3)
+
+    def test_two_context_disagreement_denies_source_promotion(self):
+        def fake(*, from_utc, **kwargs):
+            return ({"2026-11-23":
+                     [3,2,1] if from_utc.date().isoformat()=="2026-11-21"
+                     else [4,2,1]}, {"raw_rows":1})
+        with patch.object(candidate,"canonical_private_replay",side_effect=fake):
+            with self.assertRaisesRegex(RuntimeError,
+                                        "TWO_WINDOW_CROSS_DAY_METRIC_DRIFT"):
+                candidate.two_window_private_candidate(
+                    self.db,{},requested=datetime(2026,11,23).date(),
+                    source_prefix_rowid=forward.FROZEN_WATERMARK+1000,
+                    max_events=100,deadline=time.monotonic()+10)
+
+    def test_epoch_boundary_without_two_prior_days_denied(self):
+        with self.assertRaisesRegex(RuntimeError,
+                                    "HISTORICAL_BOUNDARY_CARRY_UNPROVEN"):
+            candidate.two_window_private_candidate(
+                self.db,{},requested=datetime(2026,10,21).date(),
+                source_prefix_rowid=forward.FROZEN_WATERMARK+1000,
+                max_events=100,deadline=time.monotonic()+10)
+
+    def test_immutable_historical_canonical_byte_pin(self):
+        import hashlib
+        self.assertEqual(
+            hashlib.sha256(Path(canonical.__file__).read_bytes()).hexdigest(),
+            "1b389839428a2453fa870dfb2f2661087b386b5c5f22782b45de6e6cfe12c321")
+
     def test_private_source_function_restored_even_on_error(self):
         original=canonical.source_rows
         def failed_rows():
