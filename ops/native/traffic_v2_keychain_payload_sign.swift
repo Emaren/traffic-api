@@ -165,6 +165,24 @@ guard (mode=="--validate-fixture" && args.count==7) ||
       roles[args[2]] != nil
 else {hold("USAGE_FIXED_ORDER_ROLE_KIND_INPUT_DIGEST")}
 let role=args[2],kind=args[4],path=args[6]
+if mode=="--sign" {
+  guard isatty(STDIN_FILENO)==1,isatty(STDERR_FILENO)==1,
+        getenv("SSH_CONNECTION")==nil,getenv("SSH_TTY")==nil,getuid() != 0
+  else {hold("PHYSICAL_LOCAL_TERMINAL_REQUIRED")}
+  #if arch(x86_64)
+  guard role=="upstream" else {hold("INTEL_UPSTREAM_ONLY")}
+  #elseif arch(arm64)
+  guard role=="owner" || role=="classifier" else {hold("M1_OWNER_CLASSIFIER_ONLY")}
+  #else
+  hold("MACHINE_ARCH_NOT_ADMITTED")
+  #endif
+  let dir=NSHomeDirectory()+"/Library/Application Support/AoE2WAR/TrafficV2SigningRequests/"+role+"/"
+  guard path.hasPrefix(dir),args[8].hasPrefix(dir),path != args[8]
+  else {hold("UNBOUND_SIGNING_REQUEST_PATH")}
+  protect(path,true); protect(args[8],false)
+}
+// Do not inspect arbitrary production input paths or Keychain until the
+// physical interactive identity and owner-private request directory pass.
 let (payload,payloadSHA)=input(path,role,kind)
 if mode=="--validate-fixture" {
     print("TRAFFIC_V2_SCHEMA_ONLY_VALID=true")
@@ -175,20 +193,6 @@ if mode=="--validate-fixture" {
 guard args[7]=="--signature-output",args[9]=="--approve-sha256",
       args[10]==payloadSHA
 else {hold("OPERATOR_EXACT_HASH_APPROVAL_REQUIRED")}
-guard isatty(STDIN_FILENO)==1,isatty(STDERR_FILENO)==1,
-      getenv("SSH_CONNECTION")==nil,getenv("SSH_TTY")==nil,getuid() != 0
-else {hold("PHYSICAL_LOCAL_TERMINAL_REQUIRED")}
-#if arch(x86_64)
-guard role=="upstream" else {hold("INTEL_UPSTREAM_ONLY")}
-#elseif arch(arm64)
-guard role=="owner" || role=="classifier" else {hold("M1_OWNER_CLASSIFIER_ONLY")}
-#else
-hold("MACHINE_ARCH_NOT_ADMITTED")
-#endif
-let dir=NSHomeDirectory()+"/Library/Application Support/AoE2WAR/TrafficV2SigningRequests/"+role+"/"
-guard path.hasPrefix(dir),args[8].hasPrefix(dir),path != args[8]
-else {hold("UNBOUND_SIGNING_REQUEST_PATH")}
-protect(path,true); protect(args[8],false)
 print("REVIEW role=\(role) kind=\(kind) canonical_sha256=\(payloadSHA)")
 fputs("Type APPROVE \(String(payloadSHA.prefix(16))) \(role) to sign: ",stderr)
 guard readLine()=="APPROVE \(String(payloadSHA.prefix(16))) \(role)"
