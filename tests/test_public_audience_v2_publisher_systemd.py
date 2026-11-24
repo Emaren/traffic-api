@@ -66,6 +66,9 @@ class ProductionV2PublisherUnits(unittest.TestCase):
              "-/mnt/HC_Volume_105319120/traffic-v2-publisher"])
         self.assertNotIn("/var/www/Traffic/traffic-api ", candidates[0])
         self.assertIn("ReadOnlyPaths=-/etc/aoe2war/traffic-v2", text)
+        for forbidden_socket in ("/run/docker.sock", "/var/run/docker.sock",
+                                 "/run/containerd", "/var/run/containerd"):
+            self.assertIn(forbidden_socket, text)
 
     def test_timer_is_hourly_utc_with_minimum_finality_grace(self):
         t = TIMER.read_text()
