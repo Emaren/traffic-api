@@ -229,28 +229,40 @@ def inspect(source: Path, historical: Path, ledger: Path, shadow: Path, *,
         ).fetchone()[0]
         require(int(observed["last_source_rowid"]) == last_private,
                 "IP_SHADOW_CURSOR_MISMATCH")
-        # Historical pass-one source input also binds the original source
-        # rules; never query a different ambient history database.
-        start_dt = datetime.combine(CANONICAL_EPOCH, dt_time.min,
-                                    tzinfo=timezone.utc)
+        # Forward-day counts are credited to each canonical session's FIRST
+        # event day. Independently replay both one-day and two-day pre-roll
+        # windows. Matching results prove this new day does not depend on
+        # where either previous-day context window starts. Oct20/21 lack a
+        # complete two-day forward pre-roll; leave those dates UNKNOWN.
+        require(requested >= CANONICAL_EPOCH + timedelta(days=2),
+                "HISTORICAL_BOUNDARY_CARRY_UNPROVEN")
         end_dt = datetime.combine(requested + timedelta(days=1),
                                   dt_time.min, tzinfo=timezone.utc)
         margin = timedelta(minutes=31)
-        # All retained events since the protected epoch are replayed in
-        # timestamp order, including the next-day expiry margin.
-        private_rows = raw_forward_rows(
-            future, start=start_dt.isoformat(),
-            end=(end_dt + margin).isoformat(),
-            source_prefix_rowid=scanned_prefix, max_events=max_events,
-            deadline=deadline)
         behavior = VerifiedMergedIPBehavior(history, ip_data)
-        daily, metrics = canonical_private_replay(
-            raw_rows=private_rows, behavior=behavior,
-            from_utc=start_dt, until_utc=end_dt + margin,
-            source_prefix_rowid=scanned_prefix,
-            observed_at_utc=datetime.now(timezone.utc))
+        from_start = [
+            datetime.combine(requested-timedelta(days=2), dt_time.min,
+                             tzinfo=timezone.utc),
+            datetime.combine(requested-timedelta(days=1), dt_time.min,
+                             tzinfo=timezone.utc),
+        ]
+        evaluated: list[tuple[list[int], dict]] = []
+        for window in from_start:
+            private_rows = raw_forward_rows(
+                future, start=window.isoformat(),
+                end=(end_dt + margin).isoformat(),
+                source_prefix_rowid=scanned_prefix, max_events=max_events,
+                deadline=deadline)
+            daily, metrics = canonical_private_replay(
+                raw_rows=private_rows, behavior=behavior,
+                from_utc=window, until_utc=end_dt + margin,
+                source_prefix_rowid=scanned_prefix,
+                observed_at_utc=datetime.now(timezone.utc))
+            evaluated.append((daily.get(day, [0, 0, 0]), metrics))
         require(time.monotonic() <= deadline, "FULL_REPLAY_BUDGET_EXCEEDED")
-        values = daily.get(day, [0, 0, 0])
+        require(evaluated[0][0] == evaluated[1][0],
+                "TWO_WINDOW_CROSS_DAY_METRIC_DRIFT")
+        values, metrics = evaluated[0]
         require(0 <= values[2] <= values[1] <= values[0],
                 "CANONICAL_METRIC_HIERARCHY")
         # Crucially these are PRIVATE CANDIDATE values, not certifiable
@@ -278,6 +290,8 @@ def inspect(source: Path, historical: Path, ledger: Path, shadow: Path, *,
             "original_history_unchanged": True,
             "private_classification_only": True,
             "historical_epoch_carry_certified": False,
+            "two_window_private_cross_midnight_parity": True,
+            "replay_window_days_before_target": 2,
             "nginx_delivery_eof_certified": False,
             "late_arrival_stability_certified": False,
             "full_day_source_paging_certified": False,
