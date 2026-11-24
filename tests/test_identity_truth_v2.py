@@ -12,6 +12,7 @@ from app.services.traffic.browser_events import (
 )
 from app.services.traffic.overview import (
     _auth_presence_overlaps_session,
+    _attach_browser_engagement,
     _browser_engagement_key,
     _compact_live_session,
     _is_known_identity_only_signal,
@@ -204,6 +205,34 @@ class IdentityTruthV2Tests(
             jim,
             other,
         )
+
+    def test_network_correlation_cannot_assign_authenticated_identity(self) -> None:
+        base = dict(
+            project_slug="aoe2hdbets", ip="192.0.2.5",
+            user_agent="Fixture Browser", started_at="2026-11-24T20:00:00Z",
+            ended_at="2026-11-24T20:02:00Z", authenticated=False,
+        )
+        sessions = [
+            dict(base, browser_visitor_id="visitor-a", browser_session_id="session-a"),
+            dict(base, browser_visitor_id="visitor-b", browser_session_id="session-b"),
+            dict(base),
+        ]
+        summary = dict(
+            authenticated=True, authenticated_uid="fixture-account-a",
+            authenticated_label="Fixture A", authenticated_at="2026-11-24T20:01:00Z",
+            browser_visitor_id="visitor-a", browser_session_id="session-a",
+            browser_clicks=2, browser_route_trail=["/players"],
+        )
+        key = _browser_engagement_key(base["project_slug"], base["ip"], base["user_agent"])
+        result = _attach_browser_engagement(sessions, {key: summary})
+        for row in result:
+            self.assertFalse(row["authenticated"])
+            self.assertNotIn("authenticated_uid", row)
+            self.assertNotIn("known_visitor_label", row)
+            self.assertEqual(row["browser_clicks"], 2)
+        self.assertEqual(result[0]["browser_session_id"], "session-a")
+        self.assertEqual(result[1]["browser_session_id"], "session-b")
+        self.assertNotIn("browser_session_id", result[2])
 
     def test_auth_presence_must_overlap_server_session(
         self,
