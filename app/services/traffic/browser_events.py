@@ -635,16 +635,36 @@ def record_authenticated_presence(payload: dict[str, Any]) -> dict[str, Any]:
 
     with _connect() as connection:
         _ensure_schema(connection)
-        existing = connection.execute(
+        # Serialize check and write across connections/processes. Public telemetry
+        # is not an authority for ownership; the trusted sender must bind the
+        # browser tuple to its authenticated session before calling this route.
+        connection.execute("BEGIN IMMEDIATE")
+        existing_rows = connection.execute(
             """
-            SELECT id
+            SELECT id, visitor_id, payload_json
             FROM traffic_browser_events
             WHERE project_slug = ? AND session_id = ? AND event_type = 'auth_presence'
-            ORDER BY received_at DESC, id DESC
-            LIMIT 1
+            LIMIT 2
             """,
             (project.get("slug") or "unknown", session_id),
-        ).fetchone()
+        ).fetchall()
+        if len(existing_rows) > 1:
+            raise ValueError("ambiguous authenticated session binding")
+        existing = existing_rows[0] if existing_rows else None
+        if existing:
+            try:
+                previous = json.loads(existing["payload_json"])
+            except (ValueError, TypeError):
+                raise ValueError("invalid authenticated session binding") from None
+            if (
+                existing["visitor_id"] != visitor_id
+                or not isinstance(previous, dict)
+                or previous.get("auth_verified") is not True
+                or previous.get("authenticated_uid") != authenticated_uid
+            ):
+                # Account transitions must rotate the sender's session ID;
+                # never overwrite another binding or alter its freshness.
+                raise ValueError("authenticated session binding mismatch")
 
         if existing:
             event_id = int(existing["id"])
@@ -695,19 +715,18 @@ def record_authenticated_presence(payload: dict[str, Any]) -> dict[str, Any]:
             first_seen_at=received_at,
         )
 
-        connection.commit()
-
         session_event_count = int(
             connection.execute(
                 """
                 SELECT COUNT(*)
                 FROM traffic_browser_events
-                WHERE session_id = ?
+                WHERE project_slug = ? AND visitor_id = ? AND session_id = ?
                   AND event_type != 'auth_presence'
                 """,
-                (session_id,),
+                (project.get("slug") or "unknown", visitor_id, session_id),
             ).fetchone()[0]
         )
+        connection.commit()
 
     return {
         "ok": True,
@@ -781,13 +800,21 @@ def _enrich_browser_event_row(row: sqlite3.Row) -> dict[str, Any]:
     return event
 
 
+def _identity_session_key(event: Mapping[str, Any]) -> tuple[str, str, str] | None:
+    # Missing scope is not a shared default identity namespace.
+    parts = tuple(event.get(k) for k in ("project_slug", "visitor_id", "session_id"))
+    if not all(isinstance(part, str) and part.strip() for part in parts):
+        return None
+    return (parts[0], parts[1], parts[2])
+
+
 def _propagate_authenticated_identity(
     events: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Propagate identity only while its authentication evidence is fresh."""
+    """Propagate fresh authentication only within its complete browser tuple."""
 
     by_session: dict[
-        str,
+        tuple[str, str, str],
         dict[str, str],
     ] = {}
 
@@ -795,16 +822,16 @@ def _propagate_authenticated_identity(
         events,
         key=_story_sort_key,
     ):
-        session_id = str(
-            event.get("session_id")
-            or ""
-        ).strip()
-
-        if not session_id:
+        session_key = _identity_session_key(event)
+        if session_key is None:
             continue
 
-        if event.get("authenticated"):
-            by_session[session_id] = {
+        if (
+            event.get("authenticated") is True
+            and event.get("event_type") == "auth_presence"
+            and event.get("authenticated_uid")
+        ):
+            by_session[session_key] = {
                 "authenticated_uid": str(
                     event.get(
                         "authenticated_uid"
@@ -831,9 +858,7 @@ def _propagate_authenticated_identity(
                 ),
             }
 
-        identity = by_session.get(
-            session_id
-        )
+        identity = by_session.get(session_key)
 
         if not identity:
             continue
