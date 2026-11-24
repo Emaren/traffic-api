@@ -1,0 +1,55 @@
+[Unit]
+Description=AoE2WAR Traffic V2 signed completed-day publisher (nonroot, fail-closed)
+Wants=network-online.target
+After=network-online.target traffic-api.service
+RequiresMountsFor=/mnt/HC_Volume_105319120/traffic-db
+
+[Service]
+Type=oneshot
+User=tony
+Group=tony
+WorkingDirectory=/var/www/Traffic/traffic-api
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0077
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUQuota=60%
+MemoryHigh=512M
+MemoryMax=768M
+MemorySwapMax=128M
+OOMPolicy=stop
+TimeoutStartSec=180s
+# The existing Python runner is the sole admission authority. It checks:
+# root-owned exact configuration/trust, signed upstream and classifier day
+# evidence, ACTIVE external owner revocation, source/finality/SQLite invariants.
+# Without those inputs it exits nonzero and cannot publish an inferred day.
+ExecStart=/var/www/Traffic/traffic-api/.venv/bin/python3 -B -m scripts.public_audience_v2_runner --once
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+# Source SQLite requires WAL/SHM coordination and the atomic publisher
+# updates the canonical public day table. No other DATA/ROOT paths are writable.
+# The second directory is source-scoped WE2 publisher evidence/checkpoint
+# storage, never created by this unit and admitted separately under root review.
+ReadWritePaths=/mnt/HC_Volume_105319120/traffic-db -/mnt/HC_Volume_105319120/traffic-v2-publisher
+ReadOnlyPaths=-/etc/aoe2war/traffic-v2
+InaccessiblePaths=-/run/postgresql -/var/run/postgresql
+# The existing tony account has docker group membership on HEL1. Never
+# expose container runtime control sockets to this otherwise nonroot worker.
+InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock -/run/containerd -/var/run/containerd
+# No Install section: only its independent bounded systemd timer may be
+# separately enabled by the protected WE2 owner-native admission ceremony.

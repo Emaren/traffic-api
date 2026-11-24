@@ -1,0 +1,15 @@
+[Unit]
+Description=Retry only authenticated completed-day Traffic V2 publications (UTC)
+
+[Timer]
+# Finality requires at least 31 minutes after the UTC day boundary. Hourly
+# rechecks recover naturally from late arrival or a missed witness without
+# inventing zeros, rewriting historical dates or running a full-history forge.
+OnCalendar=*-*-* *:37:00 UTC
+Persistent=true
+AccuracySec=1min
+RandomizedDelaySec=0
+Unit=traffic-v2-publisher.service
+
+[Install]
+WantedBy=timers.target
