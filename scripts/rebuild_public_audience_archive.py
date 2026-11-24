@@ -431,14 +431,7 @@ def stream_sessions(
     end: datetime,
     behavior: dict[tuple[str, str], dict[str, Any]],
     snapshot_max_rowid: int,
-    private_rows: Iterator[sqlite3.Row] | None = None,
-    classification_clock: datetime | None = None,
 ) -> tuple[dict[str, list[int]], dict[str, int]]:
-    """Canonical pass-two: original source by default, verified private rows opt-in.
-
-    Caller must independently qualify source completeness, privacy and finality.
-    Optional inputs do NOT constitute a public-release certificate.
-    """
     rules = safe_list_visibility_rules(active_only=True)
 
     open_sessions: dict[
@@ -470,9 +463,7 @@ def stream_sessions(
         minutes=SESSION_GAP_MINUTES
     )
 
-    now = classification_clock if classification_clock is not None else datetime.now(timezone.utc)
-    if now.tzinfo is None or now.utcoffset() != timedelta(0):
-        raise ValueError("canonical classification requires UTC clock")
+    now = datetime.now(timezone.utc)
 
     def close_session(
         key: tuple[str, str, str],
@@ -588,12 +579,11 @@ def stream_sessions(
                 None,
             )
 
-    rows = private_rows if private_rows is not None else source_rows(
+    for row in source_rows(
         start=start,
         end=end,
         snapshot_max_rowid=snapshot_max_rowid,
-    )
-    for row in rows:
+    ):
         raw_count += 1
 
         item = normalize_row(
