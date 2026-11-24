@@ -2913,55 +2913,12 @@ def _attach_browser_engagement(
         session["browser_route_trail"] = list(summary.get("browser_route_trail") or [])
         session["browser_latest_meaningful_event"] = str(summary.get("browser_latest_meaningful_event") or "")
         session["browser_latest_meaningful_path"] = str(summary.get("browser_latest_meaningful_path") or "")
-        session["browser_visitor_id"] = str(summary.get("browser_visitor_id") or "")
-        session["browser_session_id"] = str(summary.get("browser_session_id") or "")
-        session["authenticated"] = bool(
-            summary.get(
-                "authenticated"
-            )
-            and _auth_presence_overlaps_session(
-                session,
-                summary.get(
-                    "authenticated_at"
-                ),
-            )
-        )
-
-        session["authenticated_uid"] = (
-            str(
-                summary.get(
-                    "authenticated_uid"
-                )
-                or ""
-            )
-            if session[
-                "authenticated"
-            ]
-            else ""
-        )
-
-        if session["authenticated"]:
-            label = str(summary.get("authenticated_label") or "Authenticated player")
-            session["known_visitor_label"] = label
-            session["known_visitor_detail"] = "authenticated AoE2WAR session"
-            session["known_visitor_kind"] = "known_player"
-            session["known_visitor_confirmed"] = True
-            reasons = list(session.get("classification_reasons") or [])
-            if "authenticated_presence" not in reasons:
-                reasons.append("authenticated_presence")
-            session["classification_reasons"] = reasons
-            if session.get("classification_state") not in {"bot", "suspicious"}:
-                session["classification_state"] = "likely_human"
-                session["human_confidence"] = max(int(session.get("human_confidence") or 0), 85)
-                session["human_confirmed"] = False
-                session["suspicious_score"] = min(int(session.get("suspicious_score") or 0), 12)
-                session["verdict_label"] = "Likely Human"
-            session["classification_summary"] = (
-                f"AoE2WAR verified an authenticated session for {label}. "
-                "Authentication is authoritative identity context; Traffic still keeps behavioral human confidence separate."
-            )
-            session["attention_label"] = "Authenticated"
-            session["attention_summary"] = f"{label} · server-verified AoE2WAR presence."
+        # This join is only a network/browser-signature correlation, not an
+        # authenticated browser-session join. Keep its behavioral hints, but
+        # never copy the summary's identifiers or promote account identity.
+        # Existing independently sourced session identity (if any) is left
+        # unchanged. Verified attribution requires a separately admitted,
+        # server-authenticated project/visitor/session binding.
 
         # Preserve server journey, but expose the browser-derived journey as the
         # preferred human trail when present.

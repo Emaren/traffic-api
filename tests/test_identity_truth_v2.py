@@ -12,6 +12,7 @@ from app.services.traffic.browser_events import (
 )
 from app.services.traffic.overview import (
     _auth_presence_overlaps_session,
+    _attach_browser_engagement,
     _browser_engagement_key,
     _compact_live_session,
     _is_known_identity_only_signal,
@@ -79,7 +80,7 @@ class IdentityTruthV2Tests(
             "203.0.113.25",
         )
 
-    def test_fresh_authenticated_identity_propagates_within_session(
+    def test_fresh_authenticated_presence_correlates_without_identity_promotion(
         self,
     ) -> None:
         events = [
@@ -87,6 +88,8 @@ class IdentityTruthV2Tests(
                 "id": 1,
                 "received_at": "2026-08-26T22:00:00+00:00",
                 "event_type": "auth_presence",
+                "project_slug": "aoe2hdbets",
+                "visitor_id": "jim-visitor",
                 "session_id": "jim-session",
                 "authenticated": True,
                 "authenticated_uid": "jim-uid",
@@ -97,6 +100,8 @@ class IdentityTruthV2Tests(
                 "id": 2,
                 "received_at": "2026-08-26T22:02:00+00:00",
                 "event_type": "click",
+                "project_slug": "aoe2hdbets",
+                "visitor_id": "jim-visitor",
                 "session_id": "jim-session",
                 "authenticated": False,
             },
@@ -106,22 +111,13 @@ class IdentityTruthV2Tests(
             events
         )
 
-        self.assertTrue(
-            result[1]["authenticated"]
-        )
-        self.assertTrue(
-            result[1][
-                "authentication_fresh"
-            ]
-        )
-        self.assertEqual(
-            result[1][
-                "authenticated_uid"
-            ],
-            "jim-uid",
-        )
+        self.assertTrue(result[0]["authenticated"])
+        self.assertFalse(result[1]["authenticated"])
+        self.assertFalse(result[1]["authentication_fresh"])
+        self.assertEqual(result[1]["authenticated_uid"], "")
+        self.assertTrue(result[1]["correlates_with_recent_auth_presence"])
 
-    def test_stale_authenticated_identity_does_not_survive_long_session(
+    def test_stale_presence_does_not_correlate_or_disclose_identity(
         self,
     ) -> None:
         events = [
@@ -129,6 +125,8 @@ class IdentityTruthV2Tests(
                 "id": 1,
                 "received_at": "2026-08-26T06:37:23+00:00",
                 "event_type": "auth_presence",
+                "project_slug": "aoe2hdbets",
+                "visitor_id": "jim-visitor",
                 "session_id": "jim-session",
                 "authenticated": True,
                 "authenticated_uid": "jim-uid",
@@ -139,6 +137,8 @@ class IdentityTruthV2Tests(
                 "id": 2,
                 "received_at": "2026-08-26T22:47:50+00:00",
                 "event_type": "visibility_change",
+                "project_slug": "aoe2hdbets",
+                "visitor_id": "jim-visitor",
                 "session_id": "jim-session",
                 "authenticated": False,
             },
@@ -148,26 +148,11 @@ class IdentityTruthV2Tests(
             events
         )
 
-        self.assertFalse(
-            result[1]["authenticated"]
-        )
-        self.assertFalse(
-            result[1][
-                "authentication_fresh"
-            ]
-        )
-        self.assertEqual(
-            result[1][
-                "previously_authenticated_uid"
-            ],
-            "jim-uid",
-        )
-        self.assertEqual(
-            result[1][
-                "known_visitor_detail"
-            ],
-            "previously authenticated AoE2WAR session",
-        )
+        self.assertFalse(result[1]["authenticated"])
+        self.assertFalse(result[1]["authentication_fresh"])
+        self.assertFalse(result[1]["correlates_with_recent_auth_presence"])
+        self.assertEqual(result[1]["authenticated_uid"], "")
+        self.assertNotIn("previously_authenticated_uid", result[1])
 
     def test_auth_freshness_window_is_bounded(
         self,
@@ -196,6 +181,34 @@ class IdentityTruthV2Tests(
             jim,
             other,
         )
+
+    def test_network_correlation_cannot_assign_authenticated_identity(self) -> None:
+        base = dict(
+            project_slug="aoe2hdbets", ip="192.0.2.5",
+            user_agent="Fixture Browser", started_at="2026-11-24T20:00:00Z",
+            ended_at="2026-11-24T20:02:00Z", authenticated=False,
+        )
+        sessions = [
+            dict(base, browser_visitor_id="visitor-a", browser_session_id="session-a"),
+            dict(base, browser_visitor_id="visitor-b", browser_session_id="session-b"),
+            dict(base),
+        ]
+        summary = dict(
+            authenticated=True, authenticated_uid="fixture-account-a",
+            authenticated_label="Fixture A", authenticated_at="2026-11-24T20:01:00Z",
+            browser_visitor_id="visitor-a", browser_session_id="session-a",
+            browser_clicks=2, browser_route_trail=["/players"],
+        )
+        key = _browser_engagement_key(base["project_slug"], base["ip"], base["user_agent"])
+        result = _attach_browser_engagement(sessions, {key: summary})
+        for row in result:
+            self.assertFalse(row["authenticated"])
+            self.assertNotIn("authenticated_uid", row)
+            self.assertNotIn("known_visitor_label", row)
+            self.assertEqual(row["browser_clicks"], 2)
+        self.assertEqual(result[0]["browser_session_id"], "session-a")
+        self.assertEqual(result[1]["browser_session_id"], "session-b")
+        self.assertNotIn("browser_session_id", result[2])
 
     def test_auth_presence_must_overlap_server_session(
         self,
