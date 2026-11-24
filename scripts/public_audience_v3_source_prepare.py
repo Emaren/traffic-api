@@ -8,7 +8,11 @@ from __future__ import annotations
 
 from contextlib import ExitStack, closing
 from datetime import date, datetime, timedelta, timezone
+import argparse
 import hashlib
+import os
+import stat
+import subprocess
 import json
 from pathlib import Path
 import sqlite3
@@ -20,6 +24,9 @@ from urllib.parse import quote
 from app.services.traffic import sessions, known_visitors
 from app.services.traffic.persistence import _non_browser_chain_firehose_sql
 from scripts import public_audience_v2_daily_source_parity as parity
+from scripts import public_audience_v2_guarded_resume as guard
+from scripts import public_audience_v2_forward_ledger as forward
+from scripts import public_audience_v2_sessions as canonical_state
 from scripts import public_audience_v2_day_admission as witness
 from scripts import public_audience_v3_daily_observation_review as observation
 from scripts import rebuild_public_audience_archive as canonical
@@ -61,6 +68,7 @@ def prepare(raw: sqlite3.Connection, ledger: sqlite3.Connection, *,
     """
     need(type(day) is date and witness.V3_FIRST_NEW <= day < now.date(), "DAY_SCOPE")
     need(1 <= limit <= MAX_ROWS and 1 <= budget_seconds <= 100, "RESOURCE_SCOPE")
+    need(raw.in_transaction and ledger.in_transaction, "PINNED_READ_TRANSACTIONS_REQUIRED")
     need(raw.execute("PRAGMA query_only").fetchone()[0] == 1
          and ledger.execute("PRAGMA query_only").fetchone()[0] == 1, "READ_ONLY_REQUIRED")
     start = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
@@ -82,7 +90,11 @@ def prepare(raw: sqlite3.Connection, ledger: sqlite3.Connection, *,
     need(type(hosts) is list and 0 < len(hosts) <= 16
          and all(type(h) is str and h for h in hosts) and len(set(hosts)) == len(hosts)
          and type(rules) is list, "HOST_RULE_SCOPE")
-    need(page.get("day") == day.isoformat() and page.get("source_prefix_exhausted") is True
+    host_digest = hashlib.sha256(json.dumps(hosts).encode()).hexdigest()
+    rule_digest = hashlib.sha256(json.dumps(rules, sort_keys=True, default=str).encode()).hexdigest()
+    need(sha({"hosts":hosts,"hosts_sha256":host_digest,"rules_sha256":rule_digest}) == dependencies["host_rules_sha256"],
+         "FROZEN_HOST_RULE_PREIMAGE_DRIFT")
+    need(set(page) == witness.STATE_FIELDS and page.get("day") == day.isoformat() and page.get("source_prefix_exhausted") is True
          and page.get("host_rules_sha256") == dependencies["host_rules_sha256"]
          and page.get("missing_receipts") == page.get("invalid_clocks") == 0,
          "PAGE_SCOPE")
@@ -176,6 +188,7 @@ def prepare(raw: sqlite3.Connection, ledger: sqlite3.Connection, *,
                 upstream_closed_through=upstream, writer_closed_through=writer)
         need(time.monotonic() < deadline, "CLASSIFIER_BUDGET")
         return {**result, "source_evidence": source_body,
+                "classifier_source_commit_sha": reviewed_source_commit,
                 "delivery_handoff_sha256": delivery_sha256,
                 "independent_origin_review_required": True}
     finally:
@@ -202,8 +215,103 @@ def certificate_body(candidate: dict, page: dict, delivery: dict, *, now: dateti
          "upstream_log_closed_through_utc": o["upstream_closed_through_utc"],
          "writer_receipts_closed_through_utc": o["writer_closed_through_utc"],
          "observation_sha256": sha(o), "late_arrival_stability_sha256": delivery["late_arrival_evidence_sha256"],
+         "classifier_source_commit_sha": candidate["classifier_source_commit_sha"],
          **{k:o[k] for k in ("daily_model_sha256","carry_sha256","classifier_dependencies_sha256",
                             "normalized_input_sha256","source_evidence_sha256")},
          **dict(zip(("total","potential","confirmed"),o["metrics"]))}
     witness.check_day_witness(c, page, now=now, observation=o)
     return c
+
+
+def read_private_json(path: Path, expected: str) -> dict:
+    """Exact private canonical JSON; no symlinks, hardlinks or mutable reads."""
+    need(path.is_absolute() and path.resolve() == path and hex64(expected), "PRIVATE_PATH_OR_PIN")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        before = os.fstat(fd)
+        need(stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid()
+             and before.st_nlink == 1 and stat.S_IMODE(before.st_mode) == 0o600
+             and 0 < before.st_size <= 32_000_000, "PRIVATE_PREIMAGE_SCOPE")
+        with os.fdopen(os.dup(fd), "rb") as stream:
+            data = stream.read(32_000_001)
+        after = os.fstat(fd)
+        need((before.st_size,before.st_mtime_ns,before.st_ctime_ns) ==
+             (after.st_size,after.st_mtime_ns,after.st_ctime_ns)
+             and len(data) == before.st_size, "PRIVATE_PREIMAGE_MOVED")
+        obj = json.loads(data)
+        need(type(obj) is dict and data == witness.canonical(obj)
+             and witness.digest(data) == expected, "PRIVATE_PREIMAGE_DIGEST_DRIFT")
+        return obj
+    finally:
+        os.close(fd)
+
+
+def run(args) -> dict:
+    """Native, bounded, read-only isolated CLI; stdout is private aggregate only."""
+    import fcntl
+    need(args.source.is_absolute() and args.source.resolve() == args.source,
+         "SOURCE_PATH")
+    need(args.checkpoint.parent == args.ledger.parent and
+         args.checkpoint.parent.stat().st_mode & 0o077 == 0, "PRIVATE_COHORT")
+    for p in (args.checkpoint,args.ledger):
+        need(p.is_absolute() and p.resolve() == p and p.is_file()
+             and p.stat().st_mode & 0o777 == 0o600 and p.stat().st_nlink == 1,
+             "PRIVATE_COHORT_FILE")
+    # Root review must supply actual exact Git checkout, not a claimed label.
+    root = Path(__file__).resolve().parents[1]
+    head = subprocess.check_output(["git","-C",str(root),"rev-parse","HEAD"],text=True).strip()
+    dirty = subprocess.check_output(["git","-C",str(root),"status","--porcelain"],text=True)
+    need(head == args.source_commit and not dirty, "REVIEWED_SOURCE_CHECKOUT_DRIFT")
+    page = read_private_json(args.page,args.page_sha256)
+    deps = read_private_json(args.dependencies,args.dependencies_sha256)
+    handoff = read_private_json(args.delivery,args.delivery_sha256)
+    guard.require_worker_priority()
+    need(guard.worker_idle(), "PROJECT_WORKER_BUSY")
+    lockfd = os.open(args.checkpoint.parent/".canary.lock",os.O_RDONLY|getattr(os,"O_NOFOLLOW",0))
+    try:
+        need(stat.S_ISREG(os.fstat(lockfd).st_mode), "COHORT_LOCK")
+        fcntl.flock(lockfd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        info = guard.checkpoint_info(args.checkpoint)
+        guard.verify_frozen(args.source,args.checkpoint,info)
+        need(info["phase"] == "PASS2_COMPLETE", "HISTORIC_CHECKPOINT")
+        hosts,rules = canonical_state.verified_state(args.source,args.checkpoint,info)
+        need(deps["hosts"] == hosts and deps["rules"] == rules, "CHECKPOINT_HOST_POLICY_DRIFT")
+        need(page["source_epoch_sha256"] == sha({k:info[k] for k in
+             ("device","inode","watermark","canonical_sha256","p1_digest")}), "SOURCE_EPOCH_DRIFT")
+        with ExitStack() as stack:
+            dbs = []
+            for p in (args.source,args.ledger):
+                db = stack.enter_context(closing(sqlite3.connect("file:"+quote(str(p),safe="/")+"?mode=ro",
+                                                     uri=True,timeout=1)))
+                db.row_factory=sqlite3.Row
+                db.execute("PRAGMA query_only=ON")
+                db.execute("BEGIN")
+                dbs.append(db)
+            raw,ledger=dbs
+            forward.assert_published_history(raw)
+            forward.validate_ledger(forward.read_metadata(ledger),info)
+            return prepare(raw,ledger,day=date.fromisoformat(args.day),page=page,dependencies=deps,
+                dependency_sha256=args.dependencies_sha256,delivery=handoff,delivery_sha256=args.delivery_sha256,
+                reviewed_source_commit=head,now=datetime.now(timezone.utc))
+    finally:
+        os.close(lockfd)
+
+
+def main() -> int:
+    p=argparse.ArgumentParser(description=__doc__)
+    for key in ("source","checkpoint","ledger","page","dependencies","delivery"):
+        p.add_argument("--"+key,type=Path,required=True)
+    for key in ("day","source-commit","page-sha256","dependencies-sha256","delivery-sha256"):
+        p.add_argument("--"+key,required=True)
+    try:
+        result=run(p.parse_args())
+        print(witness.canonical(result).decode("utf-8"))
+        return 0
+    except (ValueError,RuntimeError,KeyError,TypeError,OSError,sqlite3.Error,subprocess.CalledProcessError):
+        # Avoid error strings that might contain private identifiers.
+        print("TRAFFIC_V3_SOURCE_HOLD_NO_CANDIDATE")
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -9,7 +9,7 @@ are still required. Fixture tests exercise the actual SQLite write transaction.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import os
 from pathlib import Path
@@ -197,6 +197,10 @@ def append_verified_day(
          and not proof["day_physical_production_certified"],
          "DAY_WITNESS_SOURCE_CONTRACT_DRIFT")
     day = _canonical_day(proof["day"])
+    is_v3 = proof["signed_finality_schema"] == admission.V3_SCHEMA
+    if is_v3:
+        need(certificate_envelope["certificate"]["classifier_source_commit_sha"] ==
+             independently_admitted_operator_permit["source_commit_sha"], "V3_CLASSIFIER_SOURCE_SCOPE_DRIFT")
     need(FROZEN_LAST < day < now.date(), "CURRENT_OR_HISTORICAL_DAY_REFUSED")
     certsha = proof["certificate_digest_sha256"]
     candidate = proof["candidate_values"]
@@ -237,6 +241,24 @@ def append_verified_day(
                 "missing_days_are_unknown": True,
             }
         need(previous_cert is None, "ORPHAN_CERTIFICATE_NOT_PUBLISHED")
+        if is_v3:
+            # Under BEGIN IMMEDIATE, a raw insert cannot race the late-arrival
+            # check and append. Do not scan historical day sessions.
+            start = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
+            prefix = certificate_envelope["certificate"]["source_snapshot_rowid"]
+            db.set_progress_handler(lambda: 1, 500_000)
+            try:
+                late = db.execute(
+                    """SELECT rowid FROM traffic_entries
+                       INDEXED BY idx_traffic_entries_timestamp_line_offset
+                       WHERE timestamp>=? AND timestamp<? AND rowid>? LIMIT 1""",
+                    ((start-timedelta(minutes=30)).isoformat(),
+                     (start+timedelta(days=1)).isoformat(), prefix)).fetchone()
+                need(late is None, "V3_LATE_ARRIVAL_IN_WRITE_TRANSACTION")
+                need(db.execute("SELECT MAX(rowid) FROM traffic_entries").fetchone()[0] >= prefix,
+                     "V3_SOURCE_PREFIX_MISSING")
+            finally:
+                db.set_progress_handler(None, 0)
         # No retroactive correction or silent old-day modification, even if
         # a previously omitted gap is later supplied with a plausible token.
         future_days = [_canonical_day(r["day"]) for r in prior_rows

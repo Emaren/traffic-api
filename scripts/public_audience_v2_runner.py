@@ -485,6 +485,8 @@ def verify_and_append(db: sqlite3.Connection, cfg: dict, day: str,
     observation = strict_json(private_file(folder/"observation.json", uid=uid)) if v3 else None
     if v3:
         need(day >= witness.V3_FIRST_NEW.isoformat(), "V3_MIGRATION_SCOPE")
+        need(evidence["certificate"].get("classifier_source_commit_sha") == cfg["source_commit_sha"],
+             "V3_CLASSIFIER_SOURCE_COMMIT_DRIFT")
     source_late_check(db, page, day, v3=True) if v3 else source_late_check(db, page, day)
     preimage = matrix(db)
     authority = verified_publish_authority(
@@ -592,6 +594,10 @@ def reconcile_certified_checkpoints(db: sqlite3.Connection, cfg: dict,
             expected_upstream_key_sha256=cfg["upstream_key_sha256"],
             expected_classifier_key_sha256=cfg["classifier_key_sha256"],
         )
+        if schema == witness.V3_SCHEMA:
+            # Post-seal late source arrivals are an incident: retain both the
+            # original immutable point and input, HOLD further publication.
+            source_late_check(db, page, day, v3=True)
         need(signed["candidate_values"] == after_matrix[day],
              "CERTIFIED_VALUES_NO_LONGER_MATCH_SIGNED_INPUT")
         receipt = Path(cfg["checkpoint_dir"])/("completed-"+day+".json")

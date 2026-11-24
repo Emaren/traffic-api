@@ -41,7 +41,7 @@ V3_FIELDS = (FIELDS - {"global_ip_model_sha256", "canonical_sessions_sha256",
                        "cross_midnight_carry_sha256"}) | {
     "daily_model_sha256", "observation_sha256", "carry_sha256",
     "classifier_dependencies_sha256", "normalized_input_sha256",
-    "source_evidence_sha256",
+    "source_evidence_sha256", "classifier_source_commit_sha",
 }
 V3_OBSERVATION_FIELDS = frozenset({
     "schema", "day", "observation_end_exclusive_utc", "delivery_floor_utc",
@@ -158,6 +158,9 @@ def check_day_witness(certificate: dict, page: dict, *, now: datetime,
     require(utc_stamp(certificate["writer_receipts_closed_through_utc"]) >= margin,
             "INSERT_WRITER_NOT_CLOSED")
     if v3:
+        require(type(certificate["classifier_source_commit_sha"]) is str
+                and re.fullmatch(r"[0-9a-f]{40}", certificate["classifier_source_commit_sha"]) is not None,
+                "V3_CLASSIFIER_SOURCE_COMMIT")
         require(type(observation) is dict and set(observation) == V3_OBSERVATION_FIELDS
                 and observation["schema"] == "traffic.public-audience.v3.daily-observation.review.v1"
                 and digest(canonical(observation)) == certificate["observation_sha256"],
@@ -174,6 +177,9 @@ def check_day_witness(certificate: dict, page: dict, *, now: datetime,
         require(observation["upstream_closed_through_utc"] == certificate["upstream_log_closed_through_utc"]
                 and observation["writer_closed_through_utc"] == certificate["writer_receipts_closed_through_utc"],
                 "V3_OBSERVATION_CLOCK_DRIFT")
+        require(max(utc_stamp(observation["upstream_closed_through_utc"]),
+                    utc_stamp(observation["writer_closed_through_utc"])) <= now,
+                "V3_FUTURE_DELIVERY_CLOCK")
         counts = [observation[k] for k in ("accepted_day_events", "slice_count", "carry_in_slices")]
         require(all(type(n) is int and n >= 0 for n in counts)
                 and certificate["source_rows"] >= counts[0] >= counts[1] >= counts[2]

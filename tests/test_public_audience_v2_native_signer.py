@@ -117,6 +117,24 @@ class NativeTrafficSigner(unittest.TestCase):
         self.check_native("owner","delegation",payload("delegation"))
         self.check_native("owner","state",payload("state"))
 
+    def test_v3_exact_schema_original_roles_and_scope(self):
+        obj = payload("day")
+        if obj["day"] < "2026-11-23":
+            self.skipTest("runtime fixture day precedes V3 epoch")
+        obj = {k:v for k,v in obj.items() if k in day.V3_FIELDS}
+        obj.update({k:"a"*64 for k in day.V3_FIELDS-set(obj)})
+        obj["schema"] = day.V3_SCHEMA
+        obj["classifier_source_commit_sha"] = "a"*40
+        self.check_native("upstream","day",obj)
+        self.check_native("classifier","day",obj)
+        self.check_native("owner","day",obj,False)
+        bad=dict(obj, schema=day.SCHEMA)
+        self.check_native("classifier","day",bad,False)
+        bad=dict(obj, total=True)
+        self.check_native("classifier","day",bad,False)
+        bad=dict(obj, day="2026-11-22")
+        self.check_native("classifier","day",bad,False)
+
     def test_cross_role_and_incomplete_day_denials(self):
         self.check_native("owner","day",payload("day"),False)
         self.check_native("classifier","state",payload("state"),False)
