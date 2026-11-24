@@ -1,0 +1,162 @@
+"""Forward private canonical pass-two tests: source and semantic fail-closed.
+
+No production database, Keychain, NGINX logs, or publisher is accessed.
+The existing canonical implementation remains byte-for-byte unchanged.
+"""
+from __future__ import annotations
+
+from contextlib import closing
+from datetime import datetime, timedelta, timezone
+import json
+from pathlib import Path
+import sqlite3
+import tempfile
+import time
+import unittest
+from unittest.mock import patch
+
+from scripts import public_audience_v2_forward_canonical_candidate as candidate
+from scripts import public_audience_v2_checkpoint as checkpoint
+from scripts import public_audience_v2_forward_ledger as forward
+from scripts import rebuild_public_audience_archive as canonical
+
+
+def event(rowid: int, when: str, *, line: int = 1, ip: str = "192.0.2.10"):
+    return {
+        "source_rowid": rowid, "event_id": "id-"+str(rowid),
+        "timestamp": when, "ip": ip, "line_offset": line,
+        "raw_path": "/", "normalized_path": "/",
+        "referrer_host": "", "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+        "host": "aoe2war.com",
+    }
+
+
+class ForwardCanonicalReadOnlyTests(unittest.TestCase):
+    def setUp(self):
+        self.db = sqlite3.connect(":memory:")
+        self.db.row_factory = sqlite3.Row
+        self.db.executescript(forward.PRIVATE_SCHEMA)
+        self.addCleanup(self.db.close)
+
+    def add(self, value):
+        self.db.execute(
+            "INSERT INTO future_events(source_rowid,event_json,timestamp) VALUES(?,?,?)",
+            (value["source_rowid"],
+             json.dumps(value,sort_keys=True,separators=(",",":")),
+             value["timestamp"]),
+        )
+        self.db.commit()
+
+    def rows(self, *, cap=100):
+        return list(candidate.raw_forward_rows(
+            self.db, start="2026-11-22T00:00:00+00:00",
+            end="2026-11-24T00:00:00+00:00",
+            source_prefix_rowid=forward.FROZEN_WATERMARK+1000,
+            max_events=cap, deadline=time.monotonic()+5))
+
+    def test_raw_private_ledger_is_exact_timestamp_line_offset_order(self):
+        self.add(event(forward.FROZEN_WATERMARK+1,"2026-11-23T00:00:00+00:00",line=8))
+        self.add(event(forward.FROZEN_WATERMARK+2,"2026-11-23T00:00:00+00:00",line=2))
+        self.add(event(forward.FROZEN_WATERMARK+3,"2026-11-22T23:59:59+00:00",line=4))
+        self.assertEqual([x["line_offset"] for x in self.rows()],[4,2,8])
+        self.assertTrue(set(self.rows()[0])==set(checkpoint.RAW_FIELDS))
+
+    def test_original_source_row_identity_mismatch_denied(self):
+        a=event(forward.FROZEN_WATERMARK+1,"2026-11-23T01:00:00+00:00")
+        self.add(a)
+        bad={**a,"source_rowid":a["source_rowid"]+7}
+        self.db.execute("UPDATE future_events SET event_json=? WHERE source_rowid=?",
+                        (json.dumps(bad),a["source_rowid"]))
+        with self.assertRaisesRegex(RuntimeError,"SOURCE_ROW_ID"):
+            self.rows()
+
+    def test_oversized_equal_timestamp_group_fails_closed(self):
+        first="2026-11-23T01:00:00+00:00"
+        for i in range(3):
+            self.add(event(forward.FROZEN_WATERMARK+i+1,first))
+        with patch.object(candidate,"MAX_EQUAL_TIME_GROUP",2):
+            with self.assertRaisesRegex(RuntimeError,"TIMESTAMP_TIE_LIMIT"):
+                self.rows()
+
+    def test_bounded_rows_and_seconds_fail_closed(self):
+        for i in range(3):
+            self.add(event(forward.FROZEN_WATERMARK+i+1,
+                           "2026-11-23T01:00:0"+str(i)+"+00:00"))
+        with self.assertRaisesRegex(RuntimeError,"EVENT_COUNT_LIMIT"):
+            self.rows(cap=2)
+        with self.assertRaisesRegex(RuntimeError,"BUDGET_SECONDS"):
+            list(candidate.raw_forward_rows(
+                self.db,start="2026-11-22T00:00:00+00:00",
+                end="2026-11-24T00:00:00+00:00",
+                source_prefix_rowid=forward.FROZEN_WATERMARK+1000,
+                max_events=5,deadline=time.monotonic()-1))
+
+    def test_real_canonical_engine_cross_midnight_carry(self):
+        first=event(forward.FROZEN_WATERMARK+1,
+                    "2026-11-22T23:59:40+00:00")
+        crossing=event(forward.FROZEN_WATERMARK+2,
+                       "2026-11-23T00:01:10+00:00")
+        separate=event(forward.FROZEN_WATERMARK+3,
+                       "2026-11-23T01:00:00+00:00")
+        for row in (first,crossing,separate):self.add(row)
+        now=datetime(2026,11,24,0,31,tzinfo=timezone.utc)
+        from_utc=datetime(2026,11,22,tzinfo=timezone.utc)
+        until=datetime(2026,11,24,tzinfo=timezone.utc)
+        behavior={("aoe2war.com","192.0.2.10"): {
+            "request_count":3, "unique_uas":1,"unique_paths":1,
+            "route_bundle_paths":["/"],"route_bundle_spam":False}}
+        # Explicitly use the same ambient policy in both paths; neither
+        # test is an admission or historical-source authenticity proof.
+        with patch.object(canonical,"safe_list_visibility_rules",return_value=[]):
+            private_daily,private_metrics=candidate.canonical_private_replay(
+                raw_rows=iter(self.rows()),behavior=behavior,
+                from_utc=from_utc,until_utc=until,
+                source_prefix_rowid=forward.FROZEN_WATERMARK+1000,
+                observed_at_utc=now)
+            with patch.object(canonical,"source_rows",return_value=iter(self.rows())):
+                historic_daily,historic_metrics=canonical.stream_sessions(
+                    start=from_utc,end=until,behavior=behavior,
+                    snapshot_max_rowid=forward.FROZEN_WATERMARK+1000)
+        self.assertEqual(private_daily,historic_daily)
+        self.assertEqual(private_metrics,historic_metrics)
+        self.assertEqual(private_metrics["raw_rows"],3)
+        self.assertEqual(sum(x[0] for x in private_daily.values()),2)
+        self.assertEqual(private_daily["2026-11-22"][0],1)
+        self.assertEqual(private_daily["2026-11-23"][0],1)
+
+    def test_private_source_function_restored_even_on_error(self):
+        original=canonical.source_rows
+        def failed_rows():
+            raise RuntimeError("EXPECTED_SOURCE_FAILURE")
+            yield {}
+        with self.assertRaisesRegex(RuntimeError,"EXPECTED_SOURCE_FAILURE"):
+            candidate.canonical_private_replay(
+                raw_rows=failed_rows(), behavior={},
+                from_utc=datetime(2026,11,23,tzinfo=timezone.utc),
+                until_utc=datetime(2026,11,24,tzinfo=timezone.utc),
+                source_prefix_rowid=forward.FROZEN_WATERMARK+1,
+                observed_at_utc=datetime.now(timezone.utc))
+        self.assertIs(canonical.source_rows, original)
+
+    def test_private_file_mode_required(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f=Path(directory)/"evidence.sqlite3"
+            f.write_bytes(b"do-not-trust")
+            f.chmod(0o644)
+            with self.assertRaisesRegex(RuntimeError,"PRIVATE_FILE_INTEGRITY"):
+                candidate.regular_private(f)
+            f.chmod(0o600)
+            candidate.regular_private(f)
+
+    def test_forward_adapter_never_claims_public_release(self):
+        text=Path(candidate.__file__).read_text()
+        self.assertIn('"publication_authorized": False',text)
+        self.assertIn('"historical_epoch_carry_certified": False',text)
+        self.assertIn('"nginx_delivery_eof_certified": False',text)
+        self.assertIn('"full_day_source_paging_certified": False',text)
+        self.assertIn('"daily_classification_ready": False',text)
+        self.assertIn("return 2",text)
+
+
+if __name__ == "__main__":
+    unittest.main()
