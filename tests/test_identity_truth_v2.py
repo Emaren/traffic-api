@@ -80,7 +80,7 @@ class IdentityTruthV2Tests(
             "203.0.113.25",
         )
 
-    def test_fresh_authenticated_identity_propagates_within_session(
+    def test_fresh_authenticated_presence_correlates_without_identity_promotion(
         self,
     ) -> None:
         events = [
@@ -111,22 +111,13 @@ class IdentityTruthV2Tests(
             events
         )
 
-        self.assertTrue(
-            result[1]["authenticated"]
-        )
-        self.assertTrue(
-            result[1][
-                "authentication_fresh"
-            ]
-        )
-        self.assertEqual(
-            result[1][
-                "authenticated_uid"
-            ],
-            "jim-uid",
-        )
+        self.assertTrue(result[0]["authenticated"])
+        self.assertFalse(result[1]["authenticated"])
+        self.assertFalse(result[1]["authentication_fresh"])
+        self.assertEqual(result[1]["authenticated_uid"], "")
+        self.assertTrue(result[1]["correlates_with_recent_auth_presence"])
 
-    def test_stale_authenticated_identity_does_not_survive_long_session(
+    def test_stale_presence_does_not_correlate_or_disclose_identity(
         self,
     ) -> None:
         events = [
@@ -157,26 +148,11 @@ class IdentityTruthV2Tests(
             events
         )
 
-        self.assertFalse(
-            result[1]["authenticated"]
-        )
-        self.assertFalse(
-            result[1][
-                "authentication_fresh"
-            ]
-        )
-        self.assertEqual(
-            result[1][
-                "previously_authenticated_uid"
-            ],
-            "jim-uid",
-        )
-        self.assertEqual(
-            result[1][
-                "known_visitor_detail"
-            ],
-            "previously authenticated AoE2WAR session",
-        )
+        self.assertFalse(result[1]["authenticated"])
+        self.assertFalse(result[1]["authentication_fresh"])
+        self.assertFalse(result[1]["correlates_with_recent_auth_presence"])
+        self.assertEqual(result[1]["authenticated_uid"], "")
+        self.assertNotIn("previously_authenticated_uid", result[1])
 
     def test_auth_freshness_window_is_bounded(
         self,
