@@ -40,6 +40,7 @@ from scripts.public_audience_v2_release_manifest import sha as matrix_sha
 
 CONFIG = Path("/etc/aoe2war/traffic-v2/runner.json")
 SCHEMA = "traffic.public-audience.v2.root-runner.v1"
+V3_RUNNER_SCHEMA = "traffic.public-audience.v3.root-runner.v1"
 PROJECT = "aoe2hdbets"
 FIELDS = {
     "schema", "project", "source_database", "source_dev", "source_inode",
@@ -144,7 +145,7 @@ def config_read(file: Path, *, uid: int, trust_uid: int | None = None) -> dict:
         protected_trust_ancestors(file)
     obj = strict_json(private_file(file, uid=trust_uid,
                                    max_bytes=12000, mode=mode))
-    need(set(obj) == FIELDS and obj["schema"] == SCHEMA
+    need(set(obj) == FIELDS and obj["schema"] in (SCHEMA, V3_RUNNER_SCHEMA)
          and obj["project"] == PROJECT, "ROOT_CONFIG_SCHEMA_OR_PROJECT_DRIFT")
     need(obj["authorization_mode"] in ("one_day", "delegation")
          and type(obj["authorization_mode"]) is str,
@@ -259,15 +260,15 @@ def unit_check(cfg: dict, result: dict) -> None:
          "NATURAL_INSERT_RECEIPT_SETTING_NOT_INSTALLED")
 
 
-def source_late_check(db: sqlite3.Connection, page: dict, day: str) -> None:
+def source_late_check(db: sqlite3.Connection, page: dict, day: str, *, v3: bool = False) -> None:
     """Indexed single-row check for post-snapshot backdated arrivals."""
     s = date.fromisoformat(day)
     # Original canonical sessions can start before midnight or close in
     # the next UTC day. Recheck both 31-minute boundary wings, never only
     # events whose request timestamps fall inside the calendar day.
     boundary = datetime.combine(s, datetime.min.time(),tzinfo=timezone.utc)
-    start = (boundary - timedelta(minutes=31)).isoformat()
-    end = (boundary + timedelta(days=1,minutes=31)).isoformat()
+    start = (boundary - timedelta(minutes=30 if v3 else 31)).isoformat()
+    end = (boundary + timedelta(days=1,minutes=0 if v3 else 31)).isoformat()
     prefix = page["source_snapshot_rowid"] if "source_snapshot_rowid" in page \
         else page["snapshot_rowid"]
     need(type(prefix) is int and prefix > 0, "SOURCE_WATERMARK_NOT_BOUND")
@@ -362,7 +363,8 @@ def _candidate_dirs(cfg: dict, now: datetime, *, uid: int) -> list[tuple[str, Pa
         private_dir(entry, uid=uid)
         day = date.fromisoformat(entry.name)
         need(day.isoformat() == entry.name, "NONCANONICAL_EVIDENCE_DAY")
-        if date(2026, 10, 20) <= day < now.date():
+        first = witness.V3_FIRST_NEW if cfg.get("schema") == V3_RUNNER_SCHEMA else date(2026, 10, 20)
+        if first <= day < now.date():
             candidates.append((entry.name, entry))
     return sorted(candidates)
 
@@ -477,7 +479,13 @@ def verify_and_append(db: sqlite3.Connection, cfg: dict, day: str,
          and page.get("day") == day,
          "SOURCE_EVIDENCE_DAY_IDENTITY_DRIFT")
     unit_check(cfg, observed_unit)
-    source_late_check(db, page, day)
+    v3 = cfg.get("schema") == V3_RUNNER_SCHEMA
+    need(evidence["certificate"].get("schema") == (witness.V3_SCHEMA if v3 else witness.SCHEMA),
+         "METRIC_VERSION_NOT_ADMITTED_BY_ROOT_CONFIG")
+    observation = strict_json(private_file(folder/"observation.json", uid=uid)) if v3 else None
+    if v3:
+        need(day >= witness.V3_FIRST_NEW.isoformat(), "V3_MIGRATION_SCOPE")
+    source_late_check(db, page, day, v3=True) if v3 else source_late_check(db, page, day)
     preimage = matrix(db)
     authority = verified_publish_authority(
         cfg, day=day, folder=folder, evidence=evidence,
@@ -497,6 +505,7 @@ def verify_and_append(db: sqlite3.Connection, cfg: dict, day: str,
         durable_preimage=lambda rows: reusable_preimage(
             cfg, rows, day=day, uid=uid),
         expected_public_sha256=preimage, lock_proven=True,
+        observation=observation,
     )
     if result["public_write_count"] == 1:
         checkpoint_receipt(Path(cfg["checkpoint_dir"]), result, uid=uid)
@@ -519,18 +528,18 @@ def reconcile_certified_checkpoints(db: sqlite3.Connection, cfg: dict,
     new = [r for r in rows if r["day"] > "2026-10-19"]
     need(len(new) <= MAX_FILES, "UNBOUNDED_CERTIFIED_HISTORY")
     certificates = db.execute(
-        """SELECT bucket_day,certificate_sha256,source_page_sha256
+        """SELECT bucket_day,certificate_sha256,source_page_sha256,signed_finality_schema
            FROM traffic_public_audience_day_certificates_v2
            WHERE project_slug=? ORDER BY bucket_day""", (PROJECT,)
     ).fetchall()
-    certmap = {r[0]: (r[1], r[2]) for r in certificates}
+    certmap = {r[0]: (r[1], r[2], r[3]) for r in certificates}
     need(len(certmap) == len(certificates)
          and set(certmap) == {r["day"] for r in new},
          "ORPHAN_OR_UNSIGNED_NEW_PUBLIC_DAY")
     recovered = []
     for row in new:
         day = row["day"]
-        certsha, pagesha = certmap[day]
+        certsha, pagesha, schema = certmap[day]
         need(valid_hash(certsha) and valid_hash(pagesha),
              "CERTIFICATE_LEDGER_SHA_INVALID")
         backups = list(Path(cfg["backup_dir"]).glob(
@@ -569,10 +578,13 @@ def reconcile_certified_checkpoints(db: sqlite3.Connection, cfg: dict,
         envelope = strict_json(private_file(folder/"day-envelope.json", uid=uid))
         page = strict_json(private_file(folder/"page-state.json", uid=uid))
         need(sha(witness.canonical(envelope["certificate"])) == certsha
-             and envelope["certificate"]["page_state_sha256"] == pagesha,
+             and envelope["certificate"]["page_state_sha256"] == pagesha
+             and envelope["certificate"]["schema"] == schema,
              "CERTIFIED_INPUT_NO_LONGER_MATCHES_LEDGER")
+        observation = (strict_json(private_file(folder/"observation.json", uid=uid))
+                       if schema == witness.V3_SCHEMA else None)
         signed = witness.verify_dual_witness(
-            envelope, page, now=now,
+            envelope, page, now=now, observation=observation,
             upstream_key=private_file(Path(cfg["upstream_key"]), uid=trust_uid,
                  mode=0o644 if trust_uid == 0 else 0o600),
             classifier_key=private_file(Path(cfg["classifier_key"]), uid=trust_uid,

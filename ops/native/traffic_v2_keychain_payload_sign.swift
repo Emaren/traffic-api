@@ -36,6 +36,10 @@ let dayFields=Set(["schema","project_slug","day","historical_release_sha256",
  "upstream_log_closed_through_utc","writer_receipts_closed_through_utc",
  "global_ip_model_sha256","canonical_sessions_sha256","cross_midnight_carry_sha256",
  "late_arrival_stability_sha256","total","potential","confirmed"])
+let v3DayFields=dayFields.subtracting(["global_ip_model_sha256","canonical_sessions_sha256",
+                                      "cross_midnight_carry_sha256"]).union([
+ "daily_model_sha256","observation_sha256","carry_sha256","classifier_dependencies_sha256",
+ "normalized_input_sha256","source_evidence_sha256"])
 let delegationFields=Set(["schema","delegation_id","project","approved_by",
  "issued_at_utc","expires_at_utc","earliest_utc_day","latest_utc_day",
  "max_completed_day_age_days","max_days_per_run","source_commit_sha",
@@ -61,15 +65,19 @@ func check(_ obj:[String:Any], _ role:String, _ kind:String) {
     switch kind {
     case "day":
         guard role=="upstream" || role=="classifier" else { hold("ROLE_KIND_DENIED") }
-        fields=dayFields; schema="traffic.public-audience.v2.dual-witness-day.v1"
+        let v3 = obj["schema"] as? String == "traffic.public-audience.v3.dual-witness-day.v1"
+        fields=v3 ? v3DayFields : dayFields
+        schema=v3 ? "traffic.public-audience.v3.dual-witness-day.v1" : "traffic.public-audience.v2.dual-witness-day.v1"
         guard obj["project_slug"] as? String=="aoe2hdbets",
           obj["historical_release_sha256"] as? String==frozenHistoricalSHA,
-          ["source_epoch_sha256","host_rules_sha256","page_state_sha256",
-           "source_page_chain_sha256","global_ip_model_sha256",
-           "canonical_sessions_sha256","cross_midnight_carry_sha256",
-           "late_arrival_stability_sha256"].allSatisfy({validHex(obj[$0])}),
+          (["source_epoch_sha256","host_rules_sha256","page_state_sha256",
+           "source_page_chain_sha256","late_arrival_stability_sha256"] +
+           (v3 ? ["daily_model_sha256","observation_sha256","carry_sha256",
+                  "classifier_dependencies_sha256","normalized_input_sha256","source_evidence_sha256"] :
+                 ["global_ip_model_sha256","canonical_sessions_sha256","cross_midnight_carry_sha256"]))
+                 .allSatisfy({validHex(obj[$0])}),
           let day=obj["day"] as? String,day.count==10,
-          day>="2026-10-20",day<String(ISO8601DateFormatter().string(from:Date()).prefix(10)),
+          day >= (v3 ? "2026-11-23" : "2026-10-20"),day<String(ISO8601DateFormatter().string(from:Date()).prefix(10)),
           let t=obj["total"] as? Int,let p=obj["potential"] as? Int,
           let c=obj["confirmed"] as? Int,t>0,t>=p,p>=c,c>=0,
           obj["missing_insertion_receipts"] as? Int==0,

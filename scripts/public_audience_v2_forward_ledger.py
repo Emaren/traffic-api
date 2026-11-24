@@ -160,7 +160,9 @@ def assert_published_history(source: sqlite3.Connection) -> None:
         matched.add(day)
         require(type(cert_sha) is str and hex_sha.fullmatch(cert_sha) is not None
                 and type(page_sha) is str and hex_sha.fullmatch(page_sha) is not None
-                and schema == "traffic.public-audience.v2.dual-witness-day.v1",
+                and (schema == "traffic.public-audience.v2.dual-witness-day.v1" or
+                     (schema == "traffic.public-audience.v3.dual-witness-day.v1"
+                      and day >= "2026-11-23")),
                 "future certificate digest or source schema drift")
         require(type(at_utc) is str and 20 <= len(at_utc) <= 40,
                 "missing future certification UTC clock")

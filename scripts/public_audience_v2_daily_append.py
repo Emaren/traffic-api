@@ -151,6 +151,7 @@ def append_verified_day(
     independently_admitted_operator_permit: dict,
     durable_preimage: Callable[[list[dict]], str],
     expected_public_sha256: str, lock_proven: bool,
+    observation: dict | None = None,
 ) -> dict:
     """Append ONE genuinely independently admitted completed UTC day.
 
@@ -189,6 +190,7 @@ def append_verified_day(
         upstream_key=upstream_key, classifier_key=classifier_key,
         expected_upstream_key_sha256=upstream_key_sha256,
         expected_classifier_key_sha256=classifier_key_sha256,
+        observation=observation,
     )
     need(proof["dual_witness_signatures_verified"]
          and not proof["public_write_authorized"]
@@ -214,7 +216,7 @@ def append_verified_day(
         existing_day = next((r for r in prior_rows if r["day"] == day.isoformat()),
                             None)
         previous_cert = db.execute(
-            """SELECT certificate_sha256,source_page_sha256
+            """SELECT certificate_sha256,source_page_sha256,signed_finality_schema
                FROM traffic_public_audience_day_certificates_v2
                WHERE project_slug=? AND bucket_day=?""",
             (PROJECT, day.isoformat()),
@@ -223,6 +225,7 @@ def append_verified_day(
             need(previous_cert is not None and
                  previous_cert[0] == certsha
                  and previous_cert[1] == proof["source_page_digest"]
+                 and previous_cert[2] == proof["signed_finality_schema"]
                  and [existing_day["total"], existing_day["potential"],
                       existing_day["confirmed"]] == candidate,
                  "CONFLICTING_REPLAY_OR_UNCERTIFIED_EXISTING_DAY")
@@ -257,7 +260,7 @@ def append_verified_day(
             (project_slug,bucket_day,certificate_sha256,source_page_sha256,
              signed_finality_schema,certified_at_utc) VALUES(?,?,?,?,?,?)""",
             (PROJECT, day.isoformat(), certsha, proof["source_page_digest"],
-             admission.SCHEMA, now.isoformat()),
+             proof["signed_finality_schema"], now.isoformat()),
         )
         after_rows = _snapshot(db)
         after_matrix = {r["day"]: [r["total"], r["potential"],

@@ -35,6 +35,21 @@ FIELDS = frozenset({
     "cross_midnight_carry_sha256", "late_arrival_stability_sha256",
     "total", "potential", "confirmed",
 })
+V3_SCHEMA = "traffic.public-audience.v3.dual-witness-day.v1"
+V3_FIRST_NEW = date(2026, 11, 23)
+V3_FIELDS = (FIELDS - {"global_ip_model_sha256", "canonical_sessions_sha256",
+                       "cross_midnight_carry_sha256"}) | {
+    "daily_model_sha256", "observation_sha256", "carry_sha256",
+    "classifier_dependencies_sha256", "normalized_input_sha256",
+    "source_evidence_sha256",
+}
+V3_OBSERVATION_FIELDS = frozenset({
+    "schema", "day", "observation_end_exclusive_utc", "delivery_floor_utc",
+    "source_prefix_rowid", "source_evidence_sha256", "classifier_dependencies_sha256",
+    "normalized_input_sha256", "daily_model_sha256", "carry_sha256",
+    "slice_count", "carry_in_slices", "accepted_day_events", "metrics",
+    "upstream_closed_through_utc", "writer_closed_through_utc",
+})
 ENVELOPE_FIELDS = frozenset({"certificate", "upstream_signature", "classifier_signature"})
 
 
@@ -67,14 +82,16 @@ def utc_stamp(value: Any) -> datetime:
     return result.astimezone(timezone.utc)
 
 
-def check_day_witness(certificate: dict, page: dict, *, now: datetime) -> dict:
+def check_day_witness(certificate: dict, page: dict, *, now: datetime,
+                      observation: dict | None = None) -> dict:
     """Validate exact #75 source evidence binding, not a self-signed finality."""
-    require(type(certificate) is dict and set(certificate) == FIELDS,
+    v3 = type(certificate) is dict and certificate.get("schema") == V3_SCHEMA
+    require(type(certificate) is dict and set(certificate) == (V3_FIELDS if v3 else FIELDS),
             "CERTIFICATE_FIELD_DRIFT")
     require(type(page) is dict and set(page) == STATE_FIELDS,
             "PAGED_SOURCE_SCHEMA_DRIFT")
     require(now.tzinfo is not None, "OBSERVATION_CLOCK_NAIVE")
-    require(certificate["schema"] == SCHEMA
+    require(certificate["schema"] == (V3_SCHEMA if v3 else SCHEMA)
             and certificate["project_slug"] == "aoe2hdbets"
             and certificate["historical_release_sha256"] == RELEASE_SHA,
             "ORIGINAL_131_DAY_RELEASE_DRIFT")
@@ -86,7 +103,7 @@ def check_day_witness(certificate: dict, page: dict, *, now: datetime) -> dict:
     except ValueError as exc:
         raise ValueError("TRAFFIC_V2_HOLD_INVALID_DAY") from exc
     require(target.isoformat() == value and
-            FIRST_NEW <= target < now.astimezone(timezone.utc).date(),
+            (V3_FIRST_NEW if v3 else FIRST_NEW) <= target < now.astimezone(timezone.utc).date(),
             "CURRENT_UNFINISHED_OR_HISTORIC_DAY")
     end = datetime.combine(target + timedelta(days=1),
                            datetime.min.time(), tzinfo=timezone.utc)
@@ -118,10 +135,12 @@ def check_day_witness(certificate: dict, page: dict, *, now: datetime) -> dict:
             "INSERT_RECEIPTS_INCOMPLETE")
     for field in (
         "source_epoch_sha256", "host_rules_sha256", "source_page_chain_sha256",
-        "page_state_sha256", "global_ip_model_sha256",
-        "canonical_sessions_sha256", "cross_midnight_carry_sha256",
-        "late_arrival_stability_sha256",
-    ):
+        "page_state_sha256", "late_arrival_stability_sha256",
+    ) + (("daily_model_sha256", "observation_sha256", "carry_sha256",
+          "classifier_dependencies_sha256", "normalized_input_sha256",
+          "source_evidence_sha256") if v3 else
+         ("global_ip_model_sha256", "canonical_sessions_sha256",
+          "cross_midnight_carry_sha256")):
         require(type(certificate[field]) is str and HEX.fullmatch(
             certificate[field]) is not None, "MISSING_MODEL_OR_SOURCE_DIGEST")
     for field in ("total", "potential", "confirmed"):
@@ -138,6 +157,32 @@ def check_day_witness(certificate: dict, page: dict, *, now: datetime) -> dict:
             "REMOTE_LOG_DELIVERY_NOT_CLOSED")
     require(utc_stamp(certificate["writer_receipts_closed_through_utc"]) >= margin,
             "INSERT_WRITER_NOT_CLOSED")
+    if v3:
+        require(type(observation) is dict and set(observation) == V3_OBSERVATION_FIELDS
+                and observation["schema"] == "traffic.public-audience.v3.daily-observation.review.v1"
+                and digest(canonical(observation)) == certificate["observation_sha256"],
+                "V3_OBSERVATION_PREIMAGE_DRIFT")
+        require(observation["day"] == value
+                and observation["observation_end_exclusive_utc"] == end.isoformat()
+                and observation["delivery_floor_utc"] == margin.isoformat()
+                and type(observation["source_prefix_rowid"]) is int
+                and observation["source_prefix_rowid"] == certificate["source_snapshot_rowid"],
+                "V3_OBSERVATION_SCOPE_DRIFT")
+        for key in ("daily_model_sha256", "carry_sha256", "classifier_dependencies_sha256",
+                    "normalized_input_sha256", "source_evidence_sha256"):
+            require(observation[key] == certificate[key], "V3_OBSERVATION_DIGEST_DRIFT")
+        require(observation["upstream_closed_through_utc"] == certificate["upstream_log_closed_through_utc"]
+                and observation["writer_closed_through_utc"] == certificate["writer_receipts_closed_through_utc"],
+                "V3_OBSERVATION_CLOCK_DRIFT")
+        counts = [observation[k] for k in ("accepted_day_events", "slice_count", "carry_in_slices")]
+        require(all(type(n) is int and n >= 0 for n in counts)
+                and certificate["source_rows"] >= counts[0] >= counts[1] >= counts[2]
+                and type(observation["metrics"]) is list
+                and all(type(n) is int for n in observation["metrics"])
+                and observation["metrics"] == [certificate[k] for k in ("total", "potential", "confirmed")]
+                and counts[1] >= certificate["total"], "V3_OBSERVATION_COUNTER_DRIFT")
+    else:
+        require(observation is None, "V2_UNEXPECTED_V3_OBSERVATION")
     return {"day": value, "end_utc": end.isoformat(),
             "page_sha256": certificate["page_state_sha256"],
             "candidate_values": [certificate["total"], certificate["potential"],
@@ -187,7 +232,8 @@ def verify_dual_witness(envelope: dict, page: dict, *, now: datetime,
                         upstream_key: bytes, classifier_key: bytes,
                         expected_upstream_key_sha256: str,
                         expected_classifier_key_sha256: str,
-                        openssl: str = "openssl") -> dict:
+                        openssl: str = "openssl",
+                        observation: dict | None = None) -> dict:
     require(type(envelope) is dict and set(envelope) == ENVELOPE_FIELDS,
             "ENVELOPE_FIELD_DRIFT")
     require(all(HEX.fullmatch(x or "") is not None for x in (
@@ -197,14 +243,17 @@ def verify_dual_witness(envelope: dict, page: dict, *, now: datetime,
             and digest(upstream_key) == expected_upstream_key_sha256
             and digest(classifier_key) == expected_classifier_key_sha256,
             "CROSS_ROLE_OR_FORGED_KEY")
-    summary = check_day_witness(envelope["certificate"], page, now=now)
+    summary = check_day_witness(envelope["certificate"], page, now=now,
+                                observation=observation)
     body = canonical(envelope["certificate"])
     verify_openssl_signature(body, decode_sig(envelope["upstream_signature"]),
                              upstream_key, openssl=openssl)
     verify_openssl_signature(body, decode_sig(envelope["classifier_signature"]),
                              classifier_key, openssl=openssl)
     return {
-        "format": "traffic.v2.dual-witness-source-contract.v1",
+        "format": ("traffic.v3.dual-witness-source-contract.v1" if envelope["certificate"]["schema"] == V3_SCHEMA
+                   else "traffic.v2.dual-witness-source-contract.v1"),
+        "signed_finality_schema": envelope["certificate"]["schema"],
         "day": summary["day"],
         "source_page_digest": summary["page_sha256"],
         "dual_witness_signatures_verified": True,
