@@ -158,7 +158,8 @@ class SignedV3AtomicIntegration(unittest.TestCase):
                   upstream_key=f.fake_keys[0][1],classifier_key=f.fake_keys[1][1],
                   upstream_key_sha256=hashlib.sha256(f.fake_keys[0][1]).hexdigest(),
                   classifier_key_sha256=hashlib.sha256(f.fake_keys[1][1]).hexdigest(),
-                  independently_admitted_operator_permit=permit,durable_preimage=f.durable,
+                  independently_admitted_operator_permit=permit,
+                  durable_preimage=lambda rows: append.durable_public_preimage(f.folder,rows,day=env["certificate"]["day"]),
                   expected_public_sha256=expected,lock_proven=True)
         args.update(changes)
         with patch.object(append,"RELEASE_SHA",f.history_sha),patch.object(witness,"RELEASE_SHA",f.history_sha):

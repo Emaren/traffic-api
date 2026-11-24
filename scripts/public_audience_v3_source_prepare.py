@@ -109,7 +109,7 @@ def prepare(raw: sqlite3.Connection, ledger: sqlite3.Connection, *,
         "writer_receipt_evidence_sha256", "late_arrival_evidence_sha256",
         "carry_delivery_evidence_sha256")), "DELIVERY_DIGESTS")
     upstream = witness.utc_stamp(delivery["upstream_closed_through_utc"])
-    writer = witness.utc_stamp(delivery["writer_receipts_closed_through_utc"])
+    writer = witness.utc_stamp(delivery["writer_closed_through_utc"])
     need(end + observation.DELIVERY_MARGIN <= min(upstream, writer)
          and max(upstream, writer) <= now, "DELIVERY_CLOCKS")
     meta = dict(ledger.execute("SELECT key,value FROM ledger_metadata"))
