@@ -48,5 +48,8 @@ ProtectSystem=strict
 ReadWritePaths=/mnt/HC_Volume_105319120/traffic-db -/mnt/HC_Volume_105319120/traffic-v2-publisher
 ReadOnlyPaths=-/etc/aoe2war/traffic-v2
 InaccessiblePaths=-/run/postgresql -/var/run/postgresql
+# The existing tony account has docker group membership on HEL1. Never
+# expose container runtime control sockets to this otherwise nonroot worker.
+InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock -/run/containerd -/var/run/containerd
 # No Install section: only its independent bounded systemd timer may be
 # separately enabled by the protected WE2 owner-native admission ceremony.
