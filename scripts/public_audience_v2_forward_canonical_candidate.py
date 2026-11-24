@@ -174,6 +174,42 @@ def canonical_private_replay(*, raw_rows: Iterator[dict], behavior: object,
     return daily, metrics
 
 
+def two_window_private_candidate(future: sqlite3.Connection,
+                                 behavior: VerifiedMergedIPBehavior, *,
+                                 requested: date, source_prefix_rowid: int,
+                                 max_events: int, deadline: float
+                                 ) -> tuple[list[int], dict]:
+    """Re-run the same source in two independent previous-day contexts.
+
+    This is a PRIVATE candidate stability check only, never proof of NGINX
+    delivery or external signed source/writer finality.
+    """
+    require(requested >= CANONICAL_EPOCH + timedelta(days=2),
+            "HISTORICAL_BOUNDARY_CARRY_UNPROVEN")
+    end_dt = datetime.combine(requested + timedelta(days=1),
+                              dt_time.min, tzinfo=timezone.utc)
+    margin = timedelta(minutes=31)
+    evaluated: list[tuple[list[int], dict]] = []
+    for days_before in (2, 1):
+        window = datetime.combine(requested - timedelta(days=days_before),
+                                  dt_time.min, tzinfo=timezone.utc)
+        private_rows = raw_forward_rows(
+            future, start=window.isoformat(),
+            end=(end_dt + margin).isoformat(),
+            source_prefix_rowid=source_prefix_rowid, max_events=max_events,
+            deadline=deadline)
+        daily, metrics = canonical_private_replay(
+            raw_rows=private_rows, behavior=behavior,
+            from_utc=window, until_utc=end_dt + margin,
+            source_prefix_rowid=source_prefix_rowid,
+            observed_at_utc=datetime.now(timezone.utc))
+        evaluated.append((daily.get(requested.isoformat(), [0, 0, 0]), metrics))
+    require(time.monotonic() <= deadline, "FULL_REPLAY_BUDGET_EXCEEDED")
+    require(evaluated[0][0] == evaluated[1][0],
+            "TWO_WINDOW_CROSS_DAY_METRIC_DRIFT")
+    return evaluated[0]
+
+
 def inspect(source: Path, historical: Path, ledger: Path, shadow: Path, *,
             day: str, max_events: int, budget_seconds: float) -> dict:
     require(1 <= max_events <= MAX_REQUESTED_EVENTS and
@@ -229,40 +265,11 @@ def inspect(source: Path, historical: Path, ledger: Path, shadow: Path, *,
         ).fetchone()[0]
         require(int(observed["last_source_rowid"]) == last_private,
                 "IP_SHADOW_CURSOR_MISMATCH")
-        # Forward-day counts are credited to each canonical session's FIRST
-        # event day. Independently replay both one-day and two-day pre-roll
-        # windows. Matching results prove this new day does not depend on
-        # where either previous-day context window starts. Oct20/21 lack a
-        # complete two-day forward pre-roll; leave those dates UNKNOWN.
-        require(requested >= CANONICAL_EPOCH + timedelta(days=2),
-                "HISTORICAL_BOUNDARY_CARRY_UNPROVEN")
-        end_dt = datetime.combine(requested + timedelta(days=1),
-                                  dt_time.min, tzinfo=timezone.utc)
-        margin = timedelta(minutes=31)
         behavior = VerifiedMergedIPBehavior(history, ip_data)
-        from_start = [
-            datetime.combine(requested-timedelta(days=2), dt_time.min,
-                             tzinfo=timezone.utc),
-            datetime.combine(requested-timedelta(days=1), dt_time.min,
-                             tzinfo=timezone.utc),
-        ]
-        evaluated: list[tuple[list[int], dict]] = []
-        for window in from_start:
-            private_rows = raw_forward_rows(
-                future, start=window.isoformat(),
-                end=(end_dt + margin).isoformat(),
-                source_prefix_rowid=scanned_prefix, max_events=max_events,
-                deadline=deadline)
-            daily, metrics = canonical_private_replay(
-                raw_rows=private_rows, behavior=behavior,
-                from_utc=window, until_utc=end_dt + margin,
-                source_prefix_rowid=scanned_prefix,
-                observed_at_utc=datetime.now(timezone.utc))
-            evaluated.append((daily.get(day, [0, 0, 0]), metrics))
-        require(time.monotonic() <= deadline, "FULL_REPLAY_BUDGET_EXCEEDED")
-        require(evaluated[0][0] == evaluated[1][0],
-                "TWO_WINDOW_CROSS_DAY_METRIC_DRIFT")
-        values, metrics = evaluated[0]
+        values, metrics = two_window_private_candidate(
+            future, behavior, requested=requested,
+            source_prefix_rowid=scanned_prefix,
+            max_events=max_events, deadline=deadline)
         require(0 <= values[2] <= values[1] <= values[0],
                 "CANONICAL_METRIC_HIERARCHY")
         # Crucially these are PRIVATE CANDIDATE values, not certifiable
