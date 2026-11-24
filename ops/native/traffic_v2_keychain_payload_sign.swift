@@ -67,7 +67,7 @@ func check(_ obj:[String:Any], _ role:String, _ kind:String) {
           ["source_epoch_sha256","host_rules_sha256","page_state_sha256",
            "source_page_chain_sha256","global_ip_model_sha256",
            "canonical_sessions_sha256","cross_midnight_carry_sha256",
-           "late_arrival_stability_sha256"].allSatisfy {validHex(obj[$0])},
+           "late_arrival_stability_sha256"].allSatisfy({validHex(obj[$0])}),
           let day=obj["day"] as? String,day.count==10,
           day>="2026-10-20",day<String(ISO8601DateFormatter().string(from:Date()).prefix(10)),
           let t=obj["total"] as? Int,let p=obj["potential"] as? Int,
@@ -92,7 +92,7 @@ func check(_ obj:[String:Any], _ role:String, _ kind:String) {
           obj["historical_release_sha256"] as? String==frozenHistoricalSHA,
           ["delegation_id","ingest_service_loaded_sha256","traffic_api_source_sha256",
            "website_gap_renderer_sha256","upstream_key_sha256","classifier_key_sha256"]
-           .allSatisfy {validHex(obj[$0])},
+           .allSatisfy({validHex(obj[$0])}),
           obj["approved_by"] as? String=="Emaren",
           obj["gap_aware_api_and_chart"] as? Bool==true,
           obj["no_historical_corrections"] as? Bool==true,
