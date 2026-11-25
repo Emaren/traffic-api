@@ -206,7 +206,7 @@ class ObservedBrowserInsightsTests(unittest.TestCase):
         alias = self.db.with_name("configured.sqlite3")
         alias.symlink_to(self.db)
         self.assertTrue(alias.is_symlink())
-        self.assertEqual(alias.resolve(strict=True), self.db)
+        self.assertEqual(alias.resolve(strict=True), self.db.resolve(strict=True))
         payload = build_observed_browser_insights(
             "aoe2hdbets",
             db_path=alias,
