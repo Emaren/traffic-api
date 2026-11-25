@@ -1,6 +1,7 @@
 // Traffic V2 production-payload signer: ORIGINAL Keychain items ONLY.
 // Source-only; no signer enrollment, key export, root install or publication.
 import Foundation
+import CoreFoundation
 import CryptoKit
 import Security
 import Darwin
@@ -36,6 +37,10 @@ let dayFields=Set(["schema","project_slug","day","historical_release_sha256",
  "upstream_log_closed_through_utc","writer_receipts_closed_through_utc",
  "global_ip_model_sha256","canonical_sessions_sha256","cross_midnight_carry_sha256",
  "late_arrival_stability_sha256","total","potential","confirmed"])
+let v3DayFields=dayFields.subtracting(["global_ip_model_sha256","canonical_sessions_sha256",
+                                      "cross_midnight_carry_sha256"]).union([
+ "daily_model_sha256","observation_sha256","carry_sha256","classifier_dependencies_sha256",
+ "normalized_input_sha256","source_evidence_sha256","classifier_source_commit_sha"])
 let delegationFields=Set(["schema","delegation_id","project","approved_by",
  "issued_at_utc","expires_at_utc","earliest_utc_day","latest_utc_day",
  "max_completed_day_age_days","max_days_per_run","source_commit_sha",
@@ -61,15 +66,26 @@ func check(_ obj:[String:Any], _ role:String, _ kind:String) {
     switch kind {
     case "day":
         guard role=="upstream" || role=="classifier" else { hold("ROLE_KIND_DENIED") }
-        fields=dayFields; schema="traffic.public-audience.v2.dual-witness-day.v1"
+        let v3 = obj["schema"] as? String == "traffic.public-audience.v3.dual-witness-day.v1"
+        fields=v3 ? v3DayFields : dayFields
+        schema=v3 ? "traffic.public-audience.v3.dual-witness-day.v1" : "traffic.public-audience.v2.dual-witness-day.v1"
+        if v3 {
+            guard validHex(obj["classifier_source_commit_sha"], length:40) else {hold("V3_CLASSIFIER_SOURCE_COMMIT")}
+            for field in ["total","potential","confirmed","source_rows","source_snapshot_rowid",
+                          "forward_prefix_rowid","missing_insertion_receipts","invalid_insertion_clocks"] {
+                guard let n=obj[field] as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID() else {hold("V3_INTEGER_COUNTER")}
+            }
+        }
         guard obj["project_slug"] as? String=="aoe2hdbets",
           obj["historical_release_sha256"] as? String==frozenHistoricalSHA,
-          ["source_epoch_sha256","host_rules_sha256","page_state_sha256",
-           "source_page_chain_sha256","global_ip_model_sha256",
-           "canonical_sessions_sha256","cross_midnight_carry_sha256",
-           "late_arrival_stability_sha256"].allSatisfy({validHex(obj[$0])}),
+          (["source_epoch_sha256","host_rules_sha256","page_state_sha256",
+           "source_page_chain_sha256","late_arrival_stability_sha256"] +
+           (v3 ? ["daily_model_sha256","observation_sha256","carry_sha256",
+                  "classifier_dependencies_sha256","normalized_input_sha256","source_evidence_sha256"] :
+                 ["global_ip_model_sha256","canonical_sessions_sha256","cross_midnight_carry_sha256"]))
+                 .allSatisfy({validHex(obj[$0])}),
           let day=obj["day"] as? String,day.count==10,
-          day>="2026-10-20",day<String(ISO8601DateFormatter().string(from:Date()).prefix(10)),
+          day >= (v3 ? "2026-11-23" : "2026-10-20"),day<String(ISO8601DateFormatter().string(from:Date()).prefix(10)),
           let t=obj["total"] as? Int,let p=obj["potential"] as? Int,
           let c=obj["confirmed"] as? Int,t>0,t>=p,p>=c,c>=0,
           obj["missing_insertion_receipts"] as? Int==0,
@@ -85,6 +101,13 @@ func check(_ obj:[String:Any], _ role:String, _ kind:String) {
           let closure=dateUTC(remote),let written=dateUTC(writer),
           closure>=end.addingTimeInterval(1860),written>=end.addingTimeInterval(1860)
         else {hold("DAY_FINALITY_CLOCK")}
+        if v3 {
+            guard let closure=dateUTC(remote), let written=dateUTC(writer),
+                  closure<=Date(),written<=Date(),
+                  String(remote.suffix(6))=="+00:00" || remote.hasSuffix("Z"),
+                  String(writer.suffix(6))=="+00:00" || writer.hasSuffix("Z")
+            else {hold("V3_FUTURE_OR_NON_UTC_DELIVERY_CLOCK")}
+        }
     case "delegation":
         guard role=="owner" else {hold("ROLE_KIND_DENIED")}
         fields=delegationFields;schema="traffic.public-audience.v2.daily-delegation.v1"

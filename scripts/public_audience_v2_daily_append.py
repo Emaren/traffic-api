@@ -9,7 +9,7 @@ are still required. Fixture tests exercise the actual SQLite write transaction.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import os
 from pathlib import Path
@@ -151,6 +151,7 @@ def append_verified_day(
     independently_admitted_operator_permit: dict,
     durable_preimage: Callable[[list[dict]], str],
     expected_public_sha256: str, lock_proven: bool,
+    observation: dict | None = None,
 ) -> dict:
     """Append ONE genuinely independently admitted completed UTC day.
 
@@ -189,12 +190,17 @@ def append_verified_day(
         upstream_key=upstream_key, classifier_key=classifier_key,
         expected_upstream_key_sha256=upstream_key_sha256,
         expected_classifier_key_sha256=classifier_key_sha256,
+        observation=observation,
     )
     need(proof["dual_witness_signatures_verified"]
          and not proof["public_write_authorized"]
          and not proof["day_physical_production_certified"],
          "DAY_WITNESS_SOURCE_CONTRACT_DRIFT")
     day = _canonical_day(proof["day"])
+    is_v3 = proof["signed_finality_schema"] == admission.V3_SCHEMA
+    if is_v3:
+        need(certificate_envelope["certificate"]["classifier_source_commit_sha"] ==
+             independently_admitted_operator_permit["source_commit_sha"], "V3_CLASSIFIER_SOURCE_SCOPE_DRIFT")
     need(FROZEN_LAST < day < now.date(), "CURRENT_OR_HISTORICAL_DAY_REFUSED")
     certsha = proof["certificate_digest_sha256"]
     candidate = proof["candidate_values"]
@@ -214,7 +220,7 @@ def append_verified_day(
         existing_day = next((r for r in prior_rows if r["day"] == day.isoformat()),
                             None)
         previous_cert = db.execute(
-            """SELECT certificate_sha256,source_page_sha256
+            """SELECT certificate_sha256,source_page_sha256,signed_finality_schema
                FROM traffic_public_audience_day_certificates_v2
                WHERE project_slug=? AND bucket_day=?""",
             (PROJECT, day.isoformat()),
@@ -223,6 +229,7 @@ def append_verified_day(
             need(previous_cert is not None and
                  previous_cert[0] == certsha
                  and previous_cert[1] == proof["source_page_digest"]
+                 and previous_cert[2] == proof["signed_finality_schema"]
                  and [existing_day["total"], existing_day["potential"],
                       existing_day["confirmed"]] == candidate,
                  "CONFLICTING_REPLAY_OR_UNCERTIFIED_EXISTING_DAY")
@@ -234,6 +241,28 @@ def append_verified_day(
                 "missing_days_are_unknown": True,
             }
         need(previous_cert is None, "ORPHAN_CERTIFICATE_NOT_PUBLISHED")
+        if not is_v3:
+            need(db.execute(
+                "SELECT 1 FROM traffic_public_audience_day_certificates_v2 WHERE project_slug=? AND signed_finality_schema=? LIMIT 1",
+                (PROJECT, admission.V3_SCHEMA)).fetchone() is None, "METRIC_VERSION_DOWNGRADE_REFUSED")
+        if is_v3:
+            # Under BEGIN IMMEDIATE, a raw insert cannot race the late-arrival
+            # check and append. Do not scan historical day sessions.
+            start = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
+            prefix = certificate_envelope["certificate"]["source_snapshot_rowid"]
+            db.set_progress_handler(lambda: 1, 500_000)
+            try:
+                late = db.execute(
+                    """SELECT rowid FROM traffic_entries
+                       INDEXED BY idx_traffic_entries_timestamp_line_offset
+                       WHERE timestamp>=? AND timestamp<? AND rowid>? LIMIT 1""",
+                    ((start-timedelta(minutes=30)).isoformat(),
+                     (start+timedelta(days=1)).isoformat(), prefix)).fetchone()
+                need(late is None, "V3_LATE_ARRIVAL_IN_WRITE_TRANSACTION")
+                need(db.execute("SELECT MAX(rowid) FROM traffic_entries").fetchone()[0] >= prefix,
+                     "V3_SOURCE_PREFIX_MISSING")
+            finally:
+                db.set_progress_handler(None, 0)
         # No retroactive correction or silent old-day modification, even if
         # a previously omitted gap is later supplied with a plausible token.
         future_days = [_canonical_day(r["day"]) for r in prior_rows
@@ -257,7 +286,7 @@ def append_verified_day(
             (project_slug,bucket_day,certificate_sha256,source_page_sha256,
              signed_finality_schema,certified_at_utc) VALUES(?,?,?,?,?,?)""",
             (PROJECT, day.isoformat(), certsha, proof["source_page_digest"],
-             admission.SCHEMA, now.isoformat()),
+             proof["signed_finality_schema"], now.isoformat()),
         )
         after_rows = _snapshot(db)
         after_matrix = {r["day"]: [r["total"], r["potential"],
