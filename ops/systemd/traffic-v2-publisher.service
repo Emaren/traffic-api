@@ -1,7 +1,8 @@
 [Unit]
 Description=AoE2WAR Traffic V2 signed completed-day publisher (nonroot, fail-closed)
 Wants=network-online.target
-After=network-online.target traffic-api.service
+After=network-online.target traffic-api.service systemd-tmpfiles-setup.service
+Requires=systemd-tmpfiles-setup.service
 RequiresMountsFor=/mnt/HC_Volume_105319120/traffic-db
 
 [Service]

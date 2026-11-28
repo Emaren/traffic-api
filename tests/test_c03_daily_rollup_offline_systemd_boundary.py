@@ -32,9 +32,6 @@ EXPECTED = {
     "ProtectSystem": "strict",
     "InaccessiblePaths": "-/run/postgresql -/var/run/postgresql",
     "ReadWritePaths": DB_DIR + " /run/traffic-rollups",
-    "RuntimeDirectory": "traffic-rollups",
-    "RuntimeDirectoryPreserve": "yes",
-    "RuntimeDirectoryMode": "0755",
     "UMask": "0027",
     "EnvironmentFile": "/etc/traffic-api.env",
     "WorkingDirectory": "/var/www/Traffic/traffic-api",
@@ -48,13 +45,15 @@ EXEC = (
 UNSAFE = (
     "ExecStartPre", "ExecStartPost", "ExecStopPost", "ExecReload",
     "BindPaths", "BindReadOnlyPaths", "SupplementaryGroups",
-    "RootDirectory", "RootImage",
+    "RootDirectory", "RootImage", "RuntimeDirectory", "RuntimeDirectoryPreserve", "RuntimeDirectoryMode",
 )
 
 def evaluate(raw: str) -> dict:
     cfg=configparser.ConfigParser(interpolation=None,strict=True)
     cfg.read_file(io.StringIO(raw))
     assert set(cfg.sections())=={"Unit","Service"}, "UNKNOWN_SECTION"
+    assert cfg["Unit"].get("Requires")=="systemd-tmpfiles-setup.service", "LOCK_BOOT_DEPENDENCY"
+    assert cfg["Unit"].get("After")=="traffic-api.service systemd-tmpfiles-setup.service", "LOCK_BOOT_ORDER"
     svc=cfg["Service"]
     for key,val in EXPECTED.items():
         assert svc.get(key,None)==val, f"C03_DRIFT_{key}"
@@ -84,7 +83,7 @@ class TrafficDailyRollupSandboxTests(unittest.TestCase):
             ("ReadWritePaths="+DB_DIR+" /run/traffic-rollups",
              "ReadWritePaths="+DB_DIR+" /run/traffic-rollups /var/lib/postgresql"),
             ("User=tony","User=root"),
-            ("RuntimeDirectoryPreserve=yes","RuntimeDirectoryPreserve=no"),
+            ("Requires=systemd-tmpfiles-setup.service","Requires=traffic-api.service"),
             ("UMask=0027","UMask=0000"),
             ("-E 0 "+LOCK,"-E 1 "+LOCK),
             ("--project aoe2hdbets","--project all"),
@@ -98,7 +97,7 @@ class TrafficDailyRollupSandboxTests(unittest.TestCase):
     def test_additional_exec_and_network_namespace_bypass(self):
         raw=UNIT.read_text()
         for extra in ("ExecStartPre=/usr/bin/true", "BindPaths=/var/run/postgresql",
-                      "RootDirectory=/", "SupplementaryGroups=postgres"):
+                      "RootDirectory=/", "SupplementaryGroups=postgres", "RuntimeDirectory=traffic-rollups"):
             with self.subTest(extra=extra):
                 with self.assertRaises((AssertionError,configparser.Error)):
                     evaluate(raw+"\n"+extra+"\n")

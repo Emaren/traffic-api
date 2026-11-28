@@ -24,13 +24,16 @@ class SystemdContractTests(unittest.TestCase):
         )
         self.assertNotIn("SuccessExitStatus=1", unit)
 
-    def test_shared_rollup_runtime_directory_is_preserved_across_oneshot_exit(self) -> None:
+    def test_shared_rollup_lock_has_root_managed_boot_lifecycle(self) -> None:
         for unit_path in (DAILY, PUBLIC_ARCHIVE):
             with self.subTest(unit=unit_path.name):
                 unit = unit_path.read_text(encoding="utf-8")
-                self.assertIn("RuntimeDirectory=traffic-rollups", unit)
-                self.assertIn("RuntimeDirectoryMode=0755", unit)
-                self.assertIn("RuntimeDirectoryPreserve=yes", unit)
+                self.assertNotIn("RuntimeDirectory=", unit)
+                self.assertIn("Requires=systemd-tmpfiles-setup.service", unit)
+                self.assertIn("systemd-tmpfiles-setup.service", next(x for x in unit.splitlines() if x.startswith("After=")))
+        rules = (ROOT / "ops/tmpfiles.d/traffic-rollups.conf").read_text().splitlines()
+        self.assertIn("d /run/traffic-rollups 0755 root root - -", rules)
+        self.assertIn("f /run/traffic-rollups/aoe2hdbets.lock 0640 tony tony - -", rules)
 
     def test_public_archive_and_daily_rollup_share_one_serialization_lock(self) -> None:
         daily = DAILY.read_text(encoding="utf-8")
