@@ -1,15 +1,13 @@
 [Unit]
 Description=Refresh canonical public Traffic audience archive for AoE2 War
 Wants=traffic-api.service
-After=traffic-api.service
+After=traffic-api.service systemd-tmpfiles-setup.service
+Requires=systemd-tmpfiles-setup.service
 
 [Service]
 Type=oneshot
 User=tony
 Group=tony
-RuntimeDirectory=traffic-rollups
-RuntimeDirectoryMode=0755
-RuntimeDirectoryPreserve=yes
 WorkingDirectory=/var/www/Traffic/traffic-api
 EnvironmentFile=/etc/traffic-api.env
 Environment=PYTHONUNBUFFERED=1

@@ -137,6 +137,50 @@ def protected_trust_ancestors(file: Path) -> None:
         target = target.parent
 
 
+PRODUCTION_ROLLUP_LOCK = Path("/run/traffic-rollups/aoe2hdbets.lock")
+
+
+def worker_lock_policy(cfg: dict, *, trust_uid: int) -> tuple[Path, int]:
+    lock = Path(cfg["worker_lock"])
+    if trust_uid == 0:
+        # Same path as the installed project rollup unit. A separate private
+        # publisher lock would not exclude that existing worker.
+        need(lock == PRODUCTION_ROLLUP_LOCK, "SHARED_PROJECT_LOCK_PATH")
+        parent = lock.parent
+        st = parent.lstat()
+        need(parent.resolve() == parent and stat.S_ISDIR(st.st_mode)
+             and st.st_uid == 0 and st.st_gid == 0
+             and stat.S_IMODE(st.st_mode) == 0o755,
+             "SHARED_PROJECT_LOCK_DIRECTORY")
+        ancestor = parent.parent
+        while True:
+            st = ancestor.lstat()
+            need(stat.S_ISDIR(st.st_mode) and st.st_uid == 0
+                 and (st.st_mode & 0o022) == 0,
+                 "SHARED_PROJECT_LOCK_ANCESTOR")
+            if ancestor == ancestor.parent:
+                break
+            ancestor = ancestor.parent
+        return lock, 0o640
+    need(lock.parent == Path(cfg["checkpoint_dir"]),
+         "SHARED_WORKER_LOCK_NOT_IN_PRIVATE_CHECKPOINT")
+    return lock, 0o600
+
+
+def verify_worker_lock(fd: int, lock: Path, *, uid: int, gid: int,
+                       mode: int) -> None:
+    held = os.fstat(fd)
+    named = lock.lstat()
+    need(stat.S_ISREG(held.st_mode) and held.st_uid == uid
+         and held.st_gid == gid and stat.S_IMODE(held.st_mode) == mode
+         and held.st_nlink == 1 and lock.resolve() == lock
+         and (held.st_dev, held.st_ino, held.st_mode, held.st_uid, held.st_gid,
+              held.st_nlink) ==
+             (named.st_dev, named.st_ino, named.st_mode, named.st_uid,
+              named.st_gid, named.st_nlink),
+         "SHARED_PROJECT_LOCK_NOT_ADMITTED")
+
+
 def config_read(file: Path, *, uid: int, trust_uid: int | None = None) -> dict:
     if trust_uid is None:  # restricted synthetic test fixture only
         trust_uid = uid
@@ -192,8 +236,7 @@ def config_read(file: Path, *, uid: int, trust_uid: int | None = None) -> dict:
                 protected_trust_ancestors(Path(obj[k]))
             private_file(Path(obj[k]), uid=trust_uid, max_bytes=14000,
                          mode=mode)
-    need(Path(obj["worker_lock"]).parent == Path(obj["checkpoint_dir"]),
-         "SHARED_WORKER_LOCK_NOT_IN_PRIVATE_CHECKPOINT")
+    worker_lock_policy(obj, trust_uid=trust_uid)
     need(Path(obj["source_database"]).resolve()
          != Path(obj["checkpoint_dir"]).resolve(),
          "SOURCE_AND_PRIVATE_STATE_ALIAS")
@@ -645,17 +688,17 @@ def run_bounded(cfg: dict, *, now: datetime, uid: int,
     public_source_state(cfg, trust_uid=trust_uid)
     observed_unit = systemd_observer()
     unit_check(cfg, observed_unit)
-    lock = Path(cfg["worker_lock"])
-    fd = os.open(lock, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    lock, lock_mode = worker_lock_policy(cfg, trust_uid=trust_uid)
+    fd = os.open(lock, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) |
+                 getattr(os, "O_NONBLOCK", 0))
     try:
-        ls = os.fstat(fd)
-        need(stat.S_ISREG(ls.st_mode) and ls.st_uid == uid
-             and stat.S_IMODE(ls.st_mode) == 0o600
-             and ls.st_nlink == 1, "SHARED_PROJECT_LOCK_NOT_ADMITTED")
+        verify_worker_lock(fd, lock, uid=uid, gid=cfg["run_gid"], mode=lock_mode)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise ValueError("TRAFFIC_V2_RUNNER_HOLD_EXISTING_WORKER_BUSY") from exc
+        worker_lock_policy(cfg, trust_uid=trust_uid)
+        verify_worker_lock(fd, lock, uid=uid, gid=cfg["run_gid"], mode=lock_mode)
         dbpath = Path(cfg["source_database"])
         uri = "file:" + quote(dbpath.as_posix(), safe="/") + "?mode=rw"
         with closing(sqlite3.connect(uri, uri=True, timeout=1.0)) as db:
@@ -679,6 +722,8 @@ def run_bounded(cfg: dict, *, now: datetime, uid: int,
                     continue
                 observed_unit = systemd_observer()
                 unit_check(cfg, observed_unit)
+                worker_lock_policy(cfg, trust_uid=trust_uid)
+                verify_worker_lock(fd, lock, uid=uid, gid=cfg["run_gid"], mode=lock_mode)
                 result = verify_and_append(
                     db, cfg, day, folder, now, uid=uid,
                     trust_uid=trust_uid, observed_unit=observed_unit,
