@@ -88,13 +88,30 @@ recomputed from these bytes; any mismatch holds.
 6. Verify first newly certified public day in SQLite and both APIs, then
    independently observe a different day published by the **natural** timer.
 
+## One-day owner permit (alternative to recurring delegation)
+
+For the installed `authorization_mode=one_day`, first establish both genuine
+source witnesses and verify their signatures against the exact day certificate.
+Then prepare the exact `public_audience_v2_operator_permit.FIELDS` document,
+including the actual certificate SHA, current public matrix preimage, source
+commit, source DB dev/inode, loaded ingest unit, protected API and admitted
+renderer hashes. The permit expires within 60 minutes and binds a completed
+UTC day; it is not an authorization for another day or any future timer run.
+Use the existing owner Keychain on M1 with `--kind permit` after native local
+approval. The verifier still checks all live bindings and signature identity.
+The original upstream/classifier roles, their distinct public keys, physical
+local console requirement, and exact SHA confirmation remain unchanged.
+This source extension does not sign or publish a day. No delegation or ACTIVE
+revocation-state signature is required for a one-day permit; recurring
+publication continues to require its existing separate delegation admission.
+
 ## Native command signature (only after real source and local approval)
 
 The binary requires exactly these arguments in this fixed order:
 
     <reviewed-native-binary> --sign \
       --role <upstream|classifier|owner> \
-      --kind <day|delegation|state> \
+      --kind <day|permit|delegation|state> \
       --input /Users/<account>/Library/Application\ Support/AoE2WAR/TrafficV2SigningRequests/<role>/<canonical-name>.json \
       --signature-output /Users/<account>/Library/Application\ Support/AoE2WAR/TrafficV2SigningRequests/<role>/<new-name>.sig \
       --approve-sha256 <actual-full-64-character-SHA256>
