@@ -16,6 +16,7 @@ import unittest
 
 from scripts import public_audience_v2_day_admission as day
 from scripts import public_audience_v2_daily_delegation as delegation
+from scripts import public_audience_v2_operator_permit as permit
 from scripts.public_audience_v2_forward_ledger import RELEASE_SHA
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -37,6 +38,13 @@ def payload(kind: str) -> dict:
                    upstream_log_closed_through_utc=clock,
                    writer_receipts_closed_through_utc=clock,
                    total=100,potential=55,confirmed=20)
+        return obj
+    if kind=="permit":
+        obj={k:h for k in permit.FIELDS}
+        obj.update(schema=permit.SCHEMA,project="aoe2hdbets",day=d,
+                   approved_by="Emaren",gap_aware_api_and_chart=True,
+                   source_commit_sha="b"*40,source_database_dev=2064,source_database_ino=131074,
+                   expires_at_utc=(now+timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ"))
         return obj
     if kind=="delegation":
         obj={k:h for k in delegation.DELEGATION_FIELDS}
@@ -149,6 +157,26 @@ class NativeTrafficSigner(unittest.TestCase):
         self.check_native("owner","delegation",drift,False)
         drift=payload("state");drift["unexpected"]=True
         self.check_native("owner","state",drift,False)
+
+    def test_one_day_permit_owner_only_exact_schema_and_expiry(self):
+        obj=payload("permit")
+        self.check_native("owner","permit",obj)
+        for role in ("upstream","classifier"):
+            self.check_native(role,"permit",obj,False)
+        now=datetime.now(timezone.utc)
+        for field,value in [("schema",delegation.SCHEMA),("approved_by","other"),
+                            ("project","other"),("gap_aware_api_and_chart",1),
+                            ("source_database_dev",True),("source_database_ino",0),
+                            ("source_database_dev",-1),("source_database_ino",1.5),
+                            ("source_commit_sha","a"*39),("certificate_sha256","x"*64),
+                            ("day","2026-02-30"),("day",now.date().isoformat()),
+                            ("expires_at_utc",(now-timedelta(seconds=1)).isoformat()),
+                            ("expires_at_utc",(now+timedelta(minutes=61)).isoformat()),
+                            ("unexpected",True)]:
+            self.check_native("owner","permit",dict(obj,**{field:value}),False)
+        self.check_native("owner","permit",{k:v for k,v in obj.items() if k!="certificate_sha256"},False)
+        result=self.check_native("owner","permit",obj,False,sign=True)
+        self.assertIn("PHYSICAL_LOCAL_TERMINAL_REQUIRED",result.stderr)
 
     def test_headless_sign_refused_without_keychain_lookup(self):
         result=self.check_native("owner","state",payload("state"),False,sign=True)

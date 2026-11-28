@@ -48,6 +48,10 @@ let delegationFields=Set(["schema","delegation_id","project","approved_by",
  "traffic_api_source_sha256","website_gap_renderer_sha256","upstream_key_sha256",
  "classifier_key_sha256","historical_release_sha256","gap_aware_api_and_chart",
  "no_historical_corrections"])
+let permitFields=Set(["schema","project","day","certificate_sha256",
+ "source_commit_sha","public_preimage_sha256","source_database_dev","source_database_ino",
+ "ingest_service_loaded_sha256","traffic_api_source_sha256","website_gap_renderer_sha256",
+ "expires_at_utc","gap_aware_api_and_chart","approved_by"])
 let stateFields=Set(["schema","delegation_sha256","delegation_id","status",
                      "revision","effective_at_utc"])
 func validHex(_ value: Any?, length: Int = 64) -> Bool {
@@ -108,6 +112,34 @@ func check(_ obj:[String:Any], _ role:String, _ kind:String) {
                   String(writer.suffix(6))=="+00:00" || writer.hasSuffix("Z")
             else {hold("V3_FUTURE_OR_NON_UTC_DELIVERY_CLOCK")}
         }
+    case "permit":
+        guard role=="owner" else {hold("ROLE_KIND_DENIED")}
+        fields=permitFields;schema="traffic.public-audience.v2.one-day-operator-permit.v1"
+        let now=Date()
+        let dayFormatter=DateFormatter()
+        dayFormatter.calendar=Calendar(identifier:.gregorian)
+        dayFormatter.locale=Locale(identifier:"en_US_POSIX")
+        dayFormatter.timeZone=TimeZone(secondsFromGMT:0)
+        dayFormatter.dateFormat="yyyy-MM-dd"
+        dayFormatter.isLenient=false
+        guard obj["project"] as? String=="aoe2hdbets",
+          obj["approved_by"] as? String=="Emaren",
+          let gap=obj["gap_aware_api_and_chart"] as? NSNumber,
+          CFGetTypeID(gap)==CFBooleanGetTypeID(),gap.boolValue,
+          ["certificate_sha256","public_preimage_sha256","ingest_service_loaded_sha256",
+           "traffic_api_source_sha256","website_gap_renderer_sha256"].allSatisfy({validHex(obj[$0])}),
+          validHex(obj["source_commit_sha"],length:40),
+          let dev=obj["source_database_dev"] as? NSNumber,CFGetTypeID(dev) != CFBooleanGetTypeID(),
+          let ino=obj["source_database_ino"] as? NSNumber,CFGetTypeID(ino) != CFBooleanGetTypeID(),
+          let devInt=obj["source_database_dev"] as? Int,devInt>=0,
+          let inoInt=obj["source_database_ino"] as? Int,inoInt>0,
+          let day=obj["day"] as? String,day.count==10,
+          let start=dayFormatter.date(from:day),dayFormatter.string(from:start)==day,
+          day >= "2026-10-20",day < dayFormatter.string(from:now),
+          let expires=obj["expires_at_utc"] as? String,
+          expires.hasSuffix("Z") || expires.hasSuffix("+00:00"),
+          let expiry=dateUTC(expires),now<expiry,expiry<=now.addingTimeInterval(3600)
+        else {hold("ONE_DAY_PERMIT_BOUNDARY")}
     case "delegation":
         guard role=="owner" else {hold("ROLE_KIND_DENIED")}
         fields=delegationFields;schema="traffic.public-audience.v2.daily-delegation.v1"
@@ -220,6 +252,10 @@ print("REVIEW role=\(role) kind=\(kind) canonical_sha256=\(payloadSHA)")
 fputs("Type APPROVE \(String(payloadSHA.prefix(16))) \(role) to sign: ",stderr)
 guard readLine()=="APPROVE \(String(payloadSHA.prefix(16))) \(role)"
 else {hold("OWNER_DECLINED")}
+if kind=="permit" {
+    let (fresh,freshSHA)=input(path,role,kind)
+    guard fresh==payload,freshSHA==payloadSHA else {hold("APPROVED_PAYLOAD_CHANGED")}
+}
 let id=roles[role]!
 let attributes:[String:Any]=[
   kSecClass as String:kSecClassGenericPassword,
