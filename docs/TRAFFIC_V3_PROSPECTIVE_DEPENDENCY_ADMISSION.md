@@ -34,3 +34,20 @@ or proof of continuous observation. No new timer. All host execution requires
 existing ROOT floor and DATA capacity, worker priority and reviewed scope.
 
 Tests are invented-only, not authentic source evidence or finality.
+
+## Prospective registry witness (source-only)
+
+The registry witness adds transactional INSERT/UPDATE/DELETE observations for
+only `traffic_known_identities` and `traffic_visibility_rules`. Its private
+ledger stores registry name, operation and sequence, not visitor data. A short
+admitted BEGIN IMMEDIATE transaction must verify exact existing DDL and absent
+witness objects, install the triggers, and record the baseline before carry.
+The cutoff must match baseline registry digests, mutation sequence, exact
+schema definitions and SQLite schema version. Any committed mutation holds
+this zero-mutation path; rollback of an uncommitted change does not count.
+Ordinary source ingestion is outside the trigger scope. No historical day is
+admitted by this mechanism. SQLite database owners can change schema and
+history, so independently reviewed writer custody and source/schema continuity
+remain mandatory; equality alone is not tamper-proof. Existing runtime/geo,
+actual upstream delivery, source/ledger parity and signing gates remain intact.
+No automatic native installer or publication authorization is added here.
